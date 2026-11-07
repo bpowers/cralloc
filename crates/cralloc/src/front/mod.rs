@@ -2,7 +2,7 @@
 //!
 //! Each CPU number has a `Slab` in the static `SLABS`. A slab's hot word for a small class
 //! is the address of the next free slot of the magazine loaded for that class, or zero, or a
-//! marker; its cold part holds the CPU's spare magazines and the counters the idle check and
+//! marker; the rest of it holds the heads of the CPU's spare stacks and the counters the idle check and
 //! the drain use. The array is zero-initialized, and zero is a valid slab with no magazines,
 //! so nothing needs initializing before the first call.
 //!

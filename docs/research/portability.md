@@ -15,7 +15,7 @@ overcommit, `mlockall`.
 | musl, static | works, tested; `front::` tests in the gate | our own area, registered lazily |
 | musl, dynamic executable | expected to work, not tested | |
 | musl shared or preload library | not supported | the area's offset is a link-time constant only in an executable |
-| No registration (valgrind, seccomp, `glibc.pthread.rseq=0`) | correct, slow | every call takes the slow path; not measured, the design estimates tens of cycles |
+| No registration (valgrind, seccomp, `glibc.pthread.rseq=0`) | correct, slow | every call takes the slow path; not measured |
 | Miri | the allocator's handle does not exist | a program declares its allocator `#[cfg(not(miri))]` |
 
 Unless noted: Linux 7.2.9, glibc 2.43, musl 1.2.5 as Rust 1.99.1's target ships it, 2026-10-17 to
@@ -76,7 +76,7 @@ in every run with the destructor disabled. Joined threads are safe either way.
   One that kills on `arch_prctl` or `rseq` kills at the thread's first slow path. One that fails
   `rseq` is handled, by retiring the thread.
 - **The background thread.** musl keeps no record of threads created, so a process whose first
-  thread frees the memory gets no thread (`docs/design.md`, "Heartbeat").
+  thread frees the memory gets no thread (`docs/design.md`, "The background thread").
 
 ## The area's page offset
 

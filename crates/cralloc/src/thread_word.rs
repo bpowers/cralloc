@@ -1,7 +1,7 @@
 //! The background thread's word: one 64-bit word in the back end's state that says whether
 //! the thread exists and what it is doing, names the process generation it belongs to, and
-//! carries a request to look at the level of free memory (design: "Heartbeat", from "So there
-//! is a background thread"). Every slow path loads it once. The depot's side, the thread's
+//! carries a request to look at the level of free memory (design: "The background
+//! thread"). Every slow path loads it once. The depot's side, the thread's
 //! decision to park, is `depot::thread`; the heap's, its creation, is `heap::background`.
 //!
 //! **The word.** Bits 0 to 3 are the state, bit 4 is [`LEVEL`], bit 5 is [`SLEEPING`], and the

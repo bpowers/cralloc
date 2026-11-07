@@ -47,7 +47,7 @@ const _: () = assert!(GROWTH_STEP_HUGE_PAGES.is_power_of_two());
 /// The thread is woken when a step of growth comes due and pays it within its wake-up's
 /// latency, so a debt this large means the thread has not run (starved, throttled, or busy
 /// with a long round), and the bound on retained memory must not rest on the scheduler
-/// (design: "Heartbeat"). It bounds retained memory to the cap and about this much more while
+/// (design: "The background thread"). It bounds retained memory to the cap and about this much more while
 /// the thread lags.
 pub const GROWTH_UNPAID_HUGE_PAGES: usize = 8;
 

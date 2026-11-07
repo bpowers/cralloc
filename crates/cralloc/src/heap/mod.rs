@@ -300,7 +300,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     /// Starts the background thread if it is wanted, after a slow path that came through the
     /// Rust interface, from `seen`, the background thread's word as that slow path's one load
     /// read or left it. The C interface never starts it from a slow path, since its caller may
-    /// be the C library under its own locks (design: "Heartbeat").
+    /// be the C library under its own locks (design: "The background thread").
     #[inline]
     fn after_rust_slow_path(self, seen: Snapshot) {
         // The snapshot first: it is in a register, and the hook is a load from the heap.

@@ -1,5 +1,5 @@
 //! The depot's side of the background thread's word (`crate::thread_word`): the slow path's
-//! look at the word, and the thread's decision to sleep or park (design: "Heartbeat").
+//! look at the word, and the thread's decision to sleep or park (design: "The background thread").
 //!
 //! **Returning memory.** While the thread is awake or parked, returning memory to the OS is
 //! its work and not a slow path's. A slow path loads the word once, after its exchange and its
