@@ -8,7 +8,9 @@ magazines and objects.
 A pass means no interleaving within those bounds breaks the model's properties. It does not cover
 weak memory, since every step is atomic and sequentially consistent, or the Rust, whose schedule
 explorers follow these models by review, not proof (`back/models.rs` and `depot/interleave.rs` in
-`crates/cralloc/src`).
+`crates/cralloc/src`). `docs/research/memory-ordering.md` says which words those steps are true of
+and argues the rest; `armcheck.py` here checks by litmus test what that argument takes from Arm's
+memory model.
 
 A check expected to fail is kept on purpose: it shows the model can see a flaw, and that a rule is
 needed or a limit is real.
