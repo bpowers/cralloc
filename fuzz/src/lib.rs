@@ -4,13 +4,12 @@
 //! The allocator is the testkit's `target`, so pointing the testkit at cralloc points the
 //! fuzzers at it too. Setting `CRALLOC_FUZZ_MUTANT` to a mutant's name (`overlapping`,
 //! `short`, ...) wraps the subject in that mutant, which shows the fuzzer finds the bug.
-#![feature(cfg_sanitize)]
 
 use std::sync::OnceLock;
 
 use cralloc_testkit::mutants::Kind;
-use cralloc_testkit::subject::{CFns, Subject, ViaC};
-use cralloc_testkit::{Profile, run_bytes, target};
+use cralloc_testkit::subject::Subject;
+use cralloc_testkit::{Profile, run_bytes};
 
 /// Per-run caps that keep each input fast and the process far below libFuzzer's RSS limit.
 const MAX_SIZE: usize = 1 << 20;
@@ -42,16 +41,5 @@ pub fn fuzz<S: Subject + 'static>(data: &[u8], make: impl Fn() -> S) {
     };
     if let Err(f) = result {
         panic!("{f}");
-    }
-}
-
-/// The C functions under test. Under AddressSanitizer they are ASan's, whose `aligned_alloc`
-/// still enforces C11's size rule, so there the C library's table with that rule applied is
-/// used (a custom allocator's own `malloc` does not mix with ASan anyway).
-pub fn c_abi() -> ViaC<CFns> {
-    if cfg!(sanitize = "address") {
-        ViaC(CFns::LIBC_C11)
-    } else {
-        target::c_abi()
     }
 }
