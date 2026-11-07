@@ -235,7 +235,8 @@ fn the_domains_table_is_there_once_its_count_is(time: Duration) {
                 loop {
                     let over = done.load(SeqCst) != 0;
                     if domains.count() > 1 {
-                        for cpu in 0..32 {
+                        // Under Miri a simulated machine has eight CPUs.
+                        for cpu in 0..8 {
                             assert_eq!(domains.of(Some(cpu)).index(), cpu / 4);
                         }
                     }
