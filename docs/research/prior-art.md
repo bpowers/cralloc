@@ -4,11 +4,22 @@ cralloc has tcmalloc's front-end shape on glibc's rseq registration, mimalloc's 
 depot, Mesh's bitmaps and wasmalloc's layout-derived classes. It rejected whatever needs state in
 freed memory, an atomic per object, a lock, or a write the kernel now forbids.
 
-The path that decides the ranking is a free on another thread. Over 18 cross-thread jobs of small or
-mixed sizes in which every thread allocates, mimalloc takes 1.96 times jemalloc's time (geometric
-mean; geometric sd 1.39; range 0.75 to 2.79). Passing it the size changes nothing there: 1.02 times
-(sd 1.03, 22 jobs). Per-CPU tcmalloc beats its own per-thread mode by 1.40 times (sd 1.16, 22 jobs).
-Computed from the medians of ten rounds in the baselines of 2026-10-19 at `e96086d`.
+A free on another thread decides the ranking on jobs that hand small objects between threads, and
+not on everything. Over 18 such jobs of small or mixed sizes in which every thread allocates,
+mimalloc takes 1.96 times jemalloc's time (geometric mean; geometric sd 1.39; range 0.75 to 2.79).
+In the same session it takes 0.14 times jemalloc's on large objects crossing threads, 0.97 to 1.02
+on the RPC jobs and 0.44 to 1.72 on one thread, and has 12.5 times jemalloc's throughput on
+`xmalloc-test`. Passing mimalloc the size changes nothing across threads: 1.02 times (sd 1.03) over
+those 18 and the four where consumers only free. tcmalloc's per-thread mode takes 1.40 times its
+per-CPU mode (sd 1.16) over the same 22, and 0.92 on the large job. Computed from the medians of ten
+rounds in the baselines of 2026-10-19 at `e96086d`; [workloads.md](workloads.md), "The kernel
+suite", says what the jobs are.
+
+Real servers split. In the standings of 2026-10-28 at `2ff7322`, cycles a request at 70% load, means
+over five code placements, mimalloc is 2.8 to 4.2% ahead of jemalloc on the Connect log services, in
+4 of 5 placements and resolved only on HTTP/2 (permutation test, p = 0.04). It is 2.7 to 13.5%
+behind, ranges apart, on the order service and the log store ([workloads.md](workloads.md),
+"Servers").
 
 ## What we took
 
@@ -21,7 +32,8 @@ Computed from the medians of ten rounds in the baselines of 2026-10-19 at `e9608
   sets a `stopped` flag first. We exchange each word with a marker carrying the process's
   generation, so a fork child can ignore what its parent left.
 - **Whole-magazine exchange, from Bonwick and Adams.** It is tcmalloc's transfer cache with no lock
-  and no copy: two atomic instructions a magazine. Built per cache domain plus one shared stack.
+  and no copy: two atomic instructions a magazine. Built per cache domain plus one shared stack;
+  tcmalloc's own transfer cache sharded per L3, an experiment at 1%, is the nearest precedent.
 - **Pacing by bounded steps on slow paths, from mimalloc.** Built as a heartbeat paced by the bytes
   slow paths move. The first plan, one heartbeat per exchange, was dropped: a swap with a spare
   carries no maintenance now.
@@ -40,8 +52,9 @@ Computed from the medians of ten rounds in the baselines of 2026-10-19 at `e9608
 - **Growing in place, from wasmalloc's losing workload.** `realloc` doubling cost it a copy at every
   class change. Built as a move into a slot with room to grow.
 - **Grow on regret, shrink on a low-water mark, from everyone** ("How others size their buffers",
-  below). Stock grows only on a round trip that met contention. Depot stacks shed the depth an
-  interval did not need. The purge takes what two intervals' fills did not reach.
+  below). Stock, the spare magazines a CPU earns beyond its fixed limit, grows only on a round trip
+  that met contention. Depot stacks shed the depth an interval did not need. The purge takes what
+  two intervals' fills did not reach.
 - **The working method, from wasmalloc and verified-garbage.** See
   [verification.md](verification.md).
 
@@ -58,13 +71,15 @@ Computed from the medians of ten rounds in the baselines of 2026-10-19 at `e9608
   register our own only on musl ([portability.md](portability.md)).
 - **Intrusive free lists.** Writing a freed object costs its next user 7 to 27 ns across cores, and
   popping an array beats chasing a list by 1.7 cycles a pair in bursts, even with everything in L1.
-- **An atomic per object on a remote free.** mimalloc's locked instruction is about a quarter of its
-  cost above the floor, and the cache lines around it are the rest.
+- **An atomic per object on a remote free.** mimalloc's locked instruction is 3.5 ns. On the same-L3
+  exchange we infer it is about a quarter of mimalloc's cost above the floor, and the cache lines
+  around it the rest.
 - **Per-thread heaps.** State scales with threads, moves with them, and needs code at thread exit.
 - **tcmalloc's sampler and 16-bit header.** The sampler is a thread-local read-modify-write on every
-  malloc, and heap profiling is a non-goal. A narrow load on the loop-carried chain costs 5 to 7
-  cycles of forwarding, and one 64-bit word per class needs none. In isolation tcmalloc's sequence
-  runs at 4.50 to 4.82 cycles a pair against 4.0.
+  malloc, and heap profiling is a non-goal. A narrow load on the loop-carried chain would cost 5 to
+  7 cycles of forwarding. tcmalloc's feeds only the slot address and avoids that, so its sequence
+  runs at 4.50 to 4.82 cycles a pair against 4.0, 0.3 of it prefetch. One 64-bit word per class
+  needs no narrow load at all.
 - **Prefetch on the fast path.** tcmalloc's costs 0.3 cycles a pair in a tight loop, and our
   routines have none. Whether it pays on a real program was not measured.
 - **Per-class out-of-line entries.** The same as generic routines in tight loops. Under LTO a `Box`
@@ -83,8 +98,9 @@ Computed from the medians of ten rounds in the baselines of 2026-10-19 at `e9608
   placement, which gives up locality. Size-class segregation and reuse policy have been enough.
 - **`mremap` to move large blocks, `MADV_COLLAPSE`, 64 KiB multi-size huge pages.** The first adds
   only speed and splits the heap's mapping ([large-blocks.md](large-blocks.md)). The second costs
-  0.1 to 0.4 ms in a slow path for little ([memory.md](memory.md)). The third is a system-wide
-  setting, off on the reference host.
+  0.1 to 0.4 ms per dense 2 MiB on a slow path, about 6 ms for a unit being rebuilt, and an advice
+  change first, which takes the mapping lock, for little ([memory.md](memory.md)). The third is a
+  system-wide setting, off on the reference host.
 - **Stop-the-world resizing and learned sizes.** tcmalloc stops a CPU to move capacity. We keep
   fixed bounds plus stock ([magazines.md](magazines.md), "Sizing on evidence").
 - **Exporting C++ operators.** A throwing `new` cannot unwind through Rust frames, and exporting
@@ -127,8 +143,10 @@ to 1024 bytes skips that load, with the lookup `p & ~0xFFFF`. Then `xtid = tls_t
 page->xthread_id`, one compare for "mine, not full, no interior pointers". A local free goes on
 `page->local_free`, so a freed block is not reused until the page's `free` list runs dry. A remote
 free runs a compare-and-swap loop on `page->xthread_free`: it reads line 1 of the page struct, which
-the owner writes on every operation, then does a locked read-modify-write on line 2, per object.
-**[I]** The Rust `mimalloc` crate 0.1.52 calls `mi_free` and `mi_malloc_aligned`, and bundles 3.3.2.
+the owner writes on every operation, then does a locked read-modify-write on line 2, per object
+**[I]**.
+
+The Rust `mimalloc` crate 0.1.52 calls `mi_free` and `mi_malloc_aligned`, and bundles 3.3.2.
 
 **tcmalloc malloc** (`tcmalloc.cc`, `internal/percpu_tcmalloc.h`, `Pop`).
 
@@ -149,16 +167,18 @@ touched; an unsized one makes two dependent loads in a radix page map. `Push`: p
 slabs, `current = movzwq tmp`, `addl $0xffff0001, tmp`, `jnc overflow`, `slabs[current] = item`,
 `header = tmp`. A preempted push leaves a dead write above `current`.
 
-**What each costs**, cycles per allocate and free, pinned, fat LTO:
+**What each costs**, cycles per allocate and free. Hand-written loops, then real allocators through
+`GlobalAlloc` under fat LTO ([roofline.md](roofline.md) has the method and dates):
 
 | Shape | Pair | Note |
 |---|---:|---|
-| Bare magazine, everything hoisted | 2.0 | the floor |
-| cralloc, inlined, per-CPU under rseq | 4.2 to 5.3 | `docs/design.md`, "What the hardware says" |
-| tcmalloc's `Pop` and `Push`, in isolation | 4.50 to 4.82 | not the whole library |
-| glibc through `GlobalAlloc` | 11 | |
-| mimalloc through `GlobalAlloc` | 12.4 to 13.7 | 10.3 with sized free |
-| jemalloc through `GlobalAlloc` | 12.1 | |
+| Loop: bare magazine, everything hoisted | 2.00 | the floor |
+| Loop: per-CPU magazine under rseq | 3.93 to 4.02 | |
+| Loop: tcmalloc's `Pop` and `Push` | 4.50 to 4.82 | not the whole library |
+| cralloc | 4.96; 5.4 to 6.0 | executable form; default form |
+| glibc | 13.0 | 11.0 with `Box` |
+| mimalloc | 12.3 | 10.2 with sized free |
+| jemalloc | 12.1 | |
 
 Any path through two out-of-line calls costs at least 8.0, because a call and return take 4 whatever
 the body.
@@ -170,29 +190,28 @@ the body.
   by writing a CPU number. It removes the CPU-number load, and it depends on the kernel rewriting
   the field on every reschedule and tolerating user writes. Neither holds under glibc's registration
   on Linux 7.1 and later.
-- **Layout.** Each CPU has 4-byte class headers `{u16 current; u16 remaining_capacity}`, then
-  pointer arrays, each after a slot holding a pointer to itself with the low bit set, both underflow
-  sentinel and prefetch target.
 - **Cross-CPU.** Set `stopped[cpu]`, then `membarrier(PRIVATE_EXPEDITED_RSEQ, FLAG_CPU, cpu)`.
   `mm_cid` is behind a test-only experiment, and with it the real CPU is unknown, so it fences all
   of them.
 - **Registration.** tcmalloc defines its own 32-byte `__rseq_abi` and registers it with a raw system
-  call, which glibc's registration refuses **[I]**. Its tests expect working rseq only with
-  `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Our runner confirms the outcome: the same library reports
-  per-thread mode without the tunable and per-CPU mode with it. So a benchmark that does not set it
-  measures per-thread tcmalloc, and the system `libtcmalloc.so` is gperftools, a different
-  allocator.
+  call. Once glibc has registered, the kernel refuses another area with `EINVAL`, as we measured
+  with our own area on musl; that tcmalloc takes this path is read from source **[I]**. Its tests
+  expect working rseq only with `GLIBC_TUNABLES=glibc.pthread.rseq=0`. Our runner confirms the
+  outcome: the same library reports per-thread mode without the tunable and per-CPU mode with it. So
+  a benchmark that does not set it measures per-thread tcmalloc, and the system `libtcmalloc.so` is
+  gperftools, a different allocator.
 
 ## Slow paths and pacing
 
 **mimalloc.** Everything hangs off `page->free == NULL` (`src/page.c`). `_mi_malloc_generic` looks
 at the first page in the bin queue and swaps `local_free` into `free` in O(1). Otherwise it walks
 the queue, taking `xthread_free` with one compare-and-swap and walking it, one pointer chase per
-remotely freed object. It considers up to 4 candidates and prefers fuller pages, and full pages
-beyond 2 are abandoned. Extension builds at most 8 KiB of blocks at a time. A fresh page first tries
-to reclaim an abandoned one. Every 1000 generic calls it runs retired-page collection, and every
-10000 a full collect with arena purge. That is what "paced" means: bounded work per slow-path entry,
-at a rate set by free-list length, with no background thread. Statistics ride on the 16-bit
+remotely freed object. It considers up to 4 candidates and prefers fuller pages. A full page past a
+retain count of 2 is moved out of the queue, which in v3 abandons it. Extension builds at most 8 KiB
+of blocks at a time, and the source records that bump allocation did not help. A fresh page first
+tries to reclaim an abandoned one. Every 1000 generic calls it runs retired-page collection, and
+every 10000 a full collect with arena purge. That is what "paced" means: bounded work per slow-path
+entry, at a rate set by free-list length, with no background thread. Statistics ride on the 16-bit
 allocation counter, so there is no per-malloc sampling cost.
 
 **tcmalloc.** A front-end miss moves up to 128 pointers a batch to or from the transfer cache, a
@@ -201,8 +220,8 @@ lists by allocated count. A background thread does release, cache shuffling and 
 
 ## Cross-thread free
 
-- **mimalloc:** one compare-and-swap per object. v3 abandons full pages at once, so frees into them
-  take the multithreaded path, and the first free that finds a page unowned claims and collects it.
+- **mimalloc:** one compare-and-swap per object. Frees into an abandoned page take the multithreaded
+  path, and the first free that finds a page unowned claims and collects it.
 - **tcmalloc:** a push to the current CPU's array. Cost appears only at overflow: one transfer-cache
   lock per batch, and a symmetric refill on the producer. Objects recirculate without being
   re-sorted by address, which is why its span lists exist. **[I]**
@@ -217,17 +236,16 @@ lists by allocated count. A background thread does release, cache shuffling and 
 
 **Why tcmalloc and jemalloc were expected to beat mimalloc on multithreaded Rust.** The project
 began from internal Rust services where `tikv-jemallocator` beat an allocator of mimalloc v3's
-shape. Our microbenchmarks agree, and real servers split. In the standings of 2026-10-28 at
-`2ff7322`, cycles a request at 70% load, mimalloc is 3 to 4% ahead of jemalloc on the Connect log
-services and 3 to 13% behind on the order service and the log store. The hypotheses we started with:
+shape. Our cross-thread microbenchmarks agree, and real servers split (see the top of this note).
+The hypotheses we started with:
 
 | Hypothesis | Status |
 |---|---|
-| Per-object against per-batch cross-thread cost | Supported. One locked instruction per free is 3.5 ns, about a quarter of mimalloc's excess, and the rest is cache lines. Across L3s it costs 2.1 to 2.7 times jemalloc on a pipeline |
-| Free touches shared metadata because the crate calls unsized `mi_free` | Refuted across threads. The sized call helps one thread alone (1.9 to 2.1 ns against 2.6 to 2.7), and 1.02 times over 22 cross-thread jobs |
+| Per-object against per-batch cross-thread cost | Supported, by inference. One locked instruction per free is 3.5 ns, on the same-L3 exchange about a quarter of mimalloc's cost above the floor, and the rest is cache lines. Across L3s it costs 2.1 to 2.7 times jemalloc on a pipeline |
+| Free touches shared metadata because the crate calls unsized `mi_free` | The unsized call is refuted as the cause: the sized call helps one thread alone (1.9 to 2.1 ns against 2.6 to 2.7) and is 1.02 times over 22 cross-thread jobs, on 3.5.3. It touches the same line, since even `mi_free_size` loads `xthread_id`, which is the row above |
 | v3's abandoned-page path | Not tested. `MIMALLOC_PAGE_FULL_RETAIN=-1` and `MIMALLOC_PAGE_RECLAIM_ON_FREE=1` are the experiment |
 | Reuse distance from `local_free` | Not isolated. Our churn lead is consistent with it |
-| Thread count and migration | Not tested. Runs are pinned |
+| Thread count and migration | Not tested. Runs keep threads on a fixed set of CPUs |
 | Back end: mimalloc purges after a delay, tcmalloc keeps huge pages | Not tested as a cause |
 
 ## Back ends
@@ -235,12 +253,11 @@ services and 3 to 13% behind on the order service and the log store. The hypothe
 - **mimalloc.** Arenas of 64 KiB slices, reserved 1 GiB at a time, with all state in atomic bitmaps.
   Pages are 64 KiB, 512 KiB or 4 MiB. Fragmentation control is "prefer fuller pages" plus
   abandonment. The purge delay is 1 s, times 4 in arenas.
-- **Temeraire.** Choose the unit of release, the 2 MiB huge page, and pack so that whole huge pages
-  are dense or empty. Ordering by longest free range avoids spoiling long runs, and counting
-  allocations predicts emptiness better than counting pages.
+- **Temeraire** (from its design documents). Choose the unit of release, the 2 MiB huge page, and
+  pack so that whole huge pages are dense or empty. Ordering by longest free range avoids spoiling
+  long runs, and counting allocations predicts emptiness better than counting pages.
 - **wasmalloc.** One last-in first-out list beat mimalloc's two lists once measured. 16-bit header
-  fields and a cold call on a common transition were expensive. Footprint was one page per touched
-  bin.
+  fields and a cold call on a common transition were expensive.
 
 ## What Rust tells the allocator
 
@@ -288,6 +305,9 @@ measured as a low-water mark over a window shrinks it, and a fixed bound clamps 
 | cralloc depot shed | a push | the low-water mark of an interval | the domain cap; the shared target |
 | cralloc frontier | a fill that reaches higher | pages above two intervals' frontiers, down to the floor | the cap, charged to growth |
 
+The frontier is the highest slot fills reached, and the floor and the cap are constants on free
+resident memory (`docs/design.md`, "Sizing the caches", "Returning memory and huge pages").
+
 Lessons:
 
 - **The shrink must be slower than the growth,** or a buffer that is exactly right looks idle.
@@ -295,9 +315,11 @@ Lessons:
   eighth a second.
 - **Contention is the cost signal for a shared tier,** because it is free to observe: Bonwick and
   UMA on their locks, our stock on a failed compare-and-swap.
-- **A round trip is one useful signal, not the rule.** A miss on a one-way flow says nothing a
-  bigger buffer would fix, but only tcmalloc's growth past two batches asks for a round trip. Linux
-  grows on a plain refill by design, since a CPU that only allocates holds no idle pages.
+- **A round trip sizes a buffer; the rate of a one-way flow sizes a batch.** Only tcmalloc's growth
+  past two batches asks for a round trip. tcmalloc, jemalloc and Linux all grow transfers on runs in
+  one direction, and magazines of 1,024 slots moved our one-way pipelines by 4 to 20%
+  ([magazines.md](magazines.md)). Linux grows on a plain refill by design, since a CPU that only
+  allocates holds no idle pages.
 - **One-way ratchets fail.** glibc's mmap threshold only grows, and rpmalloc dropped its 1.3
   thread-cache rule in 1.4.
 - **Learned models did not survive.** LLAMA's lifetimes became a fixed span-capacity threshold in
@@ -308,6 +330,9 @@ Lessons:
   stops the limit spiralling.
 - **Nobody derives thresholds from costs.** tcmalloc's source calls its scores "intuition", UMA's
   constants are "somewhat arbitrary", Linux's decay is "kind of arbitrary".
+- **Others' mechanisms that went back.** jemalloc added a peak-demand window modelled on tcmalloc in
+  2025 and reverted it about three months later. Linux's detector of high-order free runs fired too
+  eagerly (iperf3 -30%), and its threshold was raised in 2025.
 
 **tcmalloc** (`cpu_cache.h`, `background.cc`). All resizing runs in one background loop every
 second. A miss grows a class by one below two batches, and refills ramp by `batch << successive`, up
@@ -339,15 +364,12 @@ by size, a main and a spare per CPU, a barn of 10 full and 10 empty per node. No
 **Others.** mimalloc 3.5 is all fixed: purge 4 s after an arena's first range is scheduled, so a
 range freed just before it goes at once. An unmerged snmalloc branch has a large-object cache whose
 budget grows by the excess of misses over stale flushes and shrinks by half the excess of flushes.
-glibc 2.43 raises its mmap threshold to the size of any mmapped chunk freed, up to 32 MiB, and never
-lowers it.
 
 **Managed runtimes.** GOGC works because GC CPU per byte allocated is about scan work over headroom,
-an exchange rate users can reason about. Go's scavenger retains the goal plus 10%, works at 1% of
-CPU, and skips chunks dense in the current or last cycle. G1 doubled `GCTimeRatio` from 12 to 24
-once shrinking became real, because the old value shrank heaps too far. TMO (Meta, ASPLOS 2022)
-reclaims `current * 0.0005 * max(0, 1 - PSI / 0.1%)` every 6 s, one setting for all services, saving
-20 to 32% of memory.
+an exchange rate users can reason about. G1 doubled `GCTimeRatio` from 12 to 24 once shrinking
+became real, because the old value shrank heaps too far. TMO (Meta, ASPLOS 2022) reclaims `current *
+0.0005 * max(0, 1 - PSI / 0.1%)` every 6 s, one setting for all services, saving 20 to 32% of
+memory.
 
 ## Open questions
 
