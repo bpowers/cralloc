@@ -38,7 +38,7 @@ plan.sh DIR OUTDIR 1 servers "connect log" 00-16 cra,jem,tcm,mim,gli >> DIR/queu
 | Real servers | `plan.sh`: `router graphql`; `session.sh`: `servers-thread` jobs of SurrealDB and Qdrant, `--mem-cap 10G` or `12G` | `servers.py`, `heapsum.py` |
 | Long-run memory | `drift/` (below) | `drift/summary.py`, `drift/redis_summary.py` |
 | Batch programs | `session.sh`: `apps` job `datafusion tpch sf3 t4`, six rounds; `tpch.py OUT WORKDIR --rounds 4` under `scripts/measure --both-l3` | `benchrun report`; `tpch.py` prints its table as it runs |
-| Kernel suite, five to ten rounds | `session.sh`: `full`, two groups of jobs a session, every allocator | `compare.py` |
+| Kernel suite, five to ten rounds | `session.sh`: `full`, two groups of jobs a session, every allocator | `compare.py`, `groups.py` |
 
 `--only` takes `=NAME` for one job exactly. `benchrun list --suite NAME` prints a suite's jobs.
 `padsweep.py` combines sessions of `benchrun layout --layouts pads`, the runner's own pad builds.
