@@ -531,7 +531,10 @@ mod tests {
                 size += size / 16;
             }
             assert!(moved > 0, "{shift}");
-            assert_eq!(most, STAGGER_LINES + STAGGER_PAGES_MAX as usize * g.page_size());
+            assert_eq!(
+                most,
+                STAGGER_LINES + STAGGER_PAGES_MAX as usize * g.page_size()
+            );
         }
         let plan = Geometry::DESIGN.largest_plan();
         for size in [40 << 10, 1 << 20, 64 << 20] {
@@ -679,8 +682,8 @@ mod tests {
                             panic!("a room of at most a region is a slot: {room}");
                         };
                         let pages = stagger_pages(g, slot.size()) as usize;
-                        let most = STAGGER_LINES - STAGGER_STEP
-                            + pages.saturating_sub(1) * g.page_size();
+                        let most =
+                            STAGGER_LINES - STAGGER_STEP + pages.saturating_sub(1) * g.page_size();
                         for len in [slot.size(), slot.size() - most] {
                             assert!(
                                 stays_after_shrink(size, len, plan),

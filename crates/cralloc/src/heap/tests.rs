@@ -2627,3 +2627,6 @@ mod lean_realloc {
         }
     }
 }
+
+/// Whole heaps on simulated kernels at their real size.
+mod kernels;

@@ -964,7 +964,11 @@ impl Layout {
             return unit.start;
         }
         let first = ((self.slot_bytes(slot) + into) >> self.page_shift) as u32;
-        if first < unit.start { unit.start } else { first }
+        if first < unit.start {
+            unit.start
+        } else {
+            first
+        }
     }
 
     /// The slot a block starting at byte `offset` of the region is in, and how far into the

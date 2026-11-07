@@ -8,8 +8,8 @@
 //!   own huge page and page. The names end `_HUGE_UNITS` and `_PAGE_UNITS`.
 //! - **A bound on the kernel's work** is pages, whatever their size: the kernel's cost is per page
 //!   (81 ns a 16 KiB page, 81 to 96 a 4 KiB page on the reference machine,
-//!   `docs/research/firestorm.md`, "What a page costs"), so the same number of pages takes about
-//!   the same time on every kernel. The names end `_PAGES`.
+//!   `docs/research/machine-aarch64.md`, "What other calls charge"), so the same number of pages
+//!   takes about the same time on every kernel. The names end `_PAGES`.
 //! - **A rule about the kernel's huge page** is that page: what one costs when it is wrong is a
 //!   fraction of what it holds. The names end `_HUGE_PAGES`. On a kernel whose huge page is over
 //!   the retained cap, or larger than a region, these find none (`Geometry::in_regions_of`).
@@ -216,9 +216,10 @@ pub const TAIL_SPARSE_PAGES: u32 = 2;
 pub const TAIL_SPLIT_SHARE: u32 = 4;
 
 /// Whether a step on a request's slow path may ask the kernel to split a huge page: only one that
-/// is a huge unit, 2 MiB. A split of 32 MiB takes 1.0 to 1.75 ms (`docs/research/firestorm.md`,
-/// "What a page costs"), and a millisecond spent there once a second is a server's tail. Larger
-/// ones are split by the background thread and `collect`, and otherwise stay whole.
+/// is a huge unit, 2 MiB. A split of 32 MiB takes 1.0 to 1.8 ms (`docs/research/machine-aarch64.md`,
+/// "Huge pages: worth having at 2 and 32 MiB, off at 512 MiB"), and a millisecond spent there once
+/// a second is a server's tail. Larger ones are split by the background thread and `collect`, and
+/// otherwise stay whole.
 #[inline(always)]
 pub const fn request_may_split(geometry: Geometry) -> bool {
     geometry.huge_page_size() <= geometry.huge_unit()
@@ -264,7 +265,7 @@ pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 /// level: 64 buffers of 4 MiB written round-robin took 7.9 ns an element at slot starts and 0.74
 /// to 0.80 staggered (`docs/research/program-effects.md`, "Order, and lines and pages"). 64 bytes
 /// on every target, though `lined::LINE` is 128 on aarch64: that is a bound for false sharing,
-/// where this is about sets, and the L1 lines of every core here are 64 bytes.
+/// where this is about sets, and every L1 we know of indexes by 64.
 pub const STAGGER_STEP: usize = 64;
 
 /// The number of distinct line staggers: 64, so they span 4 KiB, which is every set of an L1 of 64
@@ -277,8 +278,9 @@ pub const STAGGER_LINES: usize = STAGGER_STEP * STAGGER_SLOTS;
 
 /// The most whole pages a block's stagger moves it over: 32. Lines alone leave buffers written in
 /// turn on the same pages' numbers, which index the TLB's sets, when slots are spaced by a power
-/// of two: 64 buffers on a kernel with pages of 16 KiB took 3.2 to 7.5 ns an element with lines
-/// alone and 0.46 to 0.53 with pages too (`docs/research/large-blocks.md`, "Staggering by pages").
+/// of two: 64 buffers in slots of 1,024 pages of 16 KiB took 7.5 ns an element with lines alone and
+/// 0.46 with pages too (`docs/research/machine-aarch64.md`, "Blocks written in turn: the stagger
+/// needs pages as well as lines").
 pub const STAGGER_PAGES_MAX: u32 = 32;
 
 /// The share of a slot the page term may take: an eighth. So the room costs a class at most one

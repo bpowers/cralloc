@@ -5581,3 +5581,6 @@ mod tail_protocol;
 
 /// A walk's class for a region comes from the published tag (`back::tags`).
 mod published_tag;
+
+/// The heap's rules on simulated kernels at their real size.
+mod kernels;
