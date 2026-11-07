@@ -132,7 +132,7 @@ alternates L3s between neighbours, `both` fills one then the other.
   land ([program-effects.md](program-effects.md)).
 - **`churn live=N`:** free a random object and allocate another. `live=100` sits in L1: 21.6, 37.3,
   33.9, 45.3, 34.8 cycles an operation. `live=10M` reaches DRAM: 208, 299, 245, 426, 457, and the
-  suite's largest peak, about 1.1 GiB.
+  suite's largest peak, 1.0 to 1.2 GiB by allocator.
 - **`map btree 1M` ("BTreeMap"), `map hash 1M` ("HashMap"), `tree depth=18` and `20` ("the Box
   tree"), `json`:** build and drop, where mimalloc's huge pages tell. `map hash` 533, 609, 636, 462,
   1,108 cycles an entry; `json 32Mi` 16.0, 28.8, 23.4, 16.8, 22.8 cycles a byte.

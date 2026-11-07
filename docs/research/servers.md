@@ -184,9 +184,9 @@ mini-redis and Sōzu are controls: every allocator within 1.2% on both axes.
   separated from misses).
 - **Saturation agrees.** Saturated rate against cralloc's, one code placement, three rounds,
   geometric mean over the ten jobs: jemalloc 0.954 (x1.04), tcmalloc 0.949 (x1.05), mimalloc 0.941
-  (x1.07), glibc 0.806 (x1.14). These are single builds of jobs that move 2.5 to 5% with placement,
-  so a lead under about 3% is not resolved; cralloc's rate is the highest or level on every job that
-  allocates much.
+  (x1.07), glibc 0.806 (x1.14). These are single builds of jobs that move 1.4 to 6.4% with
+  placement, so a lead under about 3% is not resolved; cralloc's rate is the highest or level on
+  every job that allocates much.
 
 The program's misses by source, for cralloc and jemalloc only, are in
 [program-effects.md](program-effects.md). Nothing here separates glibc's or mimalloc's stalls into
@@ -418,7 +418,8 @@ instructions, seen under cralloc and tcmalloc at some placements; the same binar
 nothing points at the allocator, and no run was caught.
 
 **The Connect log service** made `realloc` the largest cost and showed the tail above. A build's
-number stands for any point in 2.5 to 5%, since its protobuf decoder is placement-sensitive
+number stands for any point in a range of 3.1 to 3.7% on cralloc and 5.0 to 6.4% on the median
+allocator, since its protobuf decoder is placement-sensitive
 ([program-effects.md](program-effects.md)). snmalloc takes 1.7 to 2 times every other allocator's
 cycles here, in both idle modes, and is mid-field elsewhere.
 

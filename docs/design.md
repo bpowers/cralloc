@@ -237,7 +237,7 @@ assigned to a class on demand and holds only objects of that class, at
 `region_base + origin + index * class_size`. A small class's origin is a few whole pages,
 different for each class, so that the first pages of the classes in use do not all share
 the low page-number bits that index the TLB's sets; the pages below it are never committed,
-so it costs address space and nothing else. A large class's origin is zero. A 4096-byte
+so it costs address space and no memory. A large class's origin is zero. A 4096-byte
 table records the class of each region.
 
 A class takes a region in two steps: it writes its tag in the table, and then names the

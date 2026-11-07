@@ -181,7 +181,7 @@ impl Plan {
     /// alignment, so every slot keeps the alignment the class gives, and it lies in the first
     /// [`ORIGIN_SHARE`]th of a region: far inside the span in the design's regions, and in the
     /// simulator's small ones a few pages, so that the tests that run there see origins too.
-    /// The pages below it are never committed: it costs address space only.
+    /// The pages below it are never committed: it costs address space, not memory.
     #[inline(always)]
     pub const fn slot_origin(self, class: Class) -> usize {
         if !class.is_small() {

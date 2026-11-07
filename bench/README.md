@@ -80,7 +80,7 @@ allocators the summary also prints each one's mean and range over the layouts, a
 against the first by the first layout's median (what single builds compare) and by the mean
 over the layouts. Run one round a session and combine the sessions with
 `standings/padsweep.py`, or with `standings/servers.py`, which also says whether each difference
-is resolved or inside the range placement alone covers. The server jobs of `rpc-server` move by 2.5 to 5% this way
+is resolved or inside the range placement alone covers. The server jobs of `rpc-server` move by several percent this way
 (`docs/research/measuring.md`, "One number from each of two builds measures where the code
 landed").
 

@@ -307,7 +307,7 @@ and back 376k; a fresh page 357k to 389k. The 64 Vecs went from 5.69 to 3.97 cyc
 block of 2 MiB or more (2026-10-24 at `46126f0`) showed gains on batch programs and none on servers
 ([program-effects.md](program-effects.md)). On memory a wrong guess has no ceiling but the block:
 four blocks of 64 MiB with one store in 1/64 of the pages hold 256 MiB against 16, and each life
-costs 12,373 kcycles against 631. A block written whole and reused pays 25 times, mostly because an
+costs 12,373k TSC ticks against 631k. A block written whole and reused pays 25 times, mostly because an
 advised slot goes back at its free. With 130 free 2 MiB blocks on the host a life slowed up to 17
 times in direct compaction, and khugepaged fills in any advised range with one page present.
 `MADV_COLLAPSE` on a sparse range fills every page. Evidence that could separate them, none built:
@@ -341,8 +341,8 @@ so a tenant that writes what it is given pays what it always did.
 
 *2026-10-24 at `226aede`, in one binary.* DataFusion, the order service and the log store are level.
 
-- **The floor is 16 MiB.** Sixteen `mincore` calls at about 650 cycles and a `madvise` are about 12k
-  cycles: 6% of an 8 MiB life with a sixteenth written, 2% at 16 MiB, 0.4% at 64.
+- **The floor is 16 MiB.** Sixteen `mincore` calls at about 650 TSC ticks and a `madvise` are about
+  12k ticks: 6% of an 8 MiB life with a sixteenth written, 2% at 16 MiB, 0.4% at 64.
 - **The cut is one in sixteen.** A fault costs about thirteen times clearing a resident page (1.35
   against 0.1 k TSC ticks), so a tenant that writes more than a thirteenth is cheaper kept and cleared.
   A dense run that meets one sample can reach about an eighth, and its next life costs about 1.6

@@ -266,13 +266,13 @@ pub const KEPT_OUTGROWN_HUGE_PAGES: usize = 32;
 /// to be zero, so that nothing was cleared and none of its pages is resident, is marked
 /// (`Back::mark_unwritten`), and its free looks at a sample of its pages to see whether the
 /// tenant left it mostly unwritten: 8, or 16 MiB. Not a bound on risk, since both outcomes of
-/// the look are ordinary frees, but the size at which the look's fixed cost, about 12k cycles
+/// the look are ordinary frees, but the size at which the look's fixed cost, about 12k TSC ticks
 /// for the sample and the `madvise`, is under 3% of the life of a block whose tenant writes a
 /// sixteenth of it (`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
 pub const UNWRITTEN_FLOOR_HUGE_PAGES: usize = 8;
 
 /// How many pages of a marked block's extent its free looks at, one `mincore` of one page each,
-/// the middle page of each of this many equal parts: 16. Each costs about 650 cycles, present
+/// the middle page of each of this many equal parts: 16. Each costs about 650 TSC ticks, present
 /// or absent. Above the floor, 16 tell a block written in a sixteenth from one written in
 /// full, which is all the rule asks.
 pub const UNWRITTEN_SAMPLES: usize = 16;
