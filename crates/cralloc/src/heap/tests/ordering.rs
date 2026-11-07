@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::stress::{FULL, LEDGER_BYTES, QUICK, Rounds, count, own, spread};
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -126,51 +126,6 @@ fn blocks_keep_their_last_owners_writes_through_magazines_fully() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn blocks_keep_their_last_owners_writes_through_drains_fully() {
     blocks_keep_their_last_owners_writes(FULL, true);
-}
-
-/// A program may pass a block to another thread with a relaxed store and have that thread free
-/// it, if neither touches it after: C and Rust ask a free to be ordered only after the block's
-/// last use, not after its allocation. The free then runs with no happens-before edge from
-/// anything that made the block. On a fresh heap each round, so that the first block's free races
-/// the heap's own start.
-fn a_block_passed_by_a_relaxed_store_can_be_freed(time: Duration) {
-    let rounds = Rounds::of(time, 3);
-    let mut round = 0;
-    while rounds.go_on(round) {
-        round += 1;
-        let heap = SimHeap::<crate::os::sim::Standard>::new();
-        let passed = AtomicPtr::<u8>::new(ptr::null_mut());
-        let l = layout(48, 8);
-        spread(2, |me| {
-            if me == 0 {
-                // SAFETY: a valid layout.
-                let p = unsafe { heap.alloc(l) };
-                assert!(!p.is_null());
-                passed.store(p, Ordering::Relaxed);
-            } else {
-                let p = loop {
-                    let p = passed.load(Ordering::Relaxed);
-                    if !p.is_null() {
-                        break p;
-                    }
-                    core::hint::spin_loop();
-                };
-                // SAFETY: allocated with this layout, freed once.
-                unsafe { heap.dealloc(p, l) };
-            }
-        });
-    }
-}
-
-#[test]
-fn a_block_passed_by_a_relaxed_store_can_be_freed_quickly() {
-    a_block_passed_by_a_relaxed_store_can_be_freed(QUICK);
-}
-
-#[test]
-#[ignore = "slow: run with scripts/gate --all"]
-fn a_block_passed_by_a_relaxed_store_can_be_freed_fully() {
-    a_block_passed_by_a_relaxed_store_can_be_freed(FULL);
 }
 
 /// The real routines on the real kernel: plain loads and stores on the fast paths, and

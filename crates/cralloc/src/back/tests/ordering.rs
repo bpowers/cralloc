@@ -11,7 +11,9 @@ use super::super::{Kind, State};
 use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Shape, SimOs, Standard};
 use crate::stress::{FULL, Gate, LEDGER_BYTES, QUICK, Rounds, count, jitter, own, spread};
-use core::ptr;
+use core::ptr::{self, NonNull};
+use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::Ordering::Relaxed;
 use std::boxed::Box;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -150,7 +152,11 @@ fn a_large_free_and_claim_hand_over_what_the_last_owner_wrote(time: Duration) {
             let block = back.alloc(class, size).expect("a slot");
             // SAFETY: a slot this thread now holds, of at least the ledger's size.
             unsafe { own(block.ptr.as_ptr()) };
-            assert_eq!(back.size(block.ptr.as_ptr()), Some(size), "a stale size word");
+            assert_eq!(
+                back.size(block.ptr.as_ptr()),
+                Some(size),
+                "a stale size word"
+            );
             seen.insert(block.ptr.addr().get());
             owned += 1;
             back.free(block.ptr, class);
@@ -225,6 +231,59 @@ fn racing_classes_keep_their_regions_apart_quickly() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn racing_classes_keep_their_regions_apart_fully() {
     racing_classes_keep_their_regions_apart(FULL);
+}
+
+/// A program may pass a block to another thread with a relaxed store and have that thread free
+/// it, if nothing touches the block after its allocation: C asks a free to be ordered only after
+/// the block's last use. The free then runs with no happens-before edge from the claim or the carve
+/// that made the block, on a fresh region of a fresh class, so that it races the tag, the watermark
+/// and the summary words. What it reads it reads through the pointer, and an address dependency
+/// orders those loads behind the load of the pointer (`docs/research/memory-ordering.md`, "A
+/// block passed with no order"). The heap itself is published first: that word has no such
+/// dependency.
+fn a_block_passed_with_no_order_can_be_freed(time: Duration) {
+    let rounds = Rounds::of(time, 3);
+    let mut round = 0;
+    while rounds.go_on(round) {
+        round += 1;
+        let state = Box::new(State::new(SimOs::<Standard>::new()));
+        state.get_or_reserve().unwrap();
+        let passed = AtomicPtr::<u8>::new(ptr::null_mut());
+        let classes = [class(48), class(2048), class(40 << 10)];
+        spread(2, |me| {
+            let back = state.get().unwrap();
+            for class in classes {
+                if me == 0 {
+                    let block = back.alloc(class, class.size()).expect("a slot");
+                    passed.store(block.ptr.as_ptr(), Relaxed);
+                    while !passed.load(Relaxed).is_null() {
+                        core::hint::spin_loop();
+                    }
+                } else {
+                    let block = loop {
+                        if let Some(block) = NonNull::new(passed.load(Relaxed)) {
+                            break block;
+                        }
+                        core::hint::spin_loop();
+                    };
+                    assert_eq!(back.lookup(block.as_ptr()), Some(Kind::Slot(class)));
+                    back.free_by_address(block);
+                    passed.store(ptr::null_mut(), Relaxed);
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn a_block_passed_with_no_order_can_be_freed_quickly() {
+    a_block_passed_with_no_order_can_be_freed(QUICK);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_block_passed_with_no_order_can_be_freed_fully() {
+    a_block_passed_with_no_order_can_be_freed(FULL);
 }
 
 /// A class's layout, kept the first time any thread works it out: a reader that sees the last

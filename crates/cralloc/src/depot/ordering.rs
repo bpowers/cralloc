@@ -355,7 +355,9 @@ mod kernel_fence {
         let stop = AtomicU64::new(0);
         let results = spread(2, |me| {
             let mut ahead = 0;
-            if me == 0 {
+            // The writer on the higher CPU: a performance core, on a machine that numbers its
+            // efficiency cores first, and on the M1 those are the ones whose stores pass.
+            if me == 1 {
                 // SAFETY: a plain query.
                 target.store(unsafe { sched_getcpu() }, SeqCst);
                 let mut n = 0u64;
@@ -365,6 +367,9 @@ mod kernel_fence {
                     b.0.store(n, Relaxed);
                 }
             } else {
+                while target.load(SeqCst) < 0 {
+                    core::hint::spin_loop();
+                }
                 let mut round = 0;
                 while rounds.go_on(round) {
                     round += 1;
@@ -372,7 +377,7 @@ mod kernel_fence {
                     if fenced {
                         membarrier(Some(target.load(SeqCst)));
                     } else {
-                        // Keep the loads apart in the compiler's eyes only.
+                        // So that only the order of the writer's stores can show.
                         fence(core::sync::atomic::Ordering::Acquire);
                     }
                     let low = a.0.load(Relaxed);
