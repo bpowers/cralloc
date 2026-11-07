@@ -214,20 +214,22 @@ pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
 pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 
 /// A large block whose alignment allows it starts this many bytes past its slot's start for
-/// each step of its slot's index, over `STAGGER_SLOTS` slots: 64, a cache line, so that the
+/// each step of its slot's index, over `STAGGER_SLOTS` slots: a cache line, so that the
 /// same offset in large blocks of one class falls in different cache sets. Slots are spaced by
 /// their class size, often a power of two, and buffers walked together at slot starts compete
 /// for one set of every cache level: 64 buffers of 4 MiB written round-robin took 7.9 ns an
 /// element at slot starts and 0.74 to 0.80 staggered (`docs/research/program-effects.md`,
 /// "Order, and lines and pages").
-pub const STAGGER_STEP: usize = 64;
+pub const STAGGER_STEP: usize = crate::lined::LINE;
 
-/// The number of distinct staggers: 64, so they span a page, 4 KiB, which is every set of the
-/// L1 and 64 sets apart in the L2. The heap gives a large request this much more room, so that
-/// any stagger fits; the room costs address space, and at most one more page of memory.
+/// The number of distinct staggers: 64, so on x86-64 they span a page, 4 KiB, which is every set
+/// of the L1 and 64 sets apart in the L2. The heap gives a large request this much more room, so
+/// that any stagger fits; the room costs address space, and at most one more page of memory where
+/// a page is at least this long.
 pub const STAGGER_SLOTS: usize = 64;
 
-/// The room a staggered block needs beyond its size: `STAGGER_STEP * STAGGER_SLOTS`, 4 KiB.
+/// The room a staggered block needs beyond its size: `STAGGER_STEP * STAGGER_SLOTS`, 4 KiB on
+/// x86-64 and 8 KiB on aarch64.
 pub const STAGGER_ROOM: usize = STAGGER_STEP * STAGGER_SLOTS;
 
 /// A large block that moves is copied in pieces of this many huge pages, and the pages of the

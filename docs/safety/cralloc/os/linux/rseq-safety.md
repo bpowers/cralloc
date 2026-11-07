@@ -52,7 +52,7 @@ only the registered area, which the thread registered (AREA-04), and nothing els
 **Obligations.** The call reads 8 bytes from the new set and writes 8 to the old one; changing
 the thread's signal mask is the caller's to do.
 
-**Proof.** Both pointers are of live locals of 8 bytes, the kernel's `sigset_t` on x86-64,
+**Proof.** Both pointers are of live locals of 8 bytes, the kernel's `sigset_t` on x86-64 and aarch64,
 whose size is passed. The kernel ignores `SIGKILL` and `SIGSTOP` in the set. The only caller is
 the destructor that retires an exiting thread's area (AREA-05), which blocks signals for two
 system calls and restores the mask it found, so code that runs after it sees the mask it had.

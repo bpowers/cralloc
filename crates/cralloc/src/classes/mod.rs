@@ -173,7 +173,7 @@ impl Class {
     /// that rounding to its own alignment stays within `isize::MAX`, and `of_c` raises the
     /// alignment by at most 15 bytes' worth.
     #[inline(always)]
-    const fn of_aligned(size: usize, align: usize) -> Option<Class> {
+    pub(crate) const fn of_aligned(size: usize, align: usize) -> Option<Class> {
         let size = if size == 0 { 1 } else { size };
         let mask = align - 1;
         Class::of_size((size + mask) & !mask)

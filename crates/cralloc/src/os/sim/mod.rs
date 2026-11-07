@@ -14,8 +14,9 @@
 //! ordinary, and a write to an uncommitted page is caught only later: such a page must still be
 //! zero when it is committed or purged, or the call panics.
 //!
-//! Known limits of the unguarded simulator (every shape under Miri and Kani, and [`Tiny`]
-//! natively), which accepts what Linux would refuse:
+//! Known limits of the unguarded simulator (every shape under Miri and Kani, [`Tiny`] natively,
+//! and natively any shape whose pages are smaller than the host's, as [`Standard`]'s are on a
+//! kernel with 16 KiB pages), which accepts what Linux would refuse:
 //!
 //! - a read of memory that was never committed;
 //! - a write to it that is undone before the page is committed, purged or unmapped;
@@ -81,8 +82,8 @@ pub trait Shape: 'static {
 /// the tests that churn many threads through many classes never run out),
 /// 64 MiB of address space that the host commits only as it is touched.
 ///
-/// The pages are host pages, so natively the simulator's memory is guarded: touching a page the
-/// heap has not committed faults. A page is 1/64 of a region, so the free bitmap of the
+/// On a kernel with 4 KiB pages they are host pages, so natively the simulator's memory is
+/// guarded: touching a page the heap has not committed faults. A page is 1/64 of a region, so the free bitmap of the
 /// smallest class fills a page of its own and can be committed apart from the rest of the
 /// region's metadata. Large classes above 256 KiB do not fit a region; use [`Native`] to test
 /// large classes with many slots.
@@ -179,13 +180,13 @@ struct Sleeps {
 pub enum SimTopology {
     /// No topology files, as in a sandbox or without sysfs: every read fails. The default.
     Missing,
-    /// L3s of `n` consecutive CPUs, listed as ranges (`0-3`).
+    /// Last-level caches of `n` consecutive CPUs, listed as ranges (`0-3`).
     Blocks(u32),
-    /// `n` L3s with CPU `c` in L3 `c % n`, listed one CPU at a time (`0,2,4`).
+    /// `n` last-level caches with CPU `c` in cache `c % n`, listed one CPU at a time (`0,2,4`).
     Stripes(u32),
-    /// The online list reads, but no CPU has an L3 file.
-    NoL3,
-    /// The L3 lists hold text that is not a CPU list.
+    /// The online list reads, but no CPU has a cache listed.
+    NoCaches,
+    /// The caches' lists hold text that is not a CPU list.
     Garbage,
 }
 
@@ -195,7 +196,7 @@ impl SimTopology {
             SimTopology::Missing => 0,
             SimTopology::Blocks(n) => 1 | (n as u64) << 8,
             SimTopology::Stripes(n) => 2 | (n as u64) << 8,
-            SimTopology::NoL3 => 3,
+            SimTopology::NoCaches => 3,
             SimTopology::Garbage => 4,
         }
     }
@@ -205,7 +206,7 @@ impl SimTopology {
         match word & 0xff {
             1 => SimTopology::Blocks(n.max(1)),
             2 => SimTopology::Stripes(n.max(1)),
-            3 => SimTopology::NoL3,
+            3 => SimTopology::NoCaches,
             4 => SimTopology::Garbage,
             _ => SimTopology::Missing,
         }
@@ -292,7 +293,7 @@ impl<S: Shape> SimOs<S> {
         let geometry = S::GEOMETRY;
         SimOs {
             // Guarded where each simulated page is whole host pages, so a stray access faults.
-            memory: Memory::new(bytes, region, geometry.page_size().is_multiple_of(4096)),
+            memory: Memory::new(bytes, region, geometry.page_size()),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
             fence_registered: AtomicBool::new(false),
@@ -803,7 +804,10 @@ fn splitmix(state: &AtomicU64) -> u64 {
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
 //   construction except the formatting of a panic message.
 unsafe impl<S: Shape> Os for SimOs<S> {
-    const GEOMETRY: Geometry = S::GEOMETRY;
+    #[inline(always)]
+    fn geometry() -> Geometry {
+        S::GEOMETRY
+    }
 
     fn reserve(&self, len: usize, align: usize) -> Result<NonNull<u8>, OsError> {
         self.faults.enter(Call::Reserve)?;
@@ -1041,18 +1045,18 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         match (topology, which) {
             (SimTopology::Missing, _) => return None,
             (_, Topology::Online) => out.range(0, last),
-            (_, Topology::SharedL3(cpu)) if cpu > last => return None,
-            (SimTopology::NoL3, Topology::SharedL3(_)) => return None,
-            (SimTopology::Garbage, Topology::SharedL3(_)) => {
+            (_, Topology::SharedLastLevel(cpu)) if cpu > last => return None,
+            (SimTopology::NoCaches, Topology::SharedLastLevel(_)) => return None,
+            (SimTopology::Garbage, Topology::SharedLastLevel(_)) => {
                 for &b in b"0-x" {
                     out.byte(b);
                 }
             }
-            (SimTopology::Blocks(n), Topology::SharedL3(cpu)) => {
+            (SimTopology::Blocks(n), Topology::SharedLastLevel(cpu)) => {
                 let first = cpu / n * n;
                 out.range(first, (first + n - 1).min(last));
             }
-            (SimTopology::Stripes(n), Topology::SharedL3(cpu)) => {
+            (SimTopology::Stripes(n), Topology::SharedLastLevel(cpu)) => {
                 let mut other = cpu % n;
                 while other <= last {
                     out.range(other, other);
@@ -1098,11 +1102,11 @@ mod tests {
     type Sim = SimOs<Standard>;
 
     fn page() -> usize {
-        Sim::GEOMETRY.page_size()
+        Sim::geometry().page_size()
     }
 
     fn region() -> usize {
-        Sim::GEOMETRY.largest_plan().region_size()
+        Sim::geometry().largest_plan().region_size()
     }
 
     #[test]
@@ -1276,6 +1280,15 @@ mod tests {
     #[cfg(cralloc_real)]
     const GUARD_CHILD: &str = "CRALLOC_GUARD_CHILD";
 
+    /// A shape whose pages are whole host pages on every kernel.
+    #[cfg(cralloc_real)]
+    enum WholePages {}
+
+    #[cfg(cralloc_real)]
+    impl Shape for WholePages {
+        const GEOMETRY: Geometry = Geometry::new(16, 20, 22, 21, 256, 16, MagazineSize::MAX);
+    }
+
     /// Run on its own by `touching_uncommitted_guarded_memory_faults`; does nothing otherwise.
     /// Writes a page it reserved but never committed, and a page it committed, purged and
     /// unmapped, which must fault like the first.
@@ -1285,18 +1298,20 @@ mod tests {
         let Some(mode) = std::env::var_os(GUARD_CHILD) else {
             return;
         };
-        let os = Sim::with_capacity(region());
-        let base = os.reserve(2 * page(), region()).unwrap();
+        let page = WholePages::GEOMETRY.page_size();
+        let region = WholePages::GEOMETRY.largest_plan().region_size();
+        let os = SimOs::<WholePages>::with_capacity(region);
+        let base = os.reserve(2 * page, region).unwrap();
         let target = if mode == "unmapped" {
             // SAFETY: whole reserved pages that nothing else uses.
             unsafe {
-                os.commit(base, 2 * page()).unwrap();
+                os.commit(base, 2 * page).unwrap();
                 base.as_ptr().write(1);
-                os.unmap(base, 2 * page()).unwrap();
+                os.unmap(base, 2 * page).unwrap();
             }
             base
         } else {
-            base.map_addr(|a| a.saturating_add(page()))
+            base.map_addr(|a| a.saturating_add(page))
         };
         std::eprintln!("about to write");
         // SAFETY: deliberately breaks the rule, to see the fault.
@@ -1308,9 +1323,10 @@ mod tests {
     #[test]
     fn touching_uncommitted_guarded_memory_faults() {
         use std::os::unix::process::ExitStatusExt;
+        let region = WholePages::GEOMETRY.largest_plan().region_size();
         assert!(
-            Sim::new().memory.guarded(),
-            "the standard shape is guarded natively"
+            SimOs::<WholePages>::with_capacity(region).memory.guarded(),
+            "a shape of whole host pages is guarded natively"
         );
         for mode in ["never-committed", "unmapped"] {
             let output = std::process::Command::new("sh")

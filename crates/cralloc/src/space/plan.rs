@@ -84,12 +84,12 @@ impl Plan {
     /// Made by [`Geometry::plan`], which checks the shift.
     pub(super) const fn new(geometry: Geometry, region_shift: u8) -> Plan {
         Plan {
-            geometry,
+            geometry: geometry.in_regions_of(region_shift),
             region_shift,
         }
     }
 
-    /// The geometry.
+    /// The geometry, as this plan's regions use it (`Geometry::in_regions_of`).
     #[inline(always)]
     pub const fn geometry(self) -> Geometry {
         self.geometry

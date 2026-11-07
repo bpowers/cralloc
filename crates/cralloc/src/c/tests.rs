@@ -57,7 +57,7 @@ fn small_blocks_use_their_whole_c_class() {
 /// end of the page it ends in: a large block may start a stagger into its first page.
 fn reports(p: *mut c_void, size: usize) -> bool {
     let n = usable(p);
-    n >= size && n < size + PAGE && (p.addr() + n).is_multiple_of(PAGE)
+    n >= size && n < size + page() && (p.addr() + n).is_multiple_of(page())
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn large_blocks_report_what_was_asked_for_rounded_to_a_page() {
     // An aligned request in a large slot reports its size, not the slot.
     let p = memalign(1 << 20, 100);
     assert_eq!(p.addr() % (1 << 20), 0);
-    assert_eq!(usable(p), PAGE);
+    assert_eq!(usable(p), page());
     release(p);
     assert_eq!(usable(ptr::null_mut()), 0);
 }
@@ -362,7 +362,7 @@ fn realloc_shrinking_a_large_block_returns_its_tail() {
         let q = realloc(p.cast(), small).cast::<u8>();
         assert_eq!(q, p, "a shrink to a large part of the slot stays in place");
         let kept = usable(q.cast());
-        assert!(kept >= small && kept < small + 4096);
+        assert!(kept >= small && kept < small + page());
         let r = realloc(q.cast(), big).cast::<u8>();
         assert_eq!(r, p, "it grows back within its slot");
         let bytes = core::slice::from_raw_parts(r, big);
@@ -399,11 +399,11 @@ fn malloc_trim_returns_memory_after_a_peak() {
 #[test]
 fn the_obsolete_family_aligns_as_glibc_does() {
     let p = valloc(1);
-    assert_eq!(p.addr() % PAGE, 0);
+    assert_eq!(p.addr() % page(), 0);
     release(p);
-    let p = pvalloc(PAGE + 1);
-    assert_eq!(p.addr() % PAGE, 0);
-    assert!(usable(p) >= 2 * PAGE);
+    let p = pvalloc(page() + 1);
+    assert_eq!(p.addr() % page(), 0);
+    assert!(usable(p) >= 2 * page());
     release(p);
     let p = memalign(48, 1);
     assert_eq!(p.addr() % 64, 0);
@@ -440,8 +440,13 @@ fn memalign_reads_alignments_as_glibc_does() {
 }
 
 #[test]
-fn the_page_is_four_kibibytes() {
-    assert_eq!(PAGE, 4096);
+fn the_page_is_the_kernels() {
+    unsafe extern "C" {
+        fn sysconf(name: core::ffi::c_int) -> core::ffi::c_long;
+    }
+    const SC_PAGESIZE: core::ffi::c_int = 30;
+    // SAFETY: a query of a constant of the system.
+    assert_eq!(page(), unsafe { sysconf(SC_PAGESIZE) } as usize);
 }
 
 #[test]

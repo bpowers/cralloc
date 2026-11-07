@@ -490,7 +490,7 @@ impl<'a, O: Os> Back<'a, O> {
         // A slot smaller than the floor never holds a marked block: one compare here, not a
         // load of the size word. The free loads and writes that word later, to stamp the slot
         // (`stamp_slot`), only if it stays resident.
-        if class.size() < const { unwritten_floor(O::GEOMETRY) } {
+        if class.size() < unwritten_floor(self.space.plan().geometry()) {
             return false;
         }
         let Some(now) = region::recorded(host, region, slot).filter(|r| r.unwritten && !r.huge)

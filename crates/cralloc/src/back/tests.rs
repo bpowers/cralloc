@@ -57,7 +57,7 @@ fn fill<O: Os>(back: &Back<'_, O>, class: SmallClass, n: usize) -> Vec<*mut u8> 
 /// purge returns in pages rather than huge pages.
 fn small_part<O: Os>(back: &Back<'_, O>, class: SmallClass) -> usize {
     let plan = back.space().plan();
-    let huge = O::GEOMETRY.huge_page_size();
+    let huge = O::geometry().huge_page_size();
     let threshold = huge_after(plan.region_size() / huge) * huge;
     (threshold - plan.slot_origin(class.class())) / class.size()
 }
@@ -1132,7 +1132,7 @@ fn a_silence_ages_a_frontier_by_at_most_one_interval() {
 /// a claim of it raises the region's frontier to.
 fn page_past<O: Os>(back: &Back<'_, O>, p: *mut u8, size: usize) -> u32 {
     let location = back.space().locate(p).unwrap();
-    (location.offset as usize + size).div_ceil(O::GEOMETRY.page_size()) as u32
+    (location.offset as usize + size).div_ceil(O::geometry().page_size()) as u32
 }
 
 /// A region's frontier rises with the highest slot a fill claims or carves there, and lives by
@@ -3417,13 +3417,16 @@ fn staggered_blocks_start_at_different_cache_lines_and_free_by_address() {
     let blocks: Vec<_> = (0..8)
         .map(|_| back.alloc_staggered(class, size).unwrap().ptr)
         .collect();
-    let mut offsets: Vec<usize> = blocks.iter().map(|b| b.addr().get() % page).collect();
+    let mut offsets: Vec<usize> = blocks
+        .iter()
+        .map(|b| b.addr().get() % STAGGER_ROOM)
+        .collect();
     assert!(offsets.iter().all(|o| o % STAGGER_STEP == 0));
     offsets.sort_unstable();
     offsets.dedup();
     assert_eq!(offsets.len(), blocks.len(), "each slot its own stagger");
     for &b in &blocks {
-        let into = b.addr().get() % page;
+        let into = b.addr().get() % STAGGER_ROOM;
         assert_eq!(back.lookup(b.as_ptr()), Some(Kind::Slot(class)));
         assert_eq!(back.size(b.as_ptr()), Some(size));
         assert_eq!(back.room(b.as_ptr()), Some(class.size() - into));
@@ -3434,14 +3437,14 @@ fn staggered_blocks_start_at_different_cache_lines_and_free_by_address() {
     }
     // Shrunk in place, the tail goes back from the page the new end is in.
     let b = blocks[3];
-    let into = b.addr().get() % page;
+    let usable = back.usable_size(b.as_ptr()).unwrap();
     // SAFETY: the test holds the block and uses none of it during the call.
     unsafe { back.resize_in_place(b, page) };
-    let end = (into + page).next_multiple_of(page) - into;
+    let end = (b.addr().get() + page).next_multiple_of(page) - b.addr().get();
     assert!(painted(b.as_ptr(), end, 0x3c));
     let tail = b.map_addr(|a| a.saturating_add(end));
     // SAFETY: no other thread runs, and the back end and this test store only integers.
-    unsafe { assert!(state.os().is_purged(tail, class.size() - into - end)) };
+    unsafe { assert!(state.os().is_purged(tail, usable - end)) };
     for &b in &blocks {
         back.free_by_address(b);
     }
@@ -4271,7 +4274,7 @@ mod region_headers {
         fn touched(start: *const u8, len: usize) -> (Vec<usize>, Vec<usize>) {
             const PRESENT: u64 = 1 << 63;
             const EXCLUSIVE: u64 = 1 << 56;
-            let page = Geometry::DESIGN.page_size();
+            let page = LinuxOs::geometry().page_size();
             let pagemap = File::open("/proc/self/pagemap").unwrap();
             let mut entries = std::vec![0u8; len / page * 8];
             pagemap
@@ -4315,7 +4318,7 @@ mod region_headers {
         fn a_small_class_touches_its_block_only_once_its_slots_reach_the_bitmaps() {
             let state = Box::new(State::new(LinuxOs));
             let back = state.get_or_reserve().unwrap();
-            let huge = Geometry::DESIGN.huge_page_size() / Geometry::DESIGN.page_size();
+            let huge = LinuxOs::geometry().huge_page_size() / LinuxOs::geometry().page_size();
             let sizes = [8, 16, 48, 256, 1024, 4096, 32 << 10];
             for size in sizes {
                 let class = small(size);
@@ -4931,7 +4934,7 @@ mod direct_launder {
         #[test]
         fn a_wide_batch_meets_a_region_late_at_the_design_heights() {
             let _one = ONE_HEAP.lock().unwrap_or_else(|e| e.into_inner());
-            let design = crate::space::Geometry::DESIGN.largest_plan().region_size();
+            let design = LinuxOs::geometry().largest_plan().region_size();
             for (size, height, count) in [(8, 4, 3), (16, 4, 3), (256, 3, 3), (32 << 10, 2, 8)] {
                 for ends in [false, true] {
                     let state = Box::new(State::new(LinuxOs));
