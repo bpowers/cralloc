@@ -9,7 +9,8 @@ use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
 use core::ffi::CStr;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering::Acquire;
+use core::sync::atomic::{AtomicU64, fence};
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -109,7 +110,7 @@ unsafe fn range_call(
 fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
     // SAFETY: KERNEL-02. membarrier takes no pointers and changes no memory; the rseq commands only
     // restart sequences in flight, which every sequence must tolerate anyway.
-    result(unsafe {
+    let done = result(unsafe {
         syscall(
             nr::MEMBARRIER,
             [
@@ -122,7 +123,14 @@ fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
             ],
         )
     })
-    .map(|_| ())
+    .map(|_| ());
+    // The kernel's barriers lie past a shortcut (`kernel/sched/membarrier.c`): with one user of
+    // the address space or one CPU online the call returns having only read that count. What a
+    // thread that has exited stored came before its decrement of the count, a full barrier, so
+    // the caller sees it as long as its next loads stay behind that read, which this makes sure
+    // of. On x86-64 loads keep their order anyway, and this emits no instruction.
+    fence(Acquire);
+    done
 }
 
 /// Eight bytes from the kernel's random pool, or `None` if the call fails.

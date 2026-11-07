@@ -101,7 +101,11 @@ pub enum HugePages {
 /// - A reservation's memory stays valid until it is unmapped or the value that made it is
 ///   dropped, whichever is first. Moving the value moves none of its reservations.
 /// - `fence(cpu)` returns `Ok` only after every restartable sequence of the process that was in
-///   flight on CPU `cpu` when it was called has completed or been aborted.
+///   flight on CPU `cpu` when it was called has completed or been aborted. It is also a barrier
+///   between that CPU and the caller, which stands in for the release and acquire a routine's
+///   plain stores and loads do not have: whatever a thread on that CPU stored before the sequence
+///   ended, the caller's loads after the call see, and a sequence that starts after the call
+///   sees whatever the caller stored before it.
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
