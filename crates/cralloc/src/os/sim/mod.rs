@@ -658,6 +658,11 @@ impl<S: Shape> SimOs<S> {
         built
     }
 
+    /// Bytes whose last huge-page advice was for huge pages.
+    pub fn advised_bytes(&self) -> usize {
+        self.pages.count(RESERVED | HUGE) << self.page_shift()
+    }
+
     /// The huge-page advice last given for the page holding `at`, if any.
     pub fn huge_pages(&self, at: NonNull<u8>) -> Option<HugePages> {
         let (first, _) = self.covering(at, 1)?;

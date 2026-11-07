@@ -26,6 +26,8 @@
 //! - Displacements are small and `adr` reaches 1 MiB, so what x86-64 reads at a displacement from
 //!   `SLABS` it reaches here by `adrp`, which reaches 4 GiB. The displacements are the specification's,
 //!   the same on every target.
+//! - The `executable` feature changes nothing: a linker will not copy a C library's variable into
+//!   a position-independent executable for `adrp` to reach, so every routine reads through a word.
 //! - The return register is the first argument's, so a routine that returns a value and restarts
 //!   with its arguments moves the value there after the sequence.
 //!

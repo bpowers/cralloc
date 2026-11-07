@@ -18,6 +18,7 @@ no such relocation (built without cralloc, or statically linked) passes. Needs `
 (binutils).
 """
 
+import platform
 import re
 import subprocess
 import sys
@@ -48,6 +49,12 @@ def symbol_value(path: str, name: str) -> int | None:
             return int(f[1], 16)
     return None
 
+
+# Where the variable is, for a shared library, which names no dynamic linker of its own.
+DYNAMIC_LINKERS = {
+    "x86_64": "/lib64/ld-linux-x86-64.so.2",
+    "aarch64": "/lib/ld-linux-aarch64.so.1",
+}
 
 # Each architecture's names for a word holding an address, a copy and a GOT slot, by the one name
 # this script uses for each.
@@ -86,7 +93,7 @@ def places(path: str) -> list[tuple[str, int, bool]]:
     if (own_words or "got" in kinds) and "copy" not in kinds:
         # Through the word or the GOT, the second load reads the variable where the C library
         # defines it.
-        ld = interpreter(path) or "/lib64/ld-linux-x86-64.so.2"
+        ld = interpreter(path) or DYNAMIC_LINKERS[platform.machine()]
         value = symbol_value(ld, "__rseq_offset")
         if value is not None:
             found.append((f"__rseq_offset in {ld}", value, True))
