@@ -59,6 +59,13 @@ fn forbid_opening_files() {
     const LD_NR: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS, offset 0: the system call's number
     const JEQ: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
     const RET: u16 = 0x06; // BPF_RET | BPF_K
+    // aarch64 has no `open`; its place in the filter is taken by `openat2` again.
+    const OPEN: u32 = if cfg!(target_arch = "x86_64") { 2 } else { 437 };
+    const OPENAT: u32 = if cfg!(target_arch = "x86_64") {
+        257
+    } else {
+        56
+    };
     let filter = [
         SockFilter {
             code: LD_NR,
@@ -70,13 +77,13 @@ fn forbid_opening_files() {
             code: JEQ,
             jt: 3,
             jf: 0,
-            k: 2,
+            k: OPEN,
         }, // open
         SockFilter {
             code: JEQ,
             jt: 2,
             jf: 0,
-            k: 257,
+            k: OPENAT,
         }, // openat
         SockFilter {
             code: JEQ,
@@ -117,13 +124,33 @@ fn keep_a_thread() {
     thread::spawn(move || kept.recv());
 }
 
+/// The bytes of a burst well over the floor: 128 MiB, or twice the floor where that is more. The
+/// floor is 16 huge pages, and a huge page is `page^2 / 8`, 32 MiB on a kernel with 16 KiB pages.
+fn burst_bytes() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_PAGESIZE: i32 = 30;
+    // SAFETY: a query of a constant of the system.
+    let page = unsafe { sysconf(SC_PAGESIZE) } as usize;
+    (128usize << 20).max(32 * (page * page / 8))
+}
+
+/// A block of a size with a small class.
+type Block = Box<[u8; 1024]>;
+
+/// A burst of `burst_bytes` in blocks.
+fn burst() -> Vec<Block> {
+    (0..burst_bytes() / 1024)
+        .map(|i| Box::new([i as u8; 1024]))
+        .collect()
+}
+
 /// A worker frees a burst over the floor, so that one of its frees finds the thread wanted,
 /// with `errno` set to the sentinel first; what `errno` is after the frees.
 fn burst_on_a_worker() -> i32 {
     thread::spawn(|| {
-        let burst: Vec<Box<[u8; 64]>> = (0..(128 << 20) / 64)
-            .map(|i| Box::new([i as u8; 64]))
-            .collect();
+        let burst = burst();
         set_errno(SENTINEL);
         drop(burst);
         errno()

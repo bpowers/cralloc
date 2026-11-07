@@ -7,8 +7,8 @@ dependencies; build them outside the repository tree so no binaries land here.
 The one-off kits of finished research sessions used to live here too: the tag
 `research-logbooks` keeps them.
 
-All of them need x86-64 Linux with glibc 2.35 or later. Results quoted below are from the
-reference host (Ryzen 9950X, Linux 7.2.9, glibc 2.43) on 2026-10-16.
+They need Linux with glibc 2.35 or later, on x86-64 and for the `rseq_` probes on aarch64 too. Results
+quoted below are from the reference host (Ryzen 9950X, Linux 7.2.9, glibc 2.43) on 2026-10-16.
 
 | Probe | Build | What it shows |
 |---|---|---|

@@ -5,6 +5,7 @@ use super::large::{HEADROOM, growth_rooms, shrink_moves_below_for};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::depot::siblings::{SIBLINGS, stride};
+use crate::lined::LINE;
 use crate::os::OsError;
 use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
 use crate::space::Plan;
@@ -367,7 +368,10 @@ fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
     let sizes: Vec<usize> = if cfg!(miri) {
         [40].to_vec()
     } else {
-        (8..64).step_by(8).collect()
+        SmallClass::all()
+            .map(|class| class.size())
+            .filter(|&size| size < LINE)
+            .collect()
     };
     for size in sizes {
         let l = layout(size, 8);
@@ -381,12 +385,19 @@ fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
             .map(|_| unsafe { heap.alloc(l) })
             .collect();
         assert!(got.iter().all(|p| !p.is_null()));
+        // On long lines the smallest class's siblings are all its magazine holds, and the next
+        // magazine is dense.
         let siblings = SIBLINGS * stride(size).unwrap();
-        for pair in got[..=siblings].windows(2) {
+        let (apart, dense) = if siblings < capacity {
+            (siblings, siblings)
+        } else {
+            (capacity - 1, capacity)
+        };
+        for pair in got[..=apart].windows(2) {
             let (low, high) = (pair[0].min(pair[1]).addr(), pair[0].max(pair[1]).addr());
-            assert_ne!((low + size - 1) / 64, high / 64, "{size}: {pair:?}");
+            assert_ne!((low + size - 1) / LINE, high / LINE, "{size}: {pair:?}");
         }
-        for pair in got[siblings..].windows(2) {
+        for pair in got[dense..].windows(2) {
             assert_eq!(pair[1].addr() - pair[0].addr(), size, "{size}: {pair:?}");
         }
         for p in got {
@@ -1388,7 +1399,8 @@ fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
 fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
     let heap = SimHeap::<Shape>::new();
     let page = 4 << 10;
-    let mut size = 40 << 10;
+    // Small enough that its slot, room for a stagger included, is outgrown below.
+    let mut size = 33 << 10;
     // SAFETY: valid layouts; the block is freed once with the layout it has.
     unsafe {
         let mut p = heap.alloc(layout(size, 8));
@@ -1440,7 +1452,7 @@ fn large_frees_find_the_class_from_the_address() {
     let heap = SimHeap::<Shape>::new();
     // A layout far smaller than the block still frees the whole slot, and a block moved into
     // a roomier slot by `realloc` is freed with the caller's layout.
-    let l = layout(40 << 10, 8);
+    let l = layout(33 << 10, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
@@ -1814,7 +1826,7 @@ mod hold {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+#[cfg(cralloc_real)]
 mod process {
     use super::*;
     use crate::{Cralloc, SimCralloc};
@@ -2003,7 +2015,8 @@ mod process {
             assert_eq!(p.addr() % (1 << 33), 0);
             let usable = Cralloc::usable_size(p);
             Cralloc.dealloc(p, l);
-            assert_eq!(usable, Some(4096));
+            let page = <crate::os::linux::LinuxOs as crate::os::Os>::geometry().page_size();
+            assert_eq!(usable, Some(page));
         }
     }
 
@@ -2238,7 +2251,7 @@ mod lean_realloc {
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     mod process {
         use super::*;
         use crate::Cralloc;
@@ -2343,7 +2356,7 @@ mod lean_realloc {
         });
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn the_process_heap_moves_a_block_down_a_class_within_the_block_it_lands_in() {
         use crate::Cralloc;
@@ -2607,7 +2620,7 @@ mod lean_realloc {
             pairs(&SimHeap::<Shape>::new());
         }
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         #[test]
         fn the_process_heap_zeroes_what_a_grow_adds_and_keeps_what_a_shrink_leaves() {
             pairs(&crate::Cralloc);

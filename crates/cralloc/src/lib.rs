@@ -129,7 +129,7 @@ mod space;
 // Public for what `export_c_abi!` expands to, which names the C functions, the slow paths and
 // tables the generated C routines jump to and read, and `front::SLABS`. Without `internals`
 // nothing else in them is reachable, and nothing reachable writes allocator state.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 #[doc(hidden)]
 pub mod c;
 #[doc(hidden)]
@@ -142,13 +142,7 @@ pub mod clock;
 #[cfg(not(feature = "internals"))]
 mod clock;
 pub(crate) mod environment;
-#[cfg(all(
-    test,
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(test, cralloc_real))]
 mod fresh;
 mod heap;
 mod lined;
@@ -162,18 +156,12 @@ pub(crate) mod spec;
 pub mod stats;
 pub(crate) mod thread_word;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub use heap::Cralloc;
 
 /// The background thread's controls (feature `background`, on by default): what the
 /// environment asks for, and the error of a failed start. See `Cralloc::start_background`.
-#[cfg(all(
-    feature = "background",
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(feature = "background", cralloc_real))]
 pub mod background {
     #[doc(hidden)]
     pub use crate::heap::background::CreateThread;
@@ -186,7 +174,7 @@ pub use heap::{SimCralloc, SimHeap};
 /// Ends the process at once, writing `message` to standard error: for the panic handler of a
 /// `no_std` library that exports the C interface with [`export_c_abi!`], which must not
 /// unwind.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 #[cold]
 pub fn abort(message: &str) -> ! {
     heap::process::abort(message)

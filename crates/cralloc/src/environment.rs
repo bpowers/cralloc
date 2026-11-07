@@ -330,7 +330,7 @@ mod tests {
     }
 
     /// The real read: this test binary's environment, as `std` sees it at start.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn the_kernel_environment_agrees_with_std() {
         let expected = match std::env::var_os("CRALLOC_BACKGROUND") {

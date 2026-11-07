@@ -25,8 +25,30 @@ fn has_allocator_thread() -> bool {
     })
 }
 
-/// In the child: optionally sets the variable, keeps a second thread, frees a burst of 128 MiB
-/// on a worker (over the floor), and reports what the switch says and whether the thread
+/// The bytes of a burst well over the floor: 128 MiB, or twice the floor where that is more. The
+/// floor is 16 huge pages, and a huge page is `page^2 / 8`, 32 MiB on a kernel with 16 KiB pages.
+fn burst_bytes() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_PAGESIZE: i32 = 30;
+    // SAFETY: a query of a constant of the system.
+    let page = unsafe { sysconf(SC_PAGESIZE) } as usize;
+    (128usize << 20).max(32 * (page * page / 8))
+}
+
+/// A block of a size with a small class.
+type Block = Box<[u8; 1024]>;
+
+/// A burst of `burst_bytes` in blocks.
+fn burst() -> Vec<Block> {
+    (0..burst_bytes() / 1024)
+        .map(|i| Box::new([i as u8; 1024]))
+        .collect()
+}
+
+/// In the child: optionally sets the variable, keeps a second thread, frees a burst on a worker
+/// (over the floor), and reports what the switch says and whether the thread
 /// appeared within a second. It appears at once when it starts at all: the look that starts
 /// it is in the burst's own slow paths.
 #[test]
@@ -45,14 +67,7 @@ fn child() {
     }
     let (keep, kept) = mpsc::channel::<()>();
     let other = thread::spawn(move || kept.recv());
-    thread::spawn(|| {
-        let burst: Vec<Box<[u8; 64]>> = (0..(128 << 20) / 64)
-            .map(|i| Box::new([i as u8; 64]))
-            .collect();
-        drop(burst);
-    })
-    .join()
-    .unwrap();
+    thread::spawn(|| drop(burst())).join().unwrap();
     let started = Instant::now();
     let mut found = has_allocator_thread();
     while !found && started.elapsed() < Duration::from_secs(1) {
@@ -95,7 +110,8 @@ fn report(child: std::process::Child) -> String {
         .unwrap_or_else(|| panic!("no report: {stdout}"))
 }
 
-/// The cases run at once, each in a process of its own.
+/// The cases run at once, each in a process of its own, if their bursts fit in the test's cap
+/// together.
 #[test]
 fn the_switch_is_the_environment_the_process_started_with() {
     let cases = [
@@ -107,6 +123,13 @@ fn the_switch_is_the_environment_the_process_started_with() {
         (Some("0"), "set-on", "before Off after Off thread 0"),
         (None, "set-off", "before Default after Default thread 1"),
     ];
+    if burst_bytes() > 128 << 20 {
+        for (value, mode, expected) in cases {
+            let child = spawn(value, mode);
+            assert_eq!(report(child), expected, "{VARIABLE}={value:?}, {mode}");
+        }
+        return;
+    }
     let children: Vec<_> = cases
         .iter()
         .map(|&(value, mode, _)| spawn(value, mode))
