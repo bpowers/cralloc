@@ -140,7 +140,7 @@
 //! frees and reuses the same classes never grows and never purges on its own traffic; one that
 //! frees class X and then grows class Y purges X as Y grows.
 //!
-//! **While the background thread runs** (design: "Heartbeat"), returning memory is its work.
+//! **While the background thread runs** (design: "The background thread"), returning memory is its work.
 //! A heartbeat takes no step of a pass, no look of the hold and no payment
 //! ([`Back::heartbeat_for`]): it keeps the readings the clocked rules count time by, and wakes
 //! the thread when one of them makes a pass due or reaches the hold's next look. The debt is a
@@ -504,7 +504,7 @@ impl<O: Os> Back<'_, O> {
     /// cap would. Unless more than [`policy::GROWTH_UNPAID_HUGE_PAGES`] of growth was unpaid
     /// before this add: then the thread has not run, and the grower pays a step itself (and the
     /// heartbeats too, `note_for_thread`), so that the bound on retained memory does not rest on
-    /// the scheduler (design: "Heartbeat").
+    /// the scheduler (design: "The background thread").
     /// Out of line, because inlined into `alloc_at` it made the compiler keep the class's
     /// layout on the stack, and every large allocation paid 19 more stores and 18 more loads
     /// for it (4% on a pipeline of large objects; `docs/research/memory.md`, "Small heaps").
@@ -702,7 +702,7 @@ impl<O: Os> Back<'_, O> {
     /// as the slow path read it. Where slow paths return memory ([`Duty::Slow`]), one bounded
     /// step of each purge ([`Back::purge_steps`]). While the thread runs, none: the readings
     /// that keep the clocked rules' time, and whether this one made work due that the thread
-    /// does, for the caller to wake it (design: "Heartbeat"): a pass it started (an interval's
+    /// does, for the caller to wake it (design: "The background thread"): a pass it started (an interval's
     /// pass starts here, as it would where slow paths return memory, and the thread steps it),
     /// or a step of the fine count that reached the hold's next look. Each of those happens
     /// on one reading, and its write comes before the caller reads the thread's word afresh

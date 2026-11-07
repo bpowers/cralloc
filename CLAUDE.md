@@ -10,7 +10,7 @@ have learned about allocator performance and links the evidence behind it.
 
 ## Platform
 
-x86-64, Linux 7.2 or later, glibc 2.43 or later, Rust 1.99 or later on stable. Nightly is
+We develop, test and measure on x86-64, Linux 7.2, glibc 2.43 and stable Rust 1.99. Nightly is
 only for tools that need it (Miri, Kani). Lean is pinned in `lean/`. `third_party/` holds
 local reference checkouts, is gitignored, and is read-only.
 
@@ -58,8 +58,12 @@ process light.
 
 ## Documentation
 
-- `docs/design.md` changes when the design changes, and not otherwise. It has no plan or
-  status section.
+- Documentation is evergreen: it reads top to bottom as what is true now, not as a history of
+  how it got there. No dates, round numbers or finding labels. A rejected alternative gets one
+  clause and a link, and only when it stops someone trying it again.
+- `docs/design.md` changes when the design changes, and not otherwise. It says what the
+  allocator does and why; the evidence is in `docs/research/` and the fine detail in the code's
+  comments. It has no plan or status section.
 - Keep facts that go stale out of this file, `README.md` and the design: no file lists, no
   counts derived from the code, no benchmark numbers. Numbers belong in `docs/research/`.
 - `docs/research/` records what we learned, not what we ran: what gates the fast path, what

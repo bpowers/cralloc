@@ -217,7 +217,7 @@ Each cause is the one its own study found; none was profiled again at the latest
 - **A quiet program with one thread keeps its memory after a peak.** When its light work stays
   inside the magazines: 215 MiB at 12 s against jemalloc's 4.6, and glibc's 208 and tcmalloc's 211
   stay too. When its bursts cross magazines it falls to 33. A documented limit (`docs/design.md`,
-  "So there is a background thread").
+  "The background thread").
 - **Page faults on batch programs**, as above. Large slots go back and are faulted again. The trim
   of a slot's slack cost about 0.8% on DataFusion and 2.0% on tpchgen for lower peaks. Huge pages
   for large blocks allocated whole would give DataFusion 2.9%, but no server gains and a sparse

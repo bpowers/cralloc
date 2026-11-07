@@ -658,7 +658,7 @@ fn most_unpaid(pass: bool) -> usize {
     most
 }
 
-/// Design, "Heartbeat": "the bound on retained memory must not rest on the scheduler". With a
+/// Design, "The background thread": the bound on retained memory does not rest on the scheduler. With a
 /// thread that does not run, growth left unpaid stays near the limit only while no clocked
 /// pass is under way. A pass that a heartbeat started for the thread is stepped by nobody,
 /// stays under way for ever, and turns the heartbeats' payments past the limit off

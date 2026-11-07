@@ -1,4 +1,4 @@
-//! The background thread, for a program run with the library (design: "Heartbeat").
+//! The background thread, for a program run with the library (design: "The background thread").
 //!
 //! No slow path of the library ever creates the thread: its caller may be the C library under
 //! one of its own locks. The library interposes `pthread_create` instead, and creates the

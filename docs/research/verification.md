@@ -110,7 +110,7 @@ the difference is that aborts add obligations at every step.
 
 The class function, division by a class size, the slot tests, the address space's parts, bitmap word
 operations, every packed word and marker, and the decisions of the clocked rules (`docs/design.md`,
-"Kani"). The twins too, on a slab of one magazine with an abort before any one step.
+"What is proved, and how"). The twins too, on a slab of one magazine with an abort before any one step.
 
 - Kani 0.67.0 pins `nightly-2025-11-21`, so the crate keeps `rust-version = "1.92"` and the
   `Allocator` trait stays behind a feature in a thin outer layer.

@@ -1,7 +1,7 @@
 //! The per-CPU spare stacks, and their budget.
 //!
-//! Each CPU keeps, per class, a stack of magazines with objects and a stack of empty ones, in
-//! the cold part of its slab, changed only by the stack routines. A thread that oscillates
+//! Each CPU keeps, per class, a stack of magazines with objects and a stack of empty ones, with
+//! their heads in its slab beside the class's hot word, changed only by the stack routines. A thread that oscillates
 //! around a magazine boundary then swaps locally without touching shared state.
 //!
 //! The spares of one CPU are limited by a byte budget, [`SPARE_BUDGET`] of objects split evenly

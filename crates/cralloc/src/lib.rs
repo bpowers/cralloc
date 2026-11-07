@@ -50,8 +50,9 @@
 //!
 //! Limits worth knowing:
 //!
-//! - x86-64 Linux, with glibc 2.35 or later (which registers restartable sequences for its
-//!   threads), dynamically or statically linked, or with musl in an executable: musl registers
+//! - x86-64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older versions
+//!   are untested. It needs glibc 2.35 or later, the first that registers restartable sequences
+//!   for its threads, dynamically or statically linked, or musl in an executable: musl registers
 //!   none, so there the allocator registers its own area for each thread at its first slow path
 //!   and unregisters it as the thread exits. Statically linked musl executables are tested;
 //!   dynamically linked ones are expected to work and untested. A musl shared library, such as

@@ -2,7 +2,7 @@
 //! process, created with the C library's `pthread_create`, that takes rounds of
 //! [`Cralloc::maintain`]'s steps and the purge steps slow paths leave to it while it runs,
 //! sleeps between them until a slow path wakes it for work that came due or its timeout, and
-//! parks while the process is quiet (`depot::thread`; design: "Heartbeat").
+//! parks while the process is quiet (`depot::thread`; design: "The background thread").
 //!
 //! **When it starts.** By default, once free memory is over the floor of the allowance and the
 //! program has created a thread of its own, a slow path that came through the Rust interface

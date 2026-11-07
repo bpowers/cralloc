@@ -47,7 +47,7 @@ rate.
 
 **For the design.** Spending on the fast path and `realloc` pays on every server; spending on slow
 paths pays almost nowhere. The clocked work of returning memory belongs on the background thread; a
-request does only what its own call decides (design, "Heartbeat"). A per-CPU cache suits this load
+request does only what its own call decides (design, "The background thread"). A per-CPU cache suits this load
 well, and our worst tails came from a lock at its ends and from draining it before a burst.
 
 ## The jobs
@@ -380,7 +380,7 @@ what 35 do. Under a loaded server and strace the calls measured 10 to 13 us.
 ## The background thread
 
 It starts by itself once free memory passes the floor and the program has a thread of its own;
-`docs/design.md`, "Heartbeat", has why. What it did on three large heaps, same binary with it on and
+`docs/design.md`, "The background thread", has why. What it did on three large heaps, same binary with it on and
 off, at `dd46087` (2026-10-22); the wake-ups and parking are from 2026-10-28:
 
 | | Meilisearch | Log store | Order service, 2 GiB |
