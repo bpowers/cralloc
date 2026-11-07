@@ -32,6 +32,33 @@ def build(k):
             fill = nops(stride // 4 - 1)
             body = "\n".join(f"  b 3f\n{fill}\n3:" for _ in range(n))
             k.kernel(f"fe_gap{stride}_{n}", body, ops=n + 1, note=f"{n} taken branches {stride} bytes apart: the nops are skipped, per branch")
+    # Where taken branches stop being free: by the bytes the loop spans, not the branches.
+    for stride, counts in ((64, (56, 64, 72, 80, 88, 96, 112, 128)), (32, (112, 128, 160, 192, 224, 256)), (128, (28, 32, 36, 40, 48, 56, 64))):
+        for n in counts:
+            fill = nops(stride // 4 - 1)
+            body = "\n".join(f"  b 3f\n{fill}\n3:" for _ in range(n))
+            k.kernel(f"fe_span{stride}_{n}", body, ops=n + 1, note=f"{n} taken branches {stride} bytes apart ({n * stride} bytes), per branch")
+    # Calls from many sites to one leaf, 64 bytes a site, against the same code with no call: what
+    # a call costs once the sites span more than the loop above can hold. A far leaf is 2 MiB away.
+    k.raw(""".section .text.rf_far, "ax"
+.balign 64
+rf_far_pad:
+  .skip 2 * 1024 * 1024
+.balign 64
+rf_far_leaf:
+  ret
+.text
+.balign 64
+rf_near_leaf:
+  ret
+""")
+    for n in (8, 32, 64, 128, 256, 1024, 4096):
+        for tag, target in (("near", "rf_near_leaf"), ("far", "rf_far_leaf")):
+            body = "\n".join(f"  bl {target}\n{nops(15)}" for _ in range(n))
+            k.kernel(f"fe_sites_{tag}{n}", body, ops=n, align=64, note=f"{n} sites a pass, bl to a {tag} leaf and 15 nops, per site")
+        body = "\n".join(f"  nop\n{nops(15)}" for _ in range(n))
+        k.kernel(f"fe_sites_none{n}", body, ops=n, align=64, note=f"{n} sites a pass, 16 nops, per site")
+
     # A taken branch every N straight instructions: what a run of N costs.
     for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 24, 32, 48, 64):
         body = "\n".join([f"{nops(n)}\n  b 3f\n3:" for _ in range(8)])

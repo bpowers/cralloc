@@ -163,6 +163,10 @@ def renaming(k):
         adds = "\n".join("  add x5, x5, #1" for _ in range(n))
         k.kernel(f"h_reg{n}", f"  ldr x5, [x20, x10]\n{adds}\n  str x5, [x20, x10]", setup=regs, note=f"[x, x]: load; {n} adds; store")
         k.kernel(f"h_w{n}", f"  ldr w5, [x20, #16]\n" + "\n".join("  add w5, w5, #1" for _ in range(n)) + "\n  str w5, [x20, #16]", setup=regs, note=f"32-bit: load; {n} adds; store")
+    # Whether a narrow hop renames when its add is of the same width as the load.
+    k.kernel("h_h1", "  ldrh w5, [x20, #16]\n  add w5, w5, #1\n  strh w5, [x20, #16]", setup=regs, note="16-bit, add w: load; add; store")
+    k.kernel("h_b1", "  ldrb w5, [x20, #16]\n  add w5, w5, #1\n  strb w5, [x20, #16]", setup=regs, note="8-bit, add w: load; add; store")
+    k.kernel("h_x_w1", "  ldr x5, [x20, #16]\n  add x5, x5, #1\n  str x5, [x20, #16]", setup=regs, note="64-bit, add x, beside the two above")
     # The recomputed base, which every per-CPU word has.
     for n in (0, 1, 2, 3, 4, 5, 6, 8, 12, 16):
         adds = "\n".join("  add x5, x5, #1" for _ in range(n))
