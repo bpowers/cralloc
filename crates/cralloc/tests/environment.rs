@@ -37,8 +37,11 @@ fn burst_bytes() -> usize {
     (128usize << 20).max(32 * (page * page / 8))
 }
 
-/// A burst of `burst_bytes` in blocks of a size with a small class.
-fn burst() -> Vec<Box<[u8; 1024]>> {
+/// A block of a size with a small class.
+type Block = Box<[u8; 1024]>;
+
+/// A burst of `burst_bytes` in blocks.
+fn burst() -> Vec<Block> {
     (0..burst_bytes() / 1024)
         .map(|i| Box::new([i as u8; 1024]))
         .collect()

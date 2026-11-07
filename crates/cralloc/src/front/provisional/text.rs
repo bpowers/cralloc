@@ -44,7 +44,7 @@ macro_rules! cralloc_a64_arm {
         concat!(
             "5:\n",
             "mrs x10, tpidr_el0\n",
-            "add x9, x10, :tprel_hi12:cralloc_rseq_area, lsl #12\n",
+            "add x9, x10, :tprel_hi12:cralloc_rseq_area\n",
             "add x9, x9, :tprel_lo12_nc:cralloc_rseq_area\n",
             $crate::cralloc_a64_arm_area!(),
         )

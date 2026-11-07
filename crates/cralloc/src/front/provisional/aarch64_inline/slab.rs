@@ -153,7 +153,7 @@ pub(crate) unsafe fn current_cpu() -> u32 {
     unsafe {
         core::arch::asm!(
             "mrs {area}, tpidr_el0",
-            "add {area}, {area}, :tprel_hi12:cralloc_rseq_area, lsl #12",
+            "add {area}, {area}, :tprel_hi12:cralloc_rseq_area",
             "add {area}, {area}, :tprel_lo12_nc:cralloc_rseq_area",
             "ldr {ret:w}, [{area}, #4]",
             area = out(reg) _,

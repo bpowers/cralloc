@@ -62,13 +62,13 @@ fn the_rseq_offset_the_routines_load_is_off_every_hot_words_page_offset() {
     // The routines that read through a word (all of them by default, the out-of-line ones in the
     // `executable` form) read their own; only Rust code off the fast paths reads the GOT slot.
     let (word, copy, got) = RELOCATIONS;
-    #[cfg_attr(all(target_arch = "aarch64", target_env = "musl"), allow(unused_mut))]
     if cfg!(target_env = "gnu") {
         assert!(
             relocations.iter().any(|&(kind, _)| kind == word),
             "no routine's word holds the address of `__rseq_offset`"
         );
     }
+    #[cfg_attr(all(target_arch = "aarch64", target_env = "musl"), allow(unused_mut))]
     let mut sites: Vec<(String, usize)> = relocations
         .into_iter()
         .filter(|&(kind, _)| kind != got)
