@@ -52,12 +52,18 @@ pub fn page() -> usize {
     unsafe { sysconf(SC_PAGESIZE) as usize }
 }
 
-/// Bytes in a transparent huge page, from the kernel.
+/// Bytes in a transparent huge page, from the kernel, or what one would be on a kernel without
+/// them: a page of page-table entries' worth of pages.
 pub fn huge() -> usize {
     std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
         .ok()
         .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(32 << 20)
+        .unwrap_or_else(|| page() * page() / 8)
+}
+
+/// The most memory a probe with a sweep may use, in MiB: `RF_MAX_MIB`, for a small virtual machine.
+pub fn max_mib(default: usize) -> usize {
+    std::env::var("RF_MAX_MIB").ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 pub fn pin(cpu: usize) {
@@ -223,7 +229,10 @@ impl Map {
             Pages::Small => MADV_NOHUGEPAGE,
             Pages::Huge => MADV_HUGEPAGE,
         };
-        assert_eq!(adv(m.p, m.len, advice), 0);
+        // A kernel without transparent huge pages refuses the advice; what it maps is small pages
+        // either way, and a huge-page row says how much huge pages backed.
+        let refused = adv(m.p, m.len, advice);
+        assert!(refused == 0 || refused == 22, "madvise: errno {refused}");
         m
     }
 

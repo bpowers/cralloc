@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! streams stagger CPU small|huge [streams] [KiB]  buffers written in turn, by how far each is moved
+//! streams rule CPU small|huge                     the stagger the allocator would use, by class
 //! streams origin CPU                              classes' first pages in a region of 4 GiB each
 //! streams sawtooth CPU [MiB]                      a walk in the order magazines hand objects out
 //! streams pointers CPU [MiB]                      an array of pointers against one of offsets
@@ -102,6 +103,63 @@ fn stagger(cpu: usize, pages: Pages, count: usize, kib: usize) {
         let map = Map::resident(count * slot + slot, pages);
         println!("# huge pages back {} MiB", huge_mib());
         stagger_table(&map, pages, count, each, slot);
+    }
+}
+
+/// Pages of the page term for a slot of `pages` pages: an eighth of the slot, up to 32, and none
+/// when that is under two. So the room is at most an eighth of the slot, and a class moves up by
+/// at most one step for it.
+fn page_term(pages: usize) -> usize {
+    let p = (pages / 8).min(32);
+    if p < 2 { 0 } else { p }
+}
+
+/// Elements written in turn to `starts`, `words` from each: nanoseconds an element, the best of
+/// three passes.
+fn written_in_turn(starts: &[*mut u64], words: usize) -> f64 {
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let t0 = ticks();
+        for w in 0..words {
+            for &s in starts {
+                // SAFETY: each start has `words` words inside the mapping, by the caller.
+                unsafe { s.add(w).write_volatile(w as u64) };
+            }
+        }
+        best = best.min(ns_of(ticks() - t0) / (words * starts.len()) as f64);
+    }
+    best
+}
+
+/// The rule as the allocator would have it, for every class of four a doubling from 8 to 1024 pages:
+/// no stagger, the cache lines' alone, and both terms.
+fn rule(cpu: usize, pages_kind: Pages) {
+    pin(cpu);
+    let page = page();
+    println!("# stagger(i) = 64 * (i % 64) + page * (i % P), P = page_term(slot); CPU {cpu}, page {page}, {pages_kind:?} pages");
+    println!("# slot_pages slot_KiB  P  room_KiB  ns_an_element by streams, each: none, lines, rule");
+    let classes = [8usize, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 1024];
+    for &c in &classes {
+        let slot = c * page;
+        if slot * 64 >> 20 > max_mib(6144) {
+            break;
+        }
+        let map = Map::resident(64 * slot + slot, pages_kind);
+        let p = page_term(c);
+        let room = 4096 + p * page;
+        // Only the part of each block every class can write in the same time.
+        let words = (slot.saturating_sub(room) / 8).min((1 << 20) / 8);
+        print!("{c:6} {:8} {p:3} {:6}", slot >> 10, room >> 10);
+        for streams in [16usize, 64] {
+            let at = |offset: &dyn Fn(usize) -> usize| -> Vec<*mut u64> {
+                (0..streams).map(|i| map.p.wrapping_add(i * slot + offset(i)).cast()).collect()
+            };
+            let none = written_in_turn(&at(&|_| 0), words);
+            let lines = written_in_turn(&at(&|i| 64 * (i % 64)), words);
+            let both = written_in_turn(&at(&|i| 64 * (i % 64) + if p > 0 { page * (i % p) } else { 0 }), words);
+            print!("   {none:6.2} {lines:6.2} {both:6.2}");
+        }
+        println!();
     }
 }
 
@@ -258,9 +316,10 @@ fn main() {
     let cpu = num(2, 8);
     match args.get(1).map(String::as_str) {
         Some("stagger") => stagger(cpu, parse_pages(args.get(3)), num(4, 64), num(5, 1024)),
+        Some("rule") => rule(cpu, parse_pages(args.get(3))),
         Some("origin") => origin(cpu),
         Some("sawtooth") => sawtooth(cpu, num(3, 512)),
         Some("pointers") => pointers(cpu, num(3, 2048)),
-        _ => eprintln!("usage: streams stagger|origin|sawtooth|pointers CPU ..."),
+        _ => eprintln!("usage: streams stagger|rule|origin|sawtooth|pointers CPU ..."),
     }
 }

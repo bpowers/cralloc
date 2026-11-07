@@ -108,7 +108,7 @@ fn wake(server: usize, client: usize) {
     let done = AtomicU32::new(0);
     let quit = AtomicBool::new(false);
     println!("# server on CPU {server}, client on {client}: a request every gap");
-    println!("# gap_us  wake_ns_p50  wake_ns_p90  deep_entries_a_request  first_work_ns_a_load p50: 64KiB 512KiB 4MiB (spin: no sleep)");
+    println!("# gap_us  wake_ns_p50  wake_ns_p90  waker_call_ns_p50  deep_entries_a_request  first_work_ns_a_load p50: 64KiB 512KiB 4MiB");
     let (word, posted, woke, worked, done, quit, chases) = (&word, &posted, &woke, &worked, &done, &quit, &chases);
     std::thread::scope(|s| {
         s.spawn(move || {
@@ -134,7 +134,7 @@ fn wake(server: usize, client: usize) {
         pin(client);
         for gap_us in [0u64, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000] {
             let reps = if gap_us >= 20_000 { 40 } else if gap_us >= 1000 { 100 } else { 300 };
-            let (mut wakes, mut a, mut b, mut c) = (vec![], vec![], vec![], vec![]);
+            let (mut wakes, mut calls, mut a, mut b, mut c) = (vec![], vec![], vec![], vec![], vec![]);
             let (name, before) = deep_entries(server);
             let gap = gap_us * tick_rate() / 1_000_000;
             let mut last = 0u32;
@@ -147,6 +147,7 @@ fn wake(server: usize, client: usize) {
                 posted.store(t0, Relaxed);
                 word.store(last, Release);
                 futex_wake(word);
+                calls.push(ns_of(ticks() - t0));
                 while done.load(Acquire) != last {}
                 wakes.push(ns_of(woke.load(Acquire).saturating_sub(t0)));
                 a.push(ns_of(worked[0].load(Relaxed)) / chases[0].1 as f64);
@@ -157,8 +158,9 @@ fn wake(server: usize, client: usize) {
             wakes.sort_by(|x, y| x.partial_cmp(y).unwrap());
             let p90 = wakes[wakes.len() * 9 / 10];
             println!(
-                "{gap_us:7} {:8.0} {p90:8.0} {:6.2} ({name})  {:7.2} {:7.2} {:7.2}",
+                "{gap_us:7} {:8.0} {p90:8.0} {:8.0} {:6.2} ({name})  {:7.2} {:7.2} {:7.2}",
                 median(&mut wakes),
+                median(&mut calls),
                 (after - before) as f64 / reps as f64,
                 median(&mut a),
                 median(&mut b),

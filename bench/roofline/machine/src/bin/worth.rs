@@ -78,6 +78,9 @@ fn churn(cpu: usize, rounds: usize) {
     println!("# objects of 64 bytes, CPU {cpu}, page {}, huge {}: median of {rounds} interleaved rounds", page(), huge());
     println!("# MiB  fill_ns_small fill_ns_huge  churn_ns_small churn_ns_huge  churn_cyc_small churn_cyc_huge  gain");
     for mib in [4usize, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+        if mib > max_mib(4096) {
+            break;
+        }
         let len = mib << 20;
         let (mut a, mut b, mut c, mut d, mut e, mut f) = (vec![], vec![], vec![], vec![], vec![], vec![]);
         for _ in 0..rounds {
@@ -110,6 +113,9 @@ fn build(cpu: usize) {
     println!("# objects written once in ascending order, CPU {cpu}, page {}, huge {}", page(), huge());
     println!("# size  MiB  small_ns  small_cyc  huge_ns  huge_cyc  resident_ns  resident_cyc  (an object)");
     for (size, mib) in [(24usize, 256usize), (64, 256), (64, 1024), (256, 1024), (1024, 1024)] {
+        if mib > max_mib(4096) {
+            continue;
+        }
         let len = mib << 20;
         let count = len / size;
         let words = size / 8;
@@ -174,8 +180,20 @@ fn cold(cpu: usize) {
         }
         ns_of(total) / 1e3 / n as f64
     };
-    let m = Map::resident(len, Pages::Huge);
-    show("filled in huge pages");
+    // A split frees the pages that hold only zero, and looks through each page to find out. So the
+    // first pass writes one byte a page with a value that shows, and the last leaves them zero.
+    let filled = |value: u8| {
+        let m = Map::new(len, Pages::Huge);
+        let mut o = 0;
+        while o < len {
+            // SAFETY: inside the mapping.
+            unsafe { m.p.add(o + page / 2).write_volatile(value) };
+            o += page;
+        }
+        m
+    };
+    let m = filled(1);
+    show("filled in huge pages, a nonzero byte in the middle of each page");
     let us = timed(&m, huge, 0, MADV_COLD);
     show(&format!("MADV_COLD of each whole huge page, {us:.1} us a call"));
     let us = timed(&m, page, 0, MADV_COLD);
@@ -185,7 +203,7 @@ fn cold(cpu: usize) {
     let us = timed(&m, huge / 2, huge / 2, MADV_DONTNEED);
     show(&format!("DONTNEED of the second half of each, {us:.1} us a call"));
     drop(m);
-    let m = Map::resident(len, Pages::Huge);
+    let m = filled(1);
     show("filled again");
     let us = timed(&m, huge / 2, 0, MADV_COLD);
     show(&format!("MADV_COLD of the first half of each, {us:.1} us a call"));
@@ -194,7 +212,7 @@ fn cold(cpu: usize) {
     let us = timed(&m, huge / 2, huge / 2, MADV_DONTNEED);
     show(&format!("DONTNEED of the other half, {us:.1} us a call"));
     drop(m);
-    let m = Map::resident(len, Pages::Huge);
+    let m = filled(1);
     show("filled again");
     let us = timed(&m, 16 * page, huge / 4, MADV_DONTNEED);
     show(&format!("DONTNEED of 16 pages inside each, {us:.1} us a call"));
@@ -212,6 +230,11 @@ fn cold(cpu: usize) {
     }
     println!("  rewrite all of it after the split: {:.1} ns a page", ns_of(ticks() - t0) / (len / page) as f64);
     show("rewritten");
+    drop(m);
+    let m = filled(0);
+    show("filled with zeros: every page of the huge pages reads zero");
+    let us = timed(&m, page, 0, MADV_COLD);
+    show(&format!("MADV_COLD of one page of each, {us:.1} us a call"));
 }
 
 /// The test of whether this CPU's TLB uses the contiguous bit. A partial `mprotect` splits a huge
@@ -246,16 +269,15 @@ fn contig(cpu: usize) {
     let line = line(cpu);
     println!("# one line a page in random order, CPU {cpu}, page {page}: cycles a load");
     println!("# pages  span_MiB  small  split  huge");
-    for pages in [64usize, 128, 160, 192, 256, 512, 1024, 2048, 3072, 4096, 8192, 16384, 32768, 65536] {
-        if pages * page > span {
+    for pages in [64usize, 128, 160, 192, 256, 512, 1024, 2048, 3072, 4096, 8192, 16384, 32768] {
+        if pages * page > span - huge {
             break;
         }
         let row = |map: &Map| -> f64 {
             let mut colours = Rng(0xc0c0_1234 + pages as u64);
-            let stride = span / pages;
+            // Dense pages, from past the first huge page's split run.
             let mut at: Vec<*mut u8> = (0..pages)
-                // Past the first page of each huge page, which the split left apart.
-                .map(|i| map.p.wrapping_add((i * stride).max(page) + (colours.next() as usize % (page / line)) * line))
+                .map(|i| map.p.wrapping_add(huge / 2 + i * page + (colours.next() as usize % (page / line)) * line))
                 .collect();
             Rng(0x1111_2222).shuffle(&mut at);
             time_chase(link(&at), (pages * 4).clamp(1 << 18, 1 << 21), pages * 2, 3, &cycles).cycles

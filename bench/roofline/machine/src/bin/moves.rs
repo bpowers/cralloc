@@ -5,6 +5,7 @@
 //! moves atomics A B [ms]         contended and uncontended ldadd and cas on one line
 //! moves nextuser A B [rounds]    the extra cost to a producer when a consumer on B read and wrote
 //!                                the objects first, by object size and order
+//! moves nextread A B [rounds]    the same when A reads them in a chase, so that no load overlaps
 //! ```
 use roofline_machine::*;
 use std::sync::Barrier;
@@ -239,6 +240,72 @@ fn nextuser(a: usize, b: usize, rounds: usize) {
     }
 }
 
+/// The same hand-off, but the producer reads each object in a chase, one load waiting for the last:
+/// the price of a line that nothing can overlap. `nextuser` is the other end: a burst of stores,
+/// which a weakly ordered core can commit around one that waits.
+fn nextread(a: usize, b: usize, rounds: usize) {
+    let line = line(a);
+    let map = Map::resident(1 << 21, Pages::Small);
+    // SAFETY: inside a live mapping that outlives the threads, aligned.
+    let flag = unsafe { AtomicU64::from_ptr(map.p.cast()) };
+    let data = map.p.wrapping_add(1 << 16);
+    println!("# reader on {a}, writer on {b}: ns a load in a chase through objects the writer just wrote");
+    println!("# object  objects  alone_ns  with_writer_ns  extra_ns_per_load");
+    for (size, count) in [(64usize, 512usize), (128, 256), (256, 128)] {
+        let mut at: Vec<*mut u8> = (0..count).map(|i| data.wrapping_add(i * size)).collect();
+        Rng(0xfeed_beef_1234_5677).shuffle(&mut at);
+        let start = link(&at) as usize;
+        let order: Vec<usize> = at.iter().map(|&p| p as usize).collect();
+        let order = &order;
+        let passes = 4096u64;
+        let measure = |writer: bool| -> f64 {
+            flag.store(0, Relaxed);
+            let barrier = Barrier::new(2);
+            let bb = &barrier;
+            std::thread::scope(|s| {
+                s.spawn(move || {
+                    pin(b);
+                    bb.wait();
+                    for i in 0..passes {
+                        while flag.load(Acquire) != 2 * i + 1 {}
+                        if writer {
+                            for &o in order {
+                                // SAFETY: a word of the object past its link.
+                                unsafe { (o as *mut u64).add(1).write_volatile(i) };
+                            }
+                        }
+                        flag.store(2 * i + 2, Release);
+                    }
+                });
+                let h = s.spawn(move || {
+                    pin(a);
+                    bb.wait();
+                    let mut sum = 0u64;
+                    let mut p = start as *const usize;
+                    for i in 0..passes {
+                        while flag.load(Acquire) != 2 * i {}
+                        let t0 = ticks();
+                        p = chase(p, count);
+                        sum += ticks() - t0;
+                        flag.store(2 * i + 1, Release);
+                    }
+                    std::hint::black_box(p);
+                    ns_of(sum) / passes as f64 / count as f64
+                });
+                h.join().unwrap()
+            })
+        };
+        let (mut alone, mut with) = (vec![], vec![]);
+        for _ in 0..rounds {
+            alone.push(measure(false));
+            with.push(measure(true));
+        }
+        let (x, y) = (median(&mut alone), median(&mut with));
+        println!("{size:6} {count:6} {x:8.2} {y:8.2} {:8.2}", y - x);
+        let _ = line;
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -246,6 +313,7 @@ fn main() {
         Some("pingpong") => pingpong(num(2, 8), num(3, 9), num(4, 5)),
         Some("atomics") => atomics(num(2, 8), num(3, 9), num(4, 30) as u64),
         Some("nextuser") => nextuser(num(2, 8), num(3, 9), num(4, 5)),
-        _ => eprintln!("usage: moves pingpong|atomics|nextuser"),
+        Some("nextread") => nextread(num(2, 8), num(3, 9), num(4, 5)),
+        _ => eprintln!("usage: moves pingpong|atomics|nextuser|nextread"),
     }
 }

@@ -176,7 +176,10 @@ impl Counters {
             let exclude_guest = 1u64 << 20;
             attr[5] = disabled | exclude_hv | exclude_guest | if user_only { exclude_kernel } else { 0 };
             let fd = unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 8u64) };
-            assert!(fd >= 0, "perf_event_open: {}", errno());
+            // A virtual machine may have no counters: the nanoseconds still hold, and cycles read 0.
+            if fd < 0 {
+                eprintln!("no counter: errno {}", errno());
+            }
             fd as i32
         };
         let (ty, cycles) = cycle_event();
@@ -185,9 +188,11 @@ impl Counters {
 
     fn start(&self) {
         for &fd in &self.0 {
-            unsafe {
-                ioctl(fd, 0x2403, 0);
-                ioctl(fd, 0x2400, 0);
+            if fd >= 0 {
+                unsafe {
+                    ioctl(fd, 0x2403, 0);
+                    ioctl(fd, 0x2400, 0);
+                }
             }
         }
     }
@@ -196,6 +201,9 @@ impl Counters {
     fn stop(&self) -> [u64; 3] {
         let mut out = [0u64; 3];
         for (i, &fd) in self.0.iter().enumerate() {
+            if fd < 0 {
+                continue;
+            }
             unsafe { ioctl(fd, 0x2401, 0) };
             let mut b = [0u8; 8];
             let n = unsafe { read(fd, b.as_mut_ptr().cast(), 8) };
@@ -242,7 +250,9 @@ impl How {
 fn run_one(how: How, len: usize, counters: &Counters, barrier: Option<&Barrier>) -> [f64; 4] {
     let m = Map::new(len);
     let advice = if how == How::Huge { HUGEPAGE } else { NOHUGEPAGE };
-    assert_eq!(adv(m.p, m.len, advice), 0);
+    // A kernel without transparent huge pages refuses either advice; it maps small pages anyway.
+    let refused = adv(m.p, m.len, advice);
+    assert!(refused == 0 || refused == 22, "madvise: {refused}");
     if how == How::Present {
         assert_eq!(adv(m.p, m.len, POPULATE_WRITE), 0);
     }

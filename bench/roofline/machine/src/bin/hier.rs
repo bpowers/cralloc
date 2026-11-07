@@ -89,7 +89,7 @@ fn tlb(cpu: usize) {
         3072, 3328, 3584, 4096, 5120, 6144, 8192, 12288, 16384, 32768, 65536,
     ];
     println!("# one line a page, random order, CPU {cpu}, page {page}: cycles a load");
-    println!("# pages  span_MiB  small  huge  extra  extra_ns");
+    println!("# pages  span_MiB  small  huge  extra  small_ns  huge_ns  extra_ns");
     let most = counts[counts.len() - 1] * page;
     let small = Map::resident(most, Pages::Small);
     let large = Map::resident(most, Pages::Huge);
@@ -99,11 +99,13 @@ fn tlb(cpu: usize) {
         let t_small = time_chase(page_walk(&small, page, 1, n, 0x5555_1234), loads, n * 2, 3, &cycles);
         let t_large = time_chase(page_walk(&large, page, 1, n, 0x5555_1234), loads, n * 2, 3, &cycles);
         println!(
-            "{n:6} {:7.1} {:7.2} {:7.2} {:7.2} {:7.2}",
+            "{n:6} {:7.1} {:7.2} {:7.2} {:7.2} {:7.2} {:7.2} {:7.2}",
             (n * page) as f64 / (1 << 20) as f64,
             t_small.cycles,
             t_large.cycles,
             t_small.cycles - t_large.cycles,
+            t_small.ns,
+            t_large.ns,
             t_small.ns - t_large.ns
         );
     }
@@ -116,7 +118,7 @@ fn tlbsets(cpu: usize) {
     let cycles = Counter::cycles(cpu);
     let page = page();
     let counts = [2usize, 4, 6, 8, 10, 12, 14, 16, 20, 24, 32, 48, 64, 96, 128, 192, 256];
-    println!("# one line a page, random order, CPU {cpu}: cycles a load, by stride in pages (rows) and pages (columns)");
+    println!("# one line a page, random order, CPU {cpu}: ns a load, by stride in pages (rows) and pages (columns)");
     print!("# stride");
     for n in counts {
         print!(" {n:6}");
@@ -131,7 +133,7 @@ fn tlbsets(cpu: usize) {
         for &n in &counts {
             let start = page_walk(&map, page, stride, n, 0x7777_1111 + n as u64);
             let t = time_chase(start, 1 << 18, n * 4, 3, &cycles);
-            print!(" {:6.1}", t.cycles);
+            print!(" {:6.2}", t.ns);
         }
         println!();
     }
@@ -285,6 +287,30 @@ fn run_length(cpu: usize, mib: usize) {
     }
 }
 
+/// Reads `size` bytes with the widest loads there are, four 16-byte registers at a time.
+///
+/// # Safety
+///
+/// `size` bytes at `p` are readable, and `size` is a multiple of 64.
+#[inline(never)]
+unsafe fn read_pass(p: *const u8, size: usize) {
+    // SAFETY: the caller's range; only the clobbered registers change.
+    unsafe {
+        std::arch::asm!(
+            "2:",
+            "ldp q0, q1, [{p}]",
+            "ldp q2, q3, [{p}, #32]",
+            "add {p}, {p}, #64",
+            "subs {n}, {n}, #64",
+            "b.ne 2b",
+            p = inout(reg) p => _,
+            n = inout(reg) size => _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            options(nostack, readonly),
+        );
+    }
+}
+
 /// GiB/s from a pass over `len` bytes by `f`, the fastest of a few, on each CPU at once.
 fn bandwidth(cpus: &[usize]) {
     println!("# CPUs {cpus:?} at once; GiB/s for each and all together");
@@ -310,18 +336,7 @@ fn bandwidth(cpus: &[usize]) {
                                 // SAFETY: both buffers hold `size` bytes.
                                 unsafe {
                                     match kind {
-                                        0 => {
-                                            let mut sum = 0u64;
-                                            let p = a.p.cast::<u64>();
-                                            let mut i = 0;
-                                            while i < size / 8 {
-                                                sum = sum
-                                                    .wrapping_add(p.add(i).read_volatile())
-                                                    .wrapping_add(p.add(i + 1).read_volatile());
-                                                i += 2;
-                                            }
-                                            std::hint::black_box(sum);
-                                        }
+                                        0 => read_pass(a.p, size),
                                         1 => std::ptr::write_bytes(a.p, 0, size),
                                         2 => std::ptr::write_bytes(a.p, 0xa5, size),
                                         _ => std::ptr::copy_nonoverlapping(a.p, b.p, size),
