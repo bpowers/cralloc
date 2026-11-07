@@ -16,8 +16,8 @@ the bytes the program holds at the sizes it asked for.
   for 15 billion operations ends at 1.105 times live, flat from the first minute, the least at 2 GiB
   and up but for glibc by 0.002 at 5 GiB. The order service holds the least at every size, 1.073
   against jemalloc's 1.095 at 10 GiB. Across ten servers at load cralloc is level with jemalloc,
-  which is lower on the small ones. A 10.6-hour Qdrant soak beside jemalloc drifted in neither, with
-  cralloc 13 to 31 MiB lower in the median of each five cycles.
+  which is lower on most of the small ones. A 10.6-hour Qdrant soak beside jemalloc drifted in
+  neither, with cralloc 13 to 31 MiB lower in the median of each five cycles.
 - **Most of what is left on a steady heap is class rounding.** Of the 10.5 points over live on the
   steady cache, 7.8 are slots larger than the request, which jemalloc pays too. cralloc's lead at a
   peak is metadata (4.6 MiB against 38 at 2 GiB) and free slots inside slabs (15 MiB against 45).
@@ -76,7 +76,7 @@ Connect server holding 1M records.
 | Parked objects age out | Burst at 12 s, before the floor: 73 to 4.3 MiB | A refill per class per interval |
 | Refresh one retiring magazine in 32, up to one in 4 on evidence | 2 GiB trough 1.10 to 0.95 GiB | +0.6% of cycles where it acts, nothing elsewhere |
 | Tail rule | Wandering peaks 1.23 to 1.14, troughs 4.29 to 3.27 | 1 to 1.5% on the job; huge pages at peaks 1.7 to about 0.7 GiB |
-| A 32 MiB floor | Fewer `madvise` calls and refaults: the log store's first 5 ms of a burst 370 to 25 faults, its remaining cost the idle drains | 33 MiB kept after a peak |
+| A 32 MiB floor | Fewer `madvise` calls and refaults: with the rule that a silence ages no frontier, the log store's first 5 ms of a burst 370 to 25 faults, its remaining cost the idle drains | 33 MiB kept after a peak |
 | Magazines of 64 KiB, not 128 | Mixed pipeline's peak 7.07 to 5.12 MiB | +5.1% on that job, nothing resolved elsewhere |
 | Background thread, on by default | Memory returns in a silence; requests take no clocked, hold or growth steps | 35 us a wake-up; 9.8 s of CPU in 10.6 hours of Qdrant |
 
@@ -276,8 +276,9 @@ Tried and rejected:
   None at all moved a growing class's boundary about ten times an interval (716 raises a run; 16 MiB
   145; 64 MiB 97).
 
-The region's tail word is modelled in `tla/Tail.tla`, which found two defects, both fixed
-([verification.md](verification.md)).
+The region's tail word is modelled in `tla/Tail.tla`, which found two defects, both fixed: an owner
+that cleared a repair request a refused call had left, and a fork child inheriting a word whose
+owner's call never finished.
 
 ## In a trough, placement decides, and reuse order sets placement
 
@@ -477,7 +478,7 @@ in use, not on the heap.
 | One CPU's spares and stock; the depot on one domain | 1 MiB; 128 KiB a class, 5.5 MiB |
 | All CPUs, every class touched | about 94 MiB at 32 CPUs, 750 at 256 |
 | Pages pinned by one full magazine of 1,022 objects | 4 MiB, one object a page; 2 GiB in a huge-page part |
-| Free and resident | the floor while idle; over the cap, carving is matched by a purge; no bound while frees or reuse run |
+| Free and resident | what a pass can return: the floor while idle; over the cap, carving is matched by a purge. Free slots beside live objects: no bound |
 
 ## After a peak, and in a silence
 
@@ -542,10 +543,10 @@ gets the work on those four. 2026-10-22 against `3fdec1b` and `040033a`, interle
   What is left is the idle drains, and it is still behind jemalloc ([servers.md](servers.md)). The
   order service's doublings: [large-blocks.md](large-blocks.md).
 - DataFusion's peak holds, 0 runs of 20 over 880 MiB, with the thread waiting 87 ms a run for a CPU
-  behind four workers. In the first build 3 runs of 14 peaked at 1,030 to 1,100 MiB, about 180 over,
+  behind four workers. In the first build 3 runs of 14 peaked at 1,030 to 1,040 MiB, about 180 over,
   and 2 of 20 after two other changes. The cause was the hold's plan, which counted only stamps not
-  yet held, so a region whose look stopped at its bound waited a whole hold. The bound on unpaid
-  growth is kept so that the bound on memory does not rest on the scheduler; no run needed it.
+  yet held, so a region whose look stopped at its bound waited a whole hold. The limit on unpaid
+  growth is kept so that memory's bound does not rest on the scheduler; no DataFusion run needed it.
 - Rejected: a yield after each step. Each handed a worker a whole slice: the thread waited 462 ms a
   run, and 10 runs of 20 peaked 40 to 180 MiB over, while Meilisearch's tail and the workers' wait
   did not move. Lower priority was not built, for the same reason.
@@ -681,8 +682,7 @@ server's figures at exit are after the others gave memory back, so compare its p
   bound.
 - **Past the ladder.** Nothing above 10 GiB, no NUMA, the log store and mini-redis not on it, and no
   burst after a silence at 10 GiB with free memory to fault back.
-- **Parked memory against CPU count.** Servers were pinned to four CPUs, so the bounds above are
-  arithmetic.
+- **Parked memory against CPU count.** Servers were pinned to four CPUs; the bounds are arithmetic.
 - **Whether turnover sets a trough.** One heap at two values of the long-lived share would test what
   the table above only fits.
 - **Packing the smallest classes** in a trough. No rule built, and it is the gap to jemalloc.
@@ -693,6 +693,6 @@ server's figures at exit are after the others gave memory back, so compare its p
 - **The threshold at 4 MiB** was refused to stay under jemalloc by a few MiB, before the goal said
   fixed MiB are spent freely. Worth measuring again.
 - **Meilisearch while indexing.** Before any load it peaks at 1,388 to 1,433 MiB against jemalloc's
-  1,230 to 1,251. Its heap is still falling when load starts, where jemalloc's has already fallen and
-  rises under load. Through 70% load it reaches at most 710 to 739 against 778 to 790
+  1,230 to 1,251. Its heap is still falling when load starts, where jemalloc's has already fallen
+  and rises under load. Through 70% load it reaches at most 710 to 739 against 778 to 790
   ([standings.md](standings.md)). The indexing excess is not attributed.
