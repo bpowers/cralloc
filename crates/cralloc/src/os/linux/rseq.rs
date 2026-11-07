@@ -30,9 +30,7 @@ pub(crate) const EBUSY: OsError = OsError::from_errno(16);
 /// (AAELF64, "Thread Local Storage").
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn thread_pointer() -> Option<NonNull<u8>> {
-    NonNull::new(ptr::with_exposed_provenance_mut(
-        super::syscall::thread_register(),
-    ))
+    NonNull::new(super::syscall::thread_register())
 }
 
 /// The calling thread's thread pointer: the FS base, at which its static thread-local data

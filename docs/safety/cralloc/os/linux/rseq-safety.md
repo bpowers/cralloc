@@ -10,6 +10,8 @@ arch_prctl(2), rt_sigprocmask(2).
 
 ## RSEQ-01: `arch_prctl(ARCH_GET_FS)` in `thread_pointer`
 
+On aarch64 `thread_pointer` has no block of its own: it reads the register (SYSCALL-03).
+
 **Obligations.** The call writes 8 bytes through its second argument and nothing else.
 
 **Proof.** `ARCH_GET_FS` stores the calling thread's FS base, an `unsigned long`, at the user
