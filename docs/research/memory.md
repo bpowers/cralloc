@@ -425,9 +425,11 @@ again, and the allocator chased its own tail: 24,500 `madvise` calls on a `HashM
 times, against 43. Refaults are reuse, not growth. A cap of 16 MiB returned a burst sooner and left
 the peaks where they were.
 
-**Only what fills did not reach.** Passes that started at the top left a quiet heap's lowest region
-resident; passes that carried on round the heap took turns in a server's busiest regions and cost it
-2 to 4%. The frontier fixes both.
+**Only what fills did not reach.** Passes that started at the top spent their goal re-purging the
+pages a quiet program revived in the higher regions, and left the lowest region's resident
+(simulated, 147 KiB over what `collect` leaves after 40 intervals). Passes that carried on round the
+heap reached those, and took turns in a busy server's lowest regions: 2 to 4% of cycles on the RPC
+jobs, 12% more faults. The frontier fixes both.
 
 - The RPC jobs' faults in the measured window fall by three quarters (1,050 to 250, 2,250 to 480,
   260 to 54), cycles level.
@@ -474,13 +476,15 @@ when allocated whole.
 | Case | cralloc | jemalloc | mimalloc |
 |---|---:|---:|---:|
 | Eight CPUs use every class, then one uses one | 7 to 9 | 24.7 | 15.8 |
+| Eight CPUs, four classes | 1.1 | 4.3 | 8.3 |
 | Two CPUs, 44 classes | 1.2 | 4.1 | 6.2 |
 | 16 threads on two CPUs, 44 classes | 1.5 | 52.2 | 28.3 |
 | 256 blocks of 1 MiB, one page written each | 2.3 | 2.9 | 276 |
 | 4,096 blocks of 64 KiB, one page written each | 32.2 | 33.2 | 344 |
 
-At the moment of a phase change the budget shows: eight CPUs using every class peak at 47 to 55 MiB
-against jemalloc's 28.
+Their peaks show the magazine budget at the moment of the change (cgroup, MiB, 2026-10-18 at
+`b5d6e8f`, cralloc, jemalloc, mimalloc): eight CPUs using every class 52.7, 29.0, 18.6; two CPUs
+with 44 classes 15.4, 7.8, 6.9; but 16 threads on two CPUs 13.0, 52.4, 31.4.
 
 **What is bounded, by arithmetic from today's constants.** Parked memory depends on CPUs and classes
 in use, not on the heap.
@@ -558,10 +562,13 @@ against `3fdec1b` and `040033a`, interleaved:
   run, and 10 runs of 20 peaked 40 to 180 MiB over, while Meilisearch's tail and the workers' wait
   did not move. Lower priority fails the same way.
 
-Meilisearch is not resolved. No p99.9 regression is shown: medians level (45.4 ms against 45.8),
-every server thread's run-queue wait the same. But the spread over six runs is the widest (36 to 53
-ms against 42 to 47), and its p99 is 0.7 to 2.8 ms above. The thread wakes 25 times a second at 70%
-load instead of 2 and does about 10 ms of work a second, with cycles a request level.
+Moving the steps to the thread costs Meilisearch's tail nothing shown. In one binary switching it at
+run time, 14 paired rounds of two minutes at 70% (2026-10-22, 95% intervals): p99 -0.9 ms (-2.1 to
++0.5), p99.9 0.0 (-2.3 to +2.3), cycles -0.7% (-1.9 to +0.6). Separate builds had read +2.0 ms at
+p99.9, but two builds of one behaviour differ by about 1 ms, with an interval reaching 3.4
+([servers.md](servers.md), "Tails the allocator caused"). Faults were 87 against 83 a request in
+that binary and level between the builds, so whether they rise is not settled. The thread wakes 25
+times a second instead of 2 and does about 9 ms of work a second.
 
 ## Commit calls grow with the logarithm of the heap
 
@@ -617,7 +624,33 @@ Rejected: `MADV_COLLAPSE` at the switch, 0.1 to 0.4 ms of synchronous work per 2
 adding nothing once the threshold is low. Populate-ahead: faults cut three to five times, kernel
 time by at most a tenth, about 1 MiB at every peak.
 
+## Which rules earn their place
+
+Each rule switched off in a build of its own, against cralloc as built. Times and peaks are for the
+rule off.
+
+| Rule off | What changed | Verdict |
+|---|---|---|
+| Huge pages for blocks that grow by doubling | One Vec to 256 MiB 131%* slower, 64 Vecs 37%* slower; peaks within 1% | Earns its place |
+| Staggered starts for large blocks | 64 Vecs walked together 313%* slower; sparse 64 KiB blocks peak at 17.8 MiB against 33.4 | Earns it on time; costs memory when a block is touched in its first page |
+| Huge pages for small classes past 16 MiB | JSON 33.5%* slower, BTreeMap 1.7%*; peaks 0.6 to 1.4%* lower | Earns its place |
+| The magazine age limit | A burst ends at 60.1 MiB against 4.9 | Earns its place |
+| The depot's shedding | A burst ends at 57.1 MiB against 4.9; phase change 16.9 against 9.4 | Earns its place |
+| The spare sweep | A burst ends at 7.6 MiB against 4.9 | Earns a little |
+| The refresh at one in 32 | Mixed pipeline's peak 8.8%* lower; a burst's end unchanged | Not at this rate; its work is the trough |
+| The density test on grown blocks | Nothing; no job here grows a block sparsely | Evidence is in [large-blocks.md](large-blocks.md) |
+| The move that skips all-zero pages | Nothing that reproduced; no job here moves a sparse block | Evidence is in [large-blocks.md](large-blocks.md) |
+
+*2026-10-18 at `b5d6e8f`, not repeated; several rules have changed since, and the bursts' ends
+predate the floor. Eleven jobs, five interleaved rounds, the memory shapes two; `*` marks a 95%
+interval that excludes zero.* Separate builds move placement-sensitive jobs: one Vec to 256 MiB
+moved by up to 9% and the RPC log job by up to 4.7% under rules that barely reach them, so smaller
+differences there are left out. The skip-zero build's 8.5% on that Vec was one of these: six later
+rounds put it within 2%. The refresh's two readings disagree (7.1 to 3.3 MiB after a burst on
+2026-10-17, unchanged here), and the difference was not traced; both are under today's floor.
+
 ## Small heaps
+
 
 The goals say the peak of a heap of a few megabytes is not something to tune. This is what the fixed
 cost is. Charged at exit (own pages, page tables, kernel slab objects), cralloc against jemalloc and
@@ -681,8 +714,7 @@ after 4 s, in 2 MiB units. None reclaims an idle cache without help.
   Refresh on evidence at 5 and 10 GiB, and a real server in a trough with it, are not measured.
 - **Why tcmalloc, mimalloc and glibc do not pack at any turnover,** what tips a quiet burst into
   having no heartbeat, and how a program that swings over hours fares.
-- **Meilisearch's p99 under the thread** (above), and what is left of the size shift's gap with the
-  tail rule on: it was not accounted again.
+- **What is left of the size shift's gap** with the tail rule on. It was not accounted again.
 - **The threshold at 4 MiB.** It was refused to stay under jemalloc by a few MiB, before the goal
   said fixed MiB are spent freely. Worth measuring again, with its speed gain.
 - **Meilisearch's fill.** In the 2026-10-28 standings its heap reaches 885 to 987 MiB in the first 5
