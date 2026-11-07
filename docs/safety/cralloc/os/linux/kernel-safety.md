@@ -215,7 +215,7 @@ any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what 
 `back/region.rs`).
 
 On aarch64 `ticks` has no block of its own: `generic_timer` is SYSCALL-03, and the scale is a shift
-that cannot overflow the shift amount (`timer_shift`).
+of at most 32 bits (`timer_shift`).
 
 ## KERNEL-14: `madvise` of an empty range in `page_shift_by_probing`, on aarch64
 

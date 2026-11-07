@@ -228,7 +228,7 @@ pub unsafe trait Os: Sync {
     /// A count that rises with wall-clock time, read without a system call: the CPU's
     /// timestamp counter on x86-64, the generic timer scaled up to a few gigahertz on aarch64,
     /// and a clock the test advances in the simulators. Its rate is not known exactly (between
-    /// 1 and 6 GHz on x86-64, and between 2 and 4 GHz on aarch64), and nothing promises that two
+    /// 1 and 6 GHz on x86-64, and between 3 and 6 GHz on aarch64), and nothing promises that two
     /// CPUs agree or that it never goes back. It paces what happens once an interval: the idle
     /// check's drains and the back end's clocked purge, both read on slow paths. No promise of
     /// this trait's safety contract depends on it: a wrong count only makes a drain or a purge

@@ -67,29 +67,6 @@ macro_rules! cralloc_a64_arm_area {
     };
 }
 
-/// [`cralloc_a64_arm`] for the routines that read `__rseq_offset` directly where they can: an
-/// executable, which has its own copy of glibc's.
-#[cfg(all(feature = "executable", not(target_env = "musl")))]
-macro_rules! a64_arm_direct {
-    () => {
-        concat!(
-            "5:\n",
-            "adrp x9, __rseq_offset\n",
-            "ldr x9, [x9, :lo12:__rseq_offset]\n",
-            "mrs x10, tpidr_el0\n",
-            "add x9, x9, x10\n",
-            $crate::cralloc_a64_arm_area!(),
-        )
-    };
-}
-
-#[cfg(any(not(feature = "executable"), target_env = "musl"))]
-macro_rules! a64_arm_direct {
-    () => {
-        $crate::cralloc_a64_arm!()
-    };
-}
-
 /// The sequence's descriptor and, after the function, its abort handler, which starts the sequence
 /// again.
 #[doc(hidden)]
