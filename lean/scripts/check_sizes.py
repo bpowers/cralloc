@@ -2,14 +2,16 @@
 """Checks the size and alignment of every naked function the emitter
 writes, by assembling it. Exits non-zero on violations, naming each.
 
-The design's rule for a routine emitted as a naked function
+The design's rule for a routine emitted as a naked function on x86-64
 (docs/design.md, "Front end"; docs/research/roofline.md, "The front end sets a
 cliff by micro-op count and by lines, not by alignment"):
 it starts on a 64-byte boundary, and its hot path is at most 64 bytes, or
 from 76 to 128: one line crossing costs nothing unless only the last few
 instructions spill into the second line, which 65 to 75 bytes would do. The micro-op half of the rule is
 `Rust.checkUops`, in Lean; bytes depend on the assembler's encodings, so
-they are measured here, on the assembled output.
+they are measured here, on the assembled output. On AArch64 a routine has only
+the alignment to keep: its front end has no such limit
+(docs/research/firestorm.md).
 
 Each `naked_asm!` template of `<dir>/<target>/*.rs` (by default the
 allocator crate's `src/front/generated`) is assembled alone
@@ -19,8 +21,9 @@ left as undefined symbols (so a branch to one takes the 32-bit form it
 takes when linked). The function's bytes are those of its section up to
 its alignment directive (`Printer.funcAlign`), which follows its return:
 everything in place, the hot path; the cold code and the descriptor are in
-sections of their own (`.text.unlikely`, `__rseq_cs`). Its start is aligned
-if its section is: the directive raises the section's alignment.
+sections of their own (`.text.unlikely`, `__rseq_cs`), or on AArch64 the cold
+code is in a subsection after it. Its start is aligned if its section is: the
+directive raises the section's alignment.
 """
 
 import pathlib
@@ -36,6 +39,25 @@ MAX_BYTES = 128
 ONE_LINE = 64
 SPILL_END = 75
 ALIGN = 64
+
+
+class Arch:
+    """How to assemble a target's functions, and whether their sizes matter."""
+
+    def __init__(self, triple: str, prologue: str, tail_call: str, sized: bool):
+        self.triple = triple
+        self.prologue = prologue
+        # How a hot path that ends in a tail call of an operand ends.
+        self.tail_call = tail_call
+        self.sized = sized
+
+
+X86_64 = Arch("x86_64-unknown-linux-gnu", ".intel_syntax noprefix\n", "jmp vg_op_", True)
+AARCH64 = Arch("aarch64-unknown-linux-gnu", "", "b vg_op_", False)
+
+
+def arch_of(target: str) -> Arch:
+    return AARCH64 if target.startswith("aarch64") else X86_64
 
 # A crate function, or a copy exported as a C symbol inside a generated macro
 # (`Rust.exportsFile`), which the same rules apply to.
@@ -93,7 +115,7 @@ def functions(path: pathlib.Path):
         yield name, cfg, template_asm(template, operands)
 
 
-def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
+def measure(mc: str, arch: Arch, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
     """The bytes of `name`'s hot path, from its entry to the end of its
     return (or its tail call), and the alignment of its section. What follows the return before
     the alignment directive (stubs that jump to a slow path,
@@ -106,21 +128,21 @@ def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
     ends, depth = [], 0
     for i, l in enumerate(lines):
         t = l.strip()
-        if t.startswith(".pushsection"):
+        if t.startswith(".pushsection") or t == ".subsection 1":
             depth += 1
-        elif t.startswith(".popsection"):
+        elif t.startswith(".popsection") or t == ".subsection 0":
             depth -= 1
-        elif depth == 0 and (t == "ret" or t.startswith("jmp vg_op_")):
+        elif depth == 0 and (t == "ret" or t.startswith(arch.tail_call)):
             ends.append(i)
     if not ends:
         raise ValueError("has no return")
     end = ends[0] + 1
     body = "\n".join(lines[:end] + [f"{name}_end:"] + lines[end:-1])
-    src = (f'.intel_syntax noprefix\n.section .text.{name},"ax",@progbits\n'
+    src = (f'{arch.prologue}.section .text.{name},"ax",@progbits\n'
            f"{name}:\n{body}\n{lines[-1]}\n")
     s, o = tmp / f"{name}.s", tmp / f"{name}.o"
     s.write_text(src)
-    subprocess.run([mc, "-triple=x86_64-unknown-linux-gnu", "-filetype=obj",
+    subprocess.run([mc, f"-triple={arch.triple}", "-filetype=obj",
                     "-o", str(o), str(s)], check=True, capture_output=True, text=True)
     syms = subprocess.run(["llvm-nm", str(o)], check=True, capture_output=True,
                           text=True).stdout
@@ -153,19 +175,20 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = pathlib.Path(d)
         for path in sorted(gen.glob("*/*.rs")):
+            arch = arch_of(path.parent.name)
             for name, cfg, asm in functions(path):
                 count += 1
                 where = f"{path.relative_to(gen)}: {name}" + (f" [{cfg}]" if cfg else "")
                 try:
-                    size, align = measure(mc, name, asm, tmp)
+                    size, align = measure(mc, arch, name, asm, tmp)
                 except (ValueError, subprocess.CalledProcessError) as e:
                     msg = e.stderr.strip() if isinstance(e, subprocess.CalledProcessError) else e
                     bad.append(f"{where}: cannot measure: {msg}")
                     continue
                 print(f"{where}: {size} bytes, aligned to {align}")
-                if size > MAX_BYTES:
+                if arch.sized and size > MAX_BYTES:
                     bad.append(f"{where} is {size} bytes, more than {MAX_BYTES}")
-                elif ONE_LINE < size <= SPILL_END:
+                elif arch.sized and ONE_LINE < size <= SPILL_END:
                     bad.append(f"{where} is {size} bytes: past one line by too little "
                                f"({ONE_LINE + 1} to {SPILL_END})")
                 if align < ALIGN:
