@@ -10,7 +10,7 @@ use super::super::word::Atomic;
 use super::super::{Kind, State};
 use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Shape, SimOs, Standard};
-use crate::stress::{FULL, Gate, LEDGER_BYTES, QUICK, Rounds, count, jitter, own, spread};
+use crate::stress::{FULL, Gate, LEDGER_BYTES, QUICK, Rounds, count, failed, jitter, own, spread};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::Relaxed;
@@ -257,6 +257,7 @@ fn a_block_passed_with_no_order_can_be_freed(time: Duration) {
                     let block = back.alloc(class, class.size()).expect("a slot");
                     passed.store(block.ptr.as_ptr(), Relaxed);
                     while !passed.load(Relaxed).is_null() {
+                        assert!(!failed(), "another thread of this test failed");
                         core::hint::spin_loop();
                     }
                 } else {
@@ -264,6 +265,7 @@ fn a_block_passed_with_no_order_can_be_freed(time: Duration) {
                         if let Some(block) = NonNull::new(passed.load(Relaxed)) {
                             break block;
                         }
+                        assert!(!failed(), "another thread of this test failed");
                         core::hint::spin_loop();
                     };
                     assert_eq!(back.lookup(block.as_ptr()), Some(Kind::Slot(class)));

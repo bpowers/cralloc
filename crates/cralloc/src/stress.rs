@@ -22,7 +22,7 @@
 //! rounds on a timer that does not matter. `CRALLOC_STRESS_MS` overrides the time of either.
 
 use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
-use core::sync::atomic::{AtomicU64, AtomicUsize};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 use std::vec::Vec;
 
@@ -120,6 +120,7 @@ fn run<R: Send>(
                 #[cfg(all(target_os = "linux", not(miri)))]
                 let cpus = cpus.clone();
                 scope.spawn(move || {
+                    let _watch = Watch;
                     #[cfg(all(target_os = "linux", not(miri)))]
                     if let Some(start) = start {
                         pin(cpus[start]);
@@ -137,6 +138,27 @@ fn run<R: Send>(
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
+}
+
+/// Whether a thread of these tests has panicked, so that the threads waiting for it stop waiting and
+/// the test reports the panic, where it would otherwise hang until its time limit. One flag for the
+/// process, since a failure is the end of the run anyway.
+static FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a thread of these tests has panicked: for a test's own waits.
+pub(crate) fn failed() -> bool {
+    FAILED.load(Relaxed)
+}
+
+/// Sets [`FAILED`] if the thread that holds it panics.
+struct Watch;
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            FAILED.store(true, Relaxed);
+        }
+    }
 }
 
 /// Which CPU of the list the next run of threads starts from, so that a test that runs threads many
@@ -195,7 +217,7 @@ impl Rounds {
     /// [`spread`] on to its next CPU when it is time.
     pub(crate) fn go_on(&self, round: u64) -> bool {
         #[cfg(miri)]
-        return round < self.most;
+        return round < self.most && !failed();
         #[cfg(not(miri))]
         {
             // The clock once in a while: it is a system call on some machines.
@@ -205,7 +227,7 @@ impl Rounds {
             let now = Instant::now();
             #[cfg(target_os = "linux")]
             move_on(now);
-            now < self.until
+            now < self.until && !failed()
         }
     }
 }
@@ -236,6 +258,7 @@ impl Gate {
             self.turn.store(turn + 1, Release);
         } else {
             while self.turn.load(Acquire) == turn {
+                assert!(!failed(), "another thread of this test failed");
                 core::hint::spin_loop();
             }
         }

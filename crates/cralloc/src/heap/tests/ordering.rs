@@ -5,7 +5,7 @@
 //! drain, and a launder and a fill.
 
 use super::*;
-use crate::stress::{FULL, LEDGER_BYTES, QUICK, Rounds, count, own, spread, together};
+use crate::stress::{FULL, LEDGER_BYTES, QUICK, Rounds, count, failed, own, spread, together};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -83,7 +83,7 @@ fn pipeline<H: GlobalAlloc + Sync>(
                 let slot = &ring.slots[at];
                 let p = slot.load(Ordering::Acquire);
                 if p.is_null() {
-                    if over {
+                    if over || failed() {
                         break;
                     }
                     // For the move to the next CPU, not to stop.
