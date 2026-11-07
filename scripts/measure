@@ -4,7 +4,8 @@
 #
 # Usage: scripts/measure [--both-l3] command args...
 #   Measurements run one at a time. With --both-l3 (the job also uses cores of the second
-#   L3, whose cache heavy work shares) everything started through scripts/heavy is frozen
+#   L3, or on aarch64 of the first performance cluster, whose cache heavy work shares)
+#   everything started through scripts/heavy is frozen
 #   while the command runs and thawed when it ends, and heavy work that arrives meanwhile
 #   waits. Either way, hold it for minutes, not hours: split a long session into pieces.
 #   After a --both-l3 session heavy work is owed a turn as long as the session ran, five

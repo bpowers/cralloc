@@ -10,13 +10,19 @@
 # command keep counting while it is paused.
 #
 # Usage: scripts/heavy command args...
-#   CRALLOC_HEAVY_CPUS  the CPU list, default 12-15,28-31 (`lscpu -e` shows which CPUs
-#                        share an L3, and `bench/README.md`, "Pinning", which the suite uses).
+#   CRALLOC_HEAVY_CPUS  the CPU list, by default 12-15,28-31 on x86-64 and 0-5 on aarch64, the
+#                        efficiency cores and the first performance cluster (`lscpu -e` shows
+#                        which CPUs share a cache, and `bench/README.md`, "Pinning", which the
+#                        suite uses).
 #   CRALLOC_LOCK_DIR    where the lock files live, default /tmp.
 set -euo pipefail
 
 [ $# -gt 0 ] || { echo "usage: scripts/heavy command args..." >&2; exit 2; }
-cpus="${CRALLOC_HEAVY_CPUS:-12-15,28-31}"
+case "$(uname -m)" in
+  aarch64) default_cpus=0-5 ;;
+  *) default_cpus=12-15,28-31 ;;
+esac
+cpus="${CRALLOC_HEAVY_CPUS:-$default_cpus}"
 locks="${CRALLOC_LOCK_DIR:-/tmp}"
 slice="cralloc-heavy.slice"
 
