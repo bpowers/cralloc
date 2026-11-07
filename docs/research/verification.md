@@ -212,8 +212,7 @@ check, lints in three feature sets and on musl, the workspace's tests, the quick
 the musl front-end tests. `scripts/gate --all` adds every ignored test, the slow Kani harnesses and
 the release-only explorations, in many minutes, before a change to shared types or protocols.
 
-On demand: `lean/scripts/check.sh` (minutes), `tla/check` (about a quarter of an hour on three
-cores), `scripts/preload-check`, `scripts/preload-soak` (about 25 minutes, an hour more with
+On demand: `lean/scripts/check.sh` (minutes), `tla/check` (a little over an hour on three cores), `scripts/preload-check`, `scripts/preload-soak` (about 25 minutes, an hour more with
 suites), the fuzzers, and `scripts/miri` (about twelve CPU hours). Everything that runs the
 allocator is memory-capped, after an uncapped test once took 57 GiB and the machine with it.
 Benchmarks are [measuring.md](measuring.md)'s subject.

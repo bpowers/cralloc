@@ -9,8 +9,8 @@
 # counterexample: TLC must report that X is violated, which shows both that the
 # flaw is real and that the model can see it.
 #
-# TLC_PREFIX is put before each TLC run (for example "taskset -c 11,26,27") and
-# TLC_WORKERS caps its worker threads.
+# TLC_PREFIX is put before each TLC run, and TLC_WORKERS caps its worker threads.
+# Run this through scripts/heavy, like all heavy work.
 
 set -u
 cd "$(dirname "$0")"

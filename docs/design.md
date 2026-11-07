@@ -415,9 +415,11 @@ shifted above the low 19 bits, with the lowest bit set.
 3. Ask the OS to restart every sequence in flight on that CPU (`membarrier`). If the call fails, put
    each old value back with a compare-and-swap against the marker, release the claim and stop.
 4. Read each word again. If it is still the marker, no thread can commit to it, and the drainer owns
-   the old value: it stores zero and, if the old value named a magazine, sends it to the depot. If
-   it is anything else, a sequence that started before step 2 committed, the old value still belongs
-   to that CPU, and the drainer takes nothing and writes nothing.
+   the old value: it clears the marker with a compare-and-swap, since in a child forked during this
+   drain the marker is another generation's and a slow path may already have installed over it, and
+   if the old value named a magazine it sends it to the depot. If it is anything else, a sequence
+   that started before step 2 committed, the old value still belongs to that CPU, and the drainer
+   takes nothing and writes nothing.
 5. Release the claim.
 
 The routines on the fast path treat any marker as "no magazine" or "empty stack" and never store
@@ -468,11 +470,12 @@ or above it have never been allocated, and their memory has never been touched.
   exhausted it assigns a new one to the class.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits with one
   atomic OR. If a bit was already set, the object was freed twice and the process aborts.
-- **Summary bits are hints.** They may be set when nothing below is free, and they never stay clear
-  when something is. A free sets the word's bits and then sets every summary bit above it that it
-  finds clear. Whoever empties a word clears its summary bit and then reads the word again, and sets
-  the bit back if the word is no longer empty. A free does not assume that the first free into an
-  empty word set the summary bit, because that thread may have vanished in a fork before it could.
+- **Summary bits are hints.** They may be set when nothing below is free, and they stay clear over
+  something free only for a moment, or in a fork child until the next free into that word. A free
+  sets the word's bits and then sets every summary bit above it that it finds clear. Whoever empties
+  a word clears its summary bit and then reads the word again, and sets the bit back if the word is
+  no longer empty. A free does not assume that the first free into an empty word set the summary
+  bit, because that thread may have vanished in a fork before it could.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before carving
 fresh memory, and take the lowest address first. Live data packs toward the start of each region and

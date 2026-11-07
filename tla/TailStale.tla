@@ -1,5 +1,5 @@
 ------------------------------ MODULE TailStale ------------------------------
-(* Review: Tail.tla with one change. A thread reads the counted interval
+(* Tail.tla without its flag and looks, and with one change. A thread reads the counted interval
    before it loads the word (Back::raise_marked reads it once for every
    region, with system calls between), so it may take the bit with the
    interval before the current one. To such a thread an owner that took the
@@ -8,8 +8,7 @@
    owner, and stamps the word with the older interval. A third thread can
    then take the bit with the first owner's stamp, and the first owner's
    give-back finds "its" bit and writes over it. The question is whether
-   Agree and OffOnlyReturned survive. Everything below is Tail.tla's but
-   Take and Owned. *)
+   Agree and OffOnlyReturned survive. The rest follows Tail.tla, except that the fork repair keeps the owner bit. *)
 (* The boundary of a region's huge-page tail (crates/cralloc/src/back/tail.rs).
 
    A region's huge-page part has units 1..N. The kernel holds advice per unit,

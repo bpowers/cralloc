@@ -3,8 +3,8 @@
 //! clears that word (`unprepare`) when it loses the race for the class's carving word and gives
 //! the region up.
 //!
-//! Assignment is in no TLA+ model and no exploration: `models::carving` explores
-//! `region::carve` on a region that is already assigned, and the table, the carving word and
+//! `tla/Assign.tla` models the protocol, but no exploration runs this code: `models::carving`
+//! explores `region::carve` on a region that is already assigned, and the table, the carving word and
 //! the header a region gets on the way are real atomics the explorer cannot schedule. So this
 //! is threads racing on a simulated heap, many times over, and a look at every region once
 //! they stop.
