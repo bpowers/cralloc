@@ -1,6 +1,7 @@
 # Safety ledger: `crates/cralloc/src/c/routines.rs`, and the exported C routines
 
-The generated C entry points (`front/generated/x86_64/centry.rs`): `c_malloc`, `c_calloc`,
+The generated C entry points (`front/generated/x86_64/centry.rs`, and on aarch64 the hand-written
+ones in `front/provisional/`, PROVISIONAL-02, which have the same contracts): `c_malloc`, `c_calloc`,
 `c_free` and `c_free_sized`. Lean proves each against its contract
 (`lean/Cralloc/Spec/CEntry.lean`) under any interruption; the obligations below are the
 generated `# Safety` sections, discharged once here for every call: the wrappers in

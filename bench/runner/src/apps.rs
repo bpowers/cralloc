@@ -71,6 +71,18 @@ pub fn check_lock(p: &Paths, program: &str) -> Result<(), String> {
     }
 }
 
+/// Builds the C and C++ in a cargo build for the machine, as the repository's `.cargo/config.toml`
+/// builds the Rust on aarch64: the allocator crates compile their C through `cc` and `cmake`, which
+/// read these. Without it they would call outlined atomics, a handicap of our build and not of
+/// their design. snmalloc takes the page size at compile time and assumes 4 KiB on aarch64.
+pub fn c_flags(c: &mut Command) {
+    if cfg!(target_arch = "aarch64") {
+        let page = bench_harness::mem::page_size();
+        c.env("CFLAGS_aarch64_unknown_linux_gnu", "-mcpu=native");
+        c.env("CXXFLAGS_aarch64_unknown_linux_gnu", format!("-mcpu=native -DSNMALLOC_PAGESIZE={page}"));
+    }
+}
+
 /// What one build took.
 pub struct Built {
     pub build: String,
@@ -99,6 +111,7 @@ pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -
     // Nor does a layout's padding (`benchrun layout`), which builds the workloads only.
     c.env_remove("BENCH_LAYOUT_PAD");
     c.env("BENCH_BASELINES", &p.baselines);
+    c_flags(&mut c);
     if let Some(path) = tools_path(p, program)? {
         c.env("PATH", path);
     }

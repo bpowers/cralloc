@@ -614,7 +614,7 @@ fn freeing_the_region_base_in_a_batch_aborts() {
 }
 
 /// On the real OS, in the design's geometry, where origins are up to a megabyte.
-#[cfg(not(miri))]
+#[cfg(cralloc_real)]
 mod design {
     use super::*;
     use crate::os::linux::LinuxOs;
@@ -625,7 +625,7 @@ mod design {
     /// and mapped to the shared zero page.
     fn present(start: *const u8, len: usize) -> Vec<usize> {
         const PRESENT: u64 = 1 << 63;
-        let page = Geometry::DESIGN.page_size();
+        let page = LinuxOs::geometry().page_size();
         let pagemap = File::open("/proc/self/pagemap").unwrap();
         let mut entries = std::vec![0u8; len / page * 8];
         pagemap
@@ -665,7 +665,7 @@ mod design {
     /// has ever been touched.
     fn untouched_below(back: &Back<'_, LinuxOs>, region: RegionId, origin: usize, when: &str) {
         let base = back.space().region(region).as_ptr();
-        let page = Geometry::DESIGN.page_size();
+        let page = LinuxOs::geometry().page_size();
         assert_eq!(present(base, origin), [0usize; 0], "{when}");
         for at in [0, (origin / 2) & !(page - 1), origin - page] {
             assert_eq!(
@@ -685,7 +685,7 @@ mod design {
         let state = Box::new(State::new(LinuxOs));
         let back = state.get_or_reserve().unwrap();
         let plan = back.space().plan();
-        let page = Geometry::DESIGN.page_size();
+        let page = LinuxOs::geometry().page_size();
         let mut starts = BTreeSet::new();
         for class in SmallClass::all() {
             let size = class.size();
@@ -703,7 +703,7 @@ mod design {
                 assert_eq!(p.addr() % class.class().align(), 0, "{size}");
                 paint(p, size, 0x4d);
             }
-            if plan.region_size() == Geometry::DESIGN.largest_plan().region_size() {
+            if plan.region_size() == LinuxOs::geometry().largest_plan().region_size() {
                 assert!(
                     starts.insert(slots[0].addr() / page % 256),
                     "{size} starts on a page another class starts on"
@@ -751,8 +751,8 @@ mod design {
         let plan = back.space().plan();
         let class = small(8);
         let origin = plan.slot_origin(class.class());
-        let huge = Geometry::DESIGN.huge_page_size();
-        if plan.region_size() != Geometry::DESIGN.largest_plan().region_size() {
+        let huge = LinuxOs::geometry().huge_page_size();
+        if plan.region_size() != LinuxOs::geometry().largest_plan().region_size() {
             // Under an address-space limit the regions are smaller; nothing to check here.
             return;
         }

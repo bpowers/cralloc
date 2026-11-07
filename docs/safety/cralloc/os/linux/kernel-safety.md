@@ -140,7 +140,8 @@ first thread to finish its handler ends the process under every other thread's
   disposition in force on this thread: the program's handler the first time, the default (end
   the process with a core dump) the second.
 - rt_sigaction(SIGABRT, `&default`, null, 8) reads one `KernelSigaction` from a live local.
-  The layout is the kernel's x86-64 `struct sigaction`: handler, flags, restorer, mask, which
+  The layout is the kernel's `struct sigaction` on x86-64 and aarch64, each of which defines
+  `SA_RESTORER`: handler, flags, restorer, mask, which
   differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action pointer
   is null, so nothing is written back. Resetting a handled signal to its default does not
   discard a pending one.
@@ -213,6 +214,21 @@ CPUs, or goes back makes a drain or a purge pass come earlier or later, and both
 any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
 `back/region.rs`).
 
+On aarch64 `ticks` has no block of its own: `generic_timer` is SYSCALL-03, and the scale is a shift
+that cannot overflow the shift amount (`timer_shift`).
+
+## KERNEL-14: `madvise` of an empty range in `page_shift_by_probing`, on aarch64
+
+**Block.** `syscall(MADVISE, [1 << shift, 0, MADV_DONTNEED, 0, 0, 0])`.
+
+**Proof.** With a length of zero the kernel checks the address's alignment and returns, 0 or `EINVAL`,
+without looking at any mapping (`mm/madvise.c`: `do_madvise` returns after `check_input_range` when
+`len_in` is zero), so no memory changes whatever is at the address. The answer sets the geometry,
+which must be no smaller than the kernel's page size for the memory calls to work: a refused
+call, or anything else unexpected, gives 64 KiB, a multiple of every page size aarch64 has.
+
+Nobody has reviewed this entry.
+
 ## KERNEL-10: `ReadOnly`, the files `read_file` and `environment` read
 
 **Blocks.** In `ReadOnly::open`, `syscall(OPENAT, [AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0,
@@ -254,15 +270,15 @@ accesses atomically; `timeout` is null or the address of a live `struct timespec
 
 **Proof.** `word` comes from `&AtomicU64`, so it is live for the call and aligned to 8, and
 Rust gives it no non-atomic access while the reference exists. The kernel takes its first four
-bytes as the futex word: on x86-64, which is little-endian, the 64-bit word's low half. Other
+bytes as the futex word: on x86-64 and aarch64, which are little-endian, the 64-bit word's low half. Other
 threads change the whole 64-bit word with atomic instructions; a 32-bit atomic read of half of
-it is atomic too on x86-64 (an aligned access within one 8-byte word), and sees either the old
+it is atomic too on x86-64 and aarch64 (an aligned access within one 8-byte word), and sees either the old
 or the new low half. `expected` is passed truncated to its low 32 bits, the half the kernel
 compares. futex(2) with `FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with
 `expected`, and sleeps or returns; it writes no user memory. A change of the high half only (the
 generation's key) does not stop a wait that is about to begin; the callers wait only for changes
 of the state or the level bit, which are in the low half (`thread_word`, asserted there). Its fourth argument is a relative timeout, read once:
-`Timespec` is `#[repr(C)]` `{ i64, i64 }`, x86-64's `struct timespec`, with nanoseconds under
+`Timespec` is `#[repr(C)]` `{ i64, i64 }`, the 64-bit `struct timespec`, with nanoseconds under
 10^9 by construction, and it lives on the caller's stack for the call. `FUTEX_WAKE_PRIVATE`
 uses the address only as a key and touches no memory; the arguments after the count are
 ignored. Errors (the word differed, a timeout, a signal, an invalid argument) are returned in

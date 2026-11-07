@@ -1,7 +1,8 @@
 # Safety ledger: `crates/cralloc/src/front/real.rs`
 
-`Real` wraps the routines generated from Lean (`front/generated/`). Each generated function
-states, in its `# Safety` section, what the Rust side must guarantee; the Lean proof covers the
+`Real` wraps the routines generated from Lean (`front/generated/`), and on aarch64 the hand-written
+ones that wait for Lean (`front/provisional/`, PROVISIONAL-01), which have the same contracts. Each
+generated function states, in its `# Safety` section, what the Rust side must guarantee; the Lean proof covers the
 rest (the instructions do what the contract says, under any interruption). The obligations
 below are those sections, discharged once here for every call in the file.
 

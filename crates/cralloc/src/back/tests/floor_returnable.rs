@@ -21,7 +21,7 @@ fn quiet_round<S: Shape>(back: &Back<'_, Sim<S>>) {
 /// Frees every slot of `class` in `slots` but one a page: memory the retained count holds that
 /// no purge can return.
 fn fragment<O: Os>(back: &Back<'_, O>, class: SmallClass, slots: &[*mut u8]) {
-    let per_page = O::GEOMETRY.page_size() / class.size();
+    let per_page = O::geometry().page_size() / class.size();
     let freed: Vec<*mut u8> = slots
         .iter()
         .copied()
