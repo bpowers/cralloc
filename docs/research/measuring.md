@@ -19,17 +19,19 @@ says why. Everything was measured on one machine (below).
 
 ### One number from each of two builds measures where the code landed
 
-**What we concluded.** That moving to tokio 1.54 cost cralloc 3.6% on `connect log grpc h2` through
-tokio's run-queue headers. That striding whole magazines cost the RPC log jobs 2 to 3% and striding
-first fills 1 to 2%, which is how the sibling stride's bound of 64 objects was chosen. All separate
-builds, interleaved, several runs each.
+**What we concluded.** That an edit had slowed the 4 MiB grow loop by 40%, 1,765k cycles a
+repetition against 1,262k. That moving to tokio 1.54 cost cralloc 3.6% on `connect log grpc h2`
+through tokio's run-queue headers. That striding whole magazines cost the RPC log jobs 2 to 3% and
+striding first fills 1 to 2%, which is how the sibling stride's bound of 64 objects was chosen. All
+separate builds, interleaved, several runs each.
 
-**How we found out.** Builds of one rule that differed only in code ranged from 3.9% below main to
-1.5% above it, with instructions level. So we forced it: a function of N bytes that never runs,
-ahead of all other code, moves it by exactly N. N = 0 to 64 ran 126.9 to 132.4k cycles a request.
-Then the stride was switched at run time inside one binary: off 129.3k, 16 siblings 129.0, 64
-siblings 130.1, whole magazines 129.3. The headers were worth nothing measurable there, and the
-bound of 64 rests on nothing.
+**How we found out.** The two grow-loop binaries retired the same instructions with the same
+counters, and the loop was byte for byte the same; an unrelated edit had moved it. Builds of one
+stride rule that differed only in code ranged from 3.9% below main to 1.5% above it, with
+instructions level. A function of N bytes that never runs, ahead of all other code, moves it by
+exactly N: N = 0 to 64 ran 126.9 to 132.4k cycles a request. With the stride switched at run time
+inside one binary: off 129.3k, 16 siblings 129.0, 64 siblings 130.1, whole magazines 129.3. The
+headers were worth nothing measurable there, and the bound of 64 rests on nothing.
 
 **Why.** The slow builds starve the front end: 38k more empty dispatch slots at eight a cycle make
 4.8k cycles, the whole difference between a slow and a fast build. Over 90% of the extra op-cache
@@ -51,8 +53,10 @@ more rounds. One build of an allocator against one of cralloc on these ten jobs 
 answer over placements by 1.9 points (standard deviation), and at worst by 6.8. The sign is wrong in
 1% of pairs where the gap is 1.5% or more, and in 29% where it is smaller. The Router is not
 sensitive (0.3 to 0.9%); JSON spreads 3.5 to 6.7% and the tree 3 to 9%
-([program-effects.md](program-effects.md)). Tails do it too: two builds of Meilisearch read +2.0 ms
-at p99.9 where one binary with a switch reads 0.0. The same binary drifts 2% between sessions.
+([program-effects.md](program-effects.md)). Two builds of `mpmc p4 c4` whose sources differed only
+in a doc comment ran 4.2 and 4.9 ns in every session. Scratch builds that switched off rules a job
+barely reaches moved one Vec by up to 9% and rpc log by up to 4.7% (2026-10-18). Tails do it too:
+two builds of Meilisearch read +2.0 ms at p99.9 where one binary with a switch reads 0.0.
 
 **The rule.**
 
@@ -62,7 +66,8 @@ at p99.9 where one binary with a switch reads 0.0. The same binary drifts 2% bet
 - A change of code, or a comparison of allocators: `benchrun layout --layouts pads`, a function of N
   bytes in `bench-alloc`, and compare means over the pads. Three rounds of five pads separated 2.5%
   and up, not under 1%.
-- A job whose spread over pads is within its noise needs neither.
+- A job whose spread over pads is within its noise needs neither. A job that is one short loop
+  measures that loop's address, so rewrite it: `vecgrow` now fills by `memset`.
 
 ### A tail at one fixed rate can rank the CPU's idle states
 
@@ -93,19 +98,22 @@ switches the deep states off on the server's CPUs. The standings run that way.
 
 The default `SCHED_IDLE` spinner on each server CPU's SMT sibling removes C3's millisecond tails,
 but shares the core: cycles a request rise by a third on the order service, for everyone alike, so
-absolute cycles here are not a quiet core's. And p99.9 is noisy: medians to p99 repeat within 1 to
-5%, p99.9 within 10 to 50% in the millisecond regime. Compare medians over runs.
+absolute cycles here are not a quiet core's. A spinner on the server's own CPU is no substitute: 40
+to 50% of requests went over 42 us. And p99.9 is noisy: medians to p99 repeat within 1 to 5%, p99.9
+within 10 to 50% in the millisecond regime.
 
 ### A short job after idle runs at the wrong clock
 
 **What we concluded.** That the large-object pipeline and tokio spawn ran in two modes, and that
 moves of several percent between sessions were changes to the allocator. Runs spread by up to 30% in
-time.
+time, and every ranking by time carried it.
 
-**How we found out.** Cycles a task were flat across the spread: 2,880 to 2,935 whether a run took
-129 or 166 ns. After 1.5 s of idle every core runs at 4.38 GHz for 200 to 260 ms, then boosts to
-5.56 to 5.71. One busy core anywhere keeps the boost, so the quiet gate's second of idle made the
-next runs cold, and a busy machine hid the effect ([hardware.md](hardware.md)).
+**How we found out.** Cycles were flat across the spread. The pipeline took 62 ns an allocation in
+seven rounds and 79 to 81 in three, at 700 to 711 cycles in all ten. Run after a pause of 0.2 s it
+ran at 4.39 GHz for all of its 80 ms, twelve times of twelve; after half a second of spinning on any
+core, at 5.7, nine of nine. From idle a core runs at the nominal clock for 200 to 260 ms, then
+boosts to 5.56 to 5.71. One busy core anywhere keeps the boost, so the quiet gate's second of idle
+made the next runs cold, and a busy machine hid the effect ([hardware.md](hardware.md)).
 
 **Cycles do not see the clock only if the job does not wait on memory.** Memory takes the same
 nanoseconds at any clock, so it takes more cycles at a higher one. `vecgrow 64x4Mi` on mimalloc took
@@ -127,8 +135,10 @@ allocates, and glibc's 16-byte header then decides whether tokio's scheduler han
 counter and a neighbour on one line.
 
 **The rule.** Binaries at paths of equal length, environments of equal length. The runner's control
-cannot catch this: it does not test effects that differ by allocator entry, such as the length of
-`GLIBC_TUNABLES`. tokio 1.54 padded that line, and glibc then ran 180.9 to 183.9 ns at any length.
+cannot catch this: it does not test effects that differ by allocator entry. On the order service an
+environment variable's length alone moved the slowest request of a burst's first 5 ms by 20 to 115
+us; a dummy of equal length made the arms overlap (2026-10-21). tokio 1.54 padded the handle's line,
+and glibc then ran 180.9 to 183.9 ns at any path length.
 
 ### Single runs on a shared machine drift by up to three times
 
@@ -166,19 +176,22 @@ moves under about 2%.
 - **A different allocator was measured and nothing said so.** With the environment stripped,
   `scripts/memlimit` fell back to an address-space limit, and under it cralloc halved its regions.
   `benchrun` now refuses to measure under a finite `RLIMIT_AS`.
-- **A different binary was built.** Cargo unified features with the RPC servers beside it: 4% more
-  cycles and 35% more faults than the same source built alone. And the link can place a load on a
-  hot word's page offset; `build` and `run` refuse that ([roofline.md](roofline.md)).
-- **The ends of a run mislead.** A script's "after close" column took the last point of the memory
+- **A different binary was built.** Cargo unified features with the RPC servers built beside a
+  workload: 4% more cycles and 35% more faults than the same source built alone, purely from the
+  build. Build every arm the same way. And the link can place a load on a hot word's page offset;
+  `build` and `run` refuse that ([roofline.md](roofline.md)).
+- **Memory figures have edges.** A script's "after close" column took the last point of the memory
   curve, about 300 ms after the end mark, in shutdown: jemalloc read 1,466 MiB on the store where it
-  held 1,542. Meilisearch's "peak under load" of 894 MiB was its first sample after it listens, left
-  from indexing; through the load it peaks at 732. Both found rereading the raw data, 2026-11-06.
+  held 1,542. Meilisearch's "peak under load" of 894 MiB was the first sample of its fill, left from
+  indexing; through 70% load it reaches at most 710 to 739. Both found rereading the raw data,
+  2026-11-06. Sozu's summed resident set once counted the 180 MB executable in each process, 53 to
+  97 MiB, until shared pages were counted once.
 - **An incumbent may not be what you think.** A thread whose first jemalloc call is a free gets no
   thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's on jobs with free-only
   threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and `free-only` forms. tcmalloc's
-  shared library through TLS descriptors understated it by 14 to 26%; it is now built initial-exec.
-  A program that compiles in its own allocator hides under preload: difftastic's spread was 2.7%
-  until its jemalloc came out, then 18%.
+  shared library through TLS descriptors understated it by 14 to 26%. A program that compiles in its
+  own allocator hides under preload: difftastic's spread was 2.7% until its jemalloc came out, then
+  18%.
 - **Some jobs run in two modes, and their medians compare mode counts:** xmalloc-test, glibc on
   larson, DataFusion on two L3s, the order service over HTTP/2 (4 to 6% more instructions, not tied
   to a build), Qdrant's search routing. Look at the runs before reading a median.
@@ -196,11 +209,11 @@ L3s of 32 MiB (CPUs 0-7 with siblings 16-23, 8-15 with 24-31), 60 GiB. Linux 7.2
 
 **A run.** The allocators are what a Rust user gets ([`bench/alloc`](../../bench/alloc/src/lib.rs)):
 mimalloc v3.5.3, `tikv-jemallocator` 0.6.1, google/tcmalloc `f3c6669a` (per-CPU unless a note says
-otherwise), glibc through `System`. One fresh process, capped, threads pinned one a physical core on
-CPUs 0-3 and 8-11 with siblings idle, single-threaded jobs on CPU 2; hardware counters over the
-measured phase, all threads, user and kernel. The cap costs nothing: capped over uncapped -0.85%
-(-1.30 to -0.39%, 224 pairs) against -1.18% between two uncapped sessions (2026-10-17). A server is
-ranked by its own cycles a request under open load ([workloads.md](workloads.md), "A server's day").
+otherwise), glibc through `System`. One fresh process, capped, threads pinned to physical cores with
+siblings idle; hardware counters over the measured phase, all threads. The cap costs nothing: capped
+over uncapped -0.85% (-1.30 to -0.39%, 224 pairs) against -1.18% between two uncapped sessions
+(2026-10-17). A server is ranked by its own cycles a request under open load
+([workloads.md](workloads.md), "A server's day").
 
 **A fast-path number.** Hand-written assembly loops, so that the compiler cannot change them, on CPU
 2 with its sibling idle: 40 million iterations four times, the first a warm-up, the fastest of the
@@ -217,24 +230,21 @@ Tails: the median over runs of each run's percentile.
 
 **The control.** `mimalloc-ctl` is mimalloc built a second time and run as another allocator. At
 `80643d2` (2026-10-22, 56 jobs) 4 intervals exclude no difference where chance predicts 2.8, the
-median absolute difference is 0.5% and the 90th percentile 2.1%. The largest are jobs with modes:
-sh8bench 23%, the split pipeline and eight-thread exchange about 5%, none excluding zero. So 1% is
-resolved on single-threaded jobs and a few percent on cross-thread ones. It does not catch code
-placement, since both copies place their code alike.
+median absolute difference is 0.5% and the 90th percentile 2.1%; the largest are jobs with modes,
+sh8bench 23%, none excluding zero. So 1% is resolved on single-threaded jobs and a few percent on
+cross-thread ones. It does not catch code placement, since both copies place their code alike.
 
 **Caveats that stay.** One CPU model and kernel: the rules should carry, the numbers will not. Why a
 loop costs what it does is inferred, not documented. THP `madvise` decides much of the
 build-and-drop jobs: mimalloc asks for huge pages for its whole heap, cralloc for small classes past
-16 MiB and grown blocks. The sampler's anonymous figure, from `smaps_rollup` once a second, can be a
-second stale.
+16 MiB and grown blocks. A server's heap is its anonymous memory, from `smaps_rollup` once a second,
+so it can be a second stale. Peaks of a few MiB move by up to 1.5 MiB between runs, so differences
+under 1 MiB mean nothing.
 
 ## Reusable techniques
 
 The placement sweep and the run-time switch are under the first trap. Beside them:
 
-- **Testing "it is only speed":** slow one binary to another's cycles (a spin in the handler), or
-  move each allocator to a rate that matches its idleness. If the effect follows, it is not the
-  allocator's.
 - **The IPC split of a gap:** cycles against instructions a request over one window. Share in
   instructions = log(instruction ratio) / log(cycle ratio). jemalloc on the Connect log service:
   +9.6% cycles, +9.8% instructions, so work. glibc on the order service: +25.3%, +8.3%, so mostly
@@ -249,11 +259,16 @@ The placement sweep and the run-time switch are under the first trap. Beside the
   address's chain of inlined functions (`llvm-symbolizer --inlining`), checked against the routines'
   ranges in the binary's rseq descriptors. For a `memcpy` sample, AMD's branch record names the last
   call out of the binary, in 43% of samples.
+- **A counting build, never timed:** counters at slow-path decisions, or requested bytes for a
+  live-bytes denominator, read from the running server through `/proc/PID/mem` at each mark.
+- **Exact instruction counts:** callgrind with a phase routed through one out-of-line function
+  (`--toggle-collect`). Stock valgrind caps the client at 64 GiB, so cralloc halves its regions, and
+  glibc's rseq registration fails; a valgrind with `aspacem_maxAddr` raised and a preloaded
+  constructor that writes 0 into `cpu_id` fix both. Do not sample on instructions: 25% of one
+  profile piled onto the instruction after a locked one.
 - **Lining up requests with the CPUs:** `perf record -e dummy --switch-events -k mono` takes no
   hardware counter and costs nothing measurable; idle counters from sysfs every 5 ms; all on
   `CLOCK_MONOTONIC`.
-- **A rule switched off:** one scratch edit per rule, each an allocator entry, over the kernel jobs
-  and the memory cases, to see which rules earn their place ([memory.md](memory.md)).
 
 Zen 5 raw events used here (`perf list --details` has the rest):
 

@@ -110,9 +110,13 @@ rounds, cralloc six runs; Meilisearch's heap sits beside a mapped store, 3.5 to 
 | Order service, 2 GiB | 2,186 / 2,186 | 2,220 / 2,220 | 2,222 / 2,222 | 2,340 / 2,341 | 3,141 / 3,141 |
 | Meilisearch | 732 / 652 | 787 / 655 | 995 / 933 | 1,801 / 1,339 | 1,206 / 1,195 |
 
-Meilisearch's first sample reads 885 to 987 MiB for cralloc, left from indexing (jemalloc 655 to
-1,006), and about 690 within a second. Its page faults a request: 42 for cralloc and jemalloc, 23
-for mimalloc, 1 for glibc, 0.1 for tcmalloc.
+Meilisearch's heap is coming down from indexing when load starts: 1,025 to 1,081 MiB just before the
+first request and 678 to 731 two seconds in, against jemalloc's 942 to 955 and 730 to 757. So the
+highest reading of its 5 s closed-loop fill (885 to 987, jemalloc 772 to 1,006) is not the load's.
+Through 70% load cralloc reaches at most 710 to 739 against jemalloc's 778 to 790. While indexing,
+before any load, it peaks at 1,388 to 1,433 against jemalloc's 1,230 to 1,251 and glibc's 1,446 to
+1,459 (the watcher's cgroup figures, computed from the raw records). Its page faults a request: 42
+for cralloc and jemalloc, 23 for mimalloc, 1 for glibc, 0.1 for tcmalloc.
 
 Long runs, resident heap over the bytes the program holds:
 
