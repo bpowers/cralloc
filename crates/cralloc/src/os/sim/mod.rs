@@ -76,6 +76,18 @@ pub trait Shape: 'static {
     const GEOMETRY: Geometry;
 }
 
+/// `log2` of the page of the [`Standard`] and [`Native`] shapes: 12, or what
+/// `CRALLOC_SIM_PAGE_SHIFT` said when the crate was built, 14 and 16 being the other pages an
+/// aarch64 kernel may have. Everything else in those shapes scales with it, so their proportions
+/// stay and a test written for them runs at any of the three: their sizes below are at 12.
+const PAGE_SHIFT: u32 = match option_env!("CRALLOC_SIM_PAGE_SHIFT") {
+    Some(shift) => match shift.as_bytes() {
+        [tens, ones] => ((*tens - b'0') * 10 + (*ones - b'0')) as u32,
+        _ => panic!("CRALLOC_SIM_PAGE_SHIFT is two digits"),
+    },
+    None => 12,
+};
+
 /// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
 /// (128 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions
 /// (2 MiB at the floor: 255 of the largest magazines, which hold 1,022 objects each, so that
@@ -90,7 +102,15 @@ pub trait Shape: 'static {
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 18, 17, 256, 16, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(
+        PAGE_SHIFT,
+        PAGE_SHIFT + 4,
+        PAGE_SHIFT + 6,
+        PAGE_SHIFT + 5,
+        256,
+        16,
+        MagazineSize::MAX,
+    );
 }
 
 /// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of
@@ -101,7 +121,15 @@ impl Shape for Standard {
 pub enum Native {}
 
 impl Shape for Native {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 20, 17, 256, 1, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(
+        PAGE_SHIFT,
+        PAGE_SHIFT + 4,
+        PAGE_SHIFT + 8,
+        PAGE_SHIFT + 5,
+        256,
+        1,
+        MagazineSize::MAX,
+    );
 }
 
 /// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, two object regions,

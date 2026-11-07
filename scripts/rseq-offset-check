@@ -5,13 +5,13 @@ slab hot word.
 Usage: scripts/rseq-offset-check [--quiet] FILE...   (executables or shared libraries)
 
 The routines load the thread's rseq offset on every call: the executable's copy of glibc's
-`__rseq_offset` (R_X86_64_COPY), or a word of their own holding its address (R_X86_64_64) and
-then the variable in the dynamic linker. A load whose bytes overlap a hot word in the low 12
+`__rseq_offset` (R_X86_64_COPY or R_AARCH64_COPY), or a word of their own holding its address
+(R_X86_64_64 or R_AARCH64_ABS64) and then the variable in the dynamic linker. A load whose bytes overlap a hot word in the low 12
 bits of its address can wait for the previous call's store to that word, and a loop of
 allocations of that class then runs one at a time (docs/research/roofline.md, "A load at the
 page offset of a store in flight can stall the whole loop"). The routines' words are 16-aligned
 by construction, so they should never collide; this checks that the link kept them so. Builds
-from before 2026-10-19 read a GOT slot (R_X86_64_GLOB_DAT) instead, which the linker places at
+from before 2026-10-19 read a GOT slot (R_X86_64_GLOB_DAT or R_AARCH64_GLOB_DAT) instead, which the linker places at
 any 8-aligned address; for them the slot is checked too. Prints each place, with its page
 offset, and exits 1 if one that fast paths load on every call collides, 0 otherwise; a file with
 no such relocation (built without cralloc, or statically linked) passes. Needs `readelf`
@@ -49,6 +49,14 @@ def symbol_value(path: str, name: str) -> int | None:
     return None
 
 
+# Each architecture's names for a word holding an address, a copy and a GOT slot, by the one name
+# this script uses for each.
+KINDS = {
+    "R_X86_64_64": "word", "R_X86_64_COPY": "copy", "R_X86_64_GLOB_DAT": "got",
+    "R_AARCH64_ABS64": "word", "R_AARCH64_COPY": "copy", "R_AARCH64_GLOB_DAT": "got",
+}
+
+
 def places(path: str) -> list[tuple[str, int, bool]]:
     """Each place the routines in `path` load the rseq offset from, as (what, address, whether
     the inlined fast paths load it on every call, so that a collision fails the check)."""
@@ -56,26 +64,26 @@ def places(path: str) -> list[tuple[str, int, bool]]:
     for line in readelf("-r", path).splitlines():
         f = line.split()
         if len(f) >= 5 and f[4].split("@")[0] == "__rseq_offset":
-            relocs.append((f[2], int(f[0], 16)))
+            relocs.append((KINDS.get(f[2], f[2]), int(f[0], 16)))
     kinds = {k for k, _ in relocs}
     # The routines' own words: only the routines emit absolute references to the variable. Where
     # they are, the GOT slot serves only Rust code off the fast paths.
-    own_words = "R_X86_64_64" in kinds
+    own_words = "word" in kinds
     found = []
     for kind, addr in relocs:
-        if kind == "R_X86_64_64":
+        if kind == "word":
             found.append(("a routine's word holding the address of __rseq_offset", addr, True))
-        elif kind == "R_X86_64_GLOB_DAT" and own_words:
+        elif kind == "got" and own_words:
             continue
-        elif kind == "R_X86_64_GLOB_DAT" and "R_X86_64_COPY" in kinds:
+        elif kind == "got" and "copy" in kinds:
             # An older executable with a copy: the inlined routines read the copy, and only the
             # out-of-line ones read through the slot.
             found.append(("the GOT slot of __rseq_offset (out-of-line routines only)", addr, False))
-        elif kind == "R_X86_64_GLOB_DAT":
+        elif kind == "got":
             found.append(("the GOT slot of __rseq_offset", addr, True))
         else:
             found.append((f"{kind} of __rseq_offset", addr, True))
-    if (own_words or "R_X86_64_GLOB_DAT" in kinds) and "R_X86_64_COPY" not in kinds:
+    if (own_words or "got" in kinds) and "copy" not in kinds:
         # Through the word or the GOT, the second load reads the variable where the C library
         # defines it.
         ld = interpreter(path) or "/lib64/ld-linux-x86-64.so.2"
