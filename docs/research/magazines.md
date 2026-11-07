@@ -525,8 +525,8 @@ CPUs, and where parked objects were counted, on four to eight CPUs, they came to
 4. It does not make the first requests after a silence worse. Those already refill every class on
    every CPU once, and a ramp makes that several times.
 
-**Why one exchange rate does not work.** A 4 KiB page kept about 1.5 s to save a 566 ns refault
-reads as about 400 cycles per KiB-second. By the economic order quantity, `Q = sqrt(2DK/h)`, an
+**Why one exchange rate does not work.** A 4 KiB page kept about 1.5 s to save a refault of about
+2,400 cycles reads as about 400 cycles per KiB-second. By the economic order quantity, `Q = sqrt(2DK/h)`, an
 8-byte class priced by the page it can pin gets 1,400 objects, which looks like 1,022. A review
 found the input wrong: it assumed a million objects a second, and real jobs run a hundred times that
 (14,000), so the match is an accident, and the page was held nearer 5 s than 1.5, which puts the

@@ -36,14 +36,14 @@ byte savings did not matter. [roofline.md](roofline.md)
 | Uncontended atomic | 20 cycles | Zen 5 |
 | `call` and `ret` | 4 cycles | Zen 5 |
 | Cache line to another core, same L3 / other L3 | 16 to 22 / 76 to 79 ns | Topology |
-| First touch of a 4 KiB page | 1,750 to 2,850 cycles, by how far the page falls out of cache | Kernel, cache, DRAM |
+| First touch of a 4 KiB page | 1,750 to about 2,850 cycles, by how far the page falls out of cache | Kernel, cache, DRAM |
 | The same memory inside a 2 MiB huge page | 117 to 214 ns per 4 KiB | DRAM bandwidth |
 | `MADV_DONTNEED` of one page, alone / with other threads | 0.36 / 1.80 us | Kernel, core count |
 | Clock after 1.5 s of idle | 4.38 GHz for 200 to 260 ms, then 5.7 | Platform |
 | Exit from the C2 idle state | 18 us | Platform |
 
-A page fault is the most expensive thing an allocator causes, as much as hundreds of inlined pairs. Most of it
-is bookkeeping, so reuse comes before fresh pages, and `MADV_POPULATE_WRITE` saves only about 600 cycles a page.
+A page fault is the most expensive thing an allocator causes, as much as hundreds of inlined pairs. Profiles put most
+of it in bookkeeping, so reuse comes before fresh pages, and `MADV_POPULATE_WRITE` saves only about 600 cycles a page.
 Returning part of a huge page frees nothing until the kernel splits it. [hardware.md](hardware.md)
 
 ## What the allocator does to the program
