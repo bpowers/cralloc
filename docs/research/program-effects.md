@@ -3,13 +3,13 @@
 An allocator costs a program twice: the cycles in its own code, and what its choices do to every
 later access to the objects. This note is about the second.
 
-- **On servers, the gap between good allocators is mostly instructions, not stalls.** Against
-  cralloc, jemalloc's and tcmalloc's cycles rise with their instructions while cycles per
-  instruction stay level or fall. The program's own code runs about the same under cralloc and
-  jemalloc, with level misses on heap memory.
-- **Stalls appear when an allocator gets it badly wrong.** glibc's cycles per instruction are 14 to
-  20% higher on the order service: it fills a third more lines a request, and 2.5 to 3 times as many
-  from beyond L2. Some of that may be lock waits, which we have not separated from misses.
+- **On servers, jemalloc's and tcmalloc's gap is instructions, not stalls.** Against cralloc, their
+  cycles rise with their instructions while cycles per instruction stay level or fall. The program's
+  own code runs about the same under cralloc and jemalloc, with level misses on heap memory.
+- **Stalls show for two allocators, on some jobs.** mimalloc's cycles per instruction are 9% higher
+  on the log store. glibc's are 14 to 20% higher on the order service's three small-heap jobs, where it fills a
+  third more lines a request, and 2.5 to 3 times as many from beyond L2. We have not separated those
+  stalls into misses and lock waits.
 - **Where placement matters, it is a few lines or one shape of program.** False sharing of a few
   sibling objects cost a tokio spawn loop 8 to 14%. A magazine order that reversed every 254
   objects made a tree walk 2.5 times slower. Neither moved a server.

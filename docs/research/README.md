@@ -48,8 +48,8 @@ Returning part of a huge page frees nothing until the kernel splits it. [hardwar
 
 ## What the allocator does to the program
 
-**On servers the gap between good allocators is instructions, not stalls.** Against cralloc, geometric mean
-over eight server jobs (geometric standard deviation), cycles = instructions x cycles per instruction:
+**On servers jemalloc's and tcmalloc's gap is instructions, not stalls.** Against cralloc, geometric mean over eight
+server jobs (geometric standard deviation), cycles = instructions x cycles per instruction:
 
 | Allocator | Cycles | Instructions | Cycles per instruction |
 |---|---:|---:|---:|
@@ -59,8 +59,9 @@ over eight server jobs (geometric standard deviation), cycles = instructions x c
 | glibc | 1.254 (x1.09) | 1.175 (x1.09) | 1.067 (x1.08) |
 
 The program's own misses on heap memory are level under cralloc and jemalloc: 258 against 257 L1-missing loads
-a request on the order service, 94 against 92 from another core. Stalls appear when an allocator gets it badly
-wrong: glibc fills a third more lines a request on the order service, and 2.5 to 3 times as many from beyond L2.
+a request on the order service, 94 against 92 from another core. Stalls show for mimalloc on the log store (1.09 times
+the cycles per instruction) and glibc on the order service (1.14 to 1.20), where glibc fills a third more lines a
+request, and 2.5 to 3 times as many from beyond L2. Nothing yet separates those stalls into misses and lock waits.
 
 **Where placement does matter, it is a few lines or one shape of program:**
 
@@ -109,14 +110,16 @@ as much as most differences between good allocators, and the allocator's own siz
   profiled before a leaner `realloc`, which by subtraction brings ours to about 4%. What is left is the fast path
   and `realloc`. Spending on slow paths pays almost nowhere.
 - **Objects flow rarely, and a cache's ends are the danger.** A swap with a spare costs about 640 cycles on a real
-  server. The worst failure was a lock at a magazine's ends, which cost the order service 15 to 17% and reached a
-  p99.9 of 6 ms. Leaving a magazine half full after two reversals removes it. [magazines.md](magazines.md)
+  server. The worst failure was a lock at a magazine's ends, which cost the order service 15 to 17% of its cycles, and
+  at 4 GiB let the server fall behind its load, to 708 ms. Leaving a magazine half full after two reversals removes it.
+  [magazines.md](magazines.md)
 - **At one fixed rate a tail can rank the CPU's idle states.** A faster server idles longer and sleeps deeper. With
   deep idle off our p99.9 on Connect over HTTP/2 fell from 45 to 37.8 us, the lowest, and nothing else moved. With it
-  off, jemalloc, tcmalloc and cralloc sit within 4% at p50, p99 and p99.9 alike: what remains above p50 is the program's.
-- **The tails we caused were maintenance on a request's path.** The magazine-end lock and purge work are gone. One
-  remains: on the log store the first 5 ms after a silence reach 581 us against jemalloc's 279, from idle drains.
-  [servers.md](servers.md)
+  off, jemalloc and tcmalloc are 2 to 4% over cralloc at p50, p99 and p99.9 as a geometric mean over ten jobs, and up to
+  16% on the log store.
+- **The tails we caused were maintenance on a request's path.** The magazine-end lock is gone, and so is purge work on a
+  request's path while the background thread runs. One remains: on the log store the first 5 ms after a silence reach
+  581 us against jemalloc's 279, from idle drains. [servers.md](servers.md)
 
 ## Where we stand
 
