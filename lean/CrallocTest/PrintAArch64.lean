@@ -1,6 +1,6 @@
 import Cralloc.TCB.AArch64.Target
+import Cralloc.TCB.X86_64.Target
 import Cralloc.TCB.Rust
-import Cralloc.Spec.Slab
 
 /-!
 # Golden tests for the AArch64 printer
@@ -108,6 +108,7 @@ def golden : List (Instr × String × Nat) := [
   (.lsrv .w .x4 .x0 .x6, "lsr w4, w0, w6", 0x1ac62404),
   (.mul .x .x9 .x0 .x1, "mul x9, x0, x1", 0x9b017c09),
   (.mul .w .x9 .x0 .x1, "mul w9, w0, w1", 0x1b017c09),
+  (.umulh .x2 .x0 .x1, "umulh x2, x0, x1", 0x9bc17c02),
   (.mrsTp .x10, "mrs x10, tpidr_el0", 0xd53bd04a),
   (.ldrWord .x9 .x11 "rs", "ldr x9, [x11, #32]", 0xf9401169)]
 
@@ -312,6 +313,30 @@ def body : List (Step Instr Cond) := [
     (.jump [.mov .x .x0 (.reg .x3)] "zero")))).getLast? == some "b <zero>"
 
 /-! ## What the emitter refuses, and adds -/
+
+/-- The error of a failed check. -/
+def err : Except String Unit → Option String
+  | .error e => some e
+  | .ok _ => none
+
+-- The word after the descriptor: one symbol, read in the setup, of a routine with a descriptor.
+#guard (Rust.descWordCheck printer "f" setup (.rseq arm body)).toBool
+#guard (Rust.descWordCheck printer "f" (setup ++ [.ldrWord .x9 .x11 "rs"]) (.rseq arm body)).toBool
+#guard err (Rust.descWordCheck printer "f" (setup ++ [.ldrWord .x9 .x11 "other"]) (.rseq arm body)) ==
+  some "f reads two symbols' addresses after its descriptor"
+#guard err (Rust.descWordCheck printer "f" [] (.rseq (.ldrWord .x9 .x11 "rs" :: arm) body)) ==
+  some "f reads the word after its descriptor outside its setup"
+#guard err (Rust.descWordCheck printer "f" setup (.block [])) ==
+  some "f reads the word after its descriptor, but has no descriptor"
+-- Inlined, a conditional branch may reach the end of the sequence only: the function
+-- may be any size, and a linker cannot put a veneer on one.
+#guard (Rust.nearExits inlineTarget.printer "f" [.exit .hs [] none, .instr (.str .x .x1 { base := .x3 })]).toBool
+#guard err (Rust.nearExits inlineTarget.printer "f" [.exit .hs [] (some "miss")]) ==
+  some "f is inline, where a conditional branch may not reach an exit with code of its own or an external target"
+#guard (Rust.nearExits inlineTarget.printer "f" [.exit .hs [.mov .x .x0 (.imm 0)] none]).toBool == false
+-- A naked function's section holds nothing else, and x86-64's exits have a stub's reach.
+#guard (Rust.nearExits printer "f" [.exit .hs [] (some "slow")]).toBool
+#guard (Rust.nearExits X86_64.inlineTarget.printer "f" [.exit .e [] (some "miss")]).toBool
 
 -- The signature `.inst` writes is glibc's for this architecture.
 #guard hexLit rseqSignature == "0xd428bc00"

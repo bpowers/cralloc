@@ -119,6 +119,7 @@ def Instr.lines : Instr → List Line
   | .lslv sz d n m => [.text s!"lsl {d.name sz}, {n.name sz}, {m.name sz}"]
   | .lsrv sz d n m => [.text s!"lsr {d.name sz}, {n.name sz}, {m.name sz}"]
   | .mul sz d n m => [.text s!"mul {d.name sz}, {n.name sz}, {m.name sz}"]
+  | .umulh d n m => [.text s!"umulh {d.x}, {n.x}, {m.x}"]
   | .adrp d t => [line (.text s!"adrp {d.x}, " :: t.pieces)]
   | .addLo12 d n t => [line (.text s!"add {d.x}, {n.x}, :lo12:" :: t.pieces)]
   | .mrsTp d => [.text s!"mrs {d.x}, tpidr_el0"]

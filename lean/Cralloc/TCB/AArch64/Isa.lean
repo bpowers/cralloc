@@ -160,6 +160,8 @@ inductive Instr
   | lsrv (sz : Size) (d n m : Reg)
   /-- `mul d, n, m`: `madd d, n, m, zr`. -/
   | mul (sz : Size) (d n m : Reg)
+  /-- `umulh d, n, m`: the high 64 bits of the unsigned 128-bit product. -/
+  | umulh (d n m : Reg)
   /-- `adrp d, t`: the 4 KiB page of the address `t`. -/
   | adrp (d : Reg) (t : Rel)
   /-- `add d, n, :lo12:t`: `n` plus the low 12 bits of the address `t`. -/
@@ -203,6 +205,8 @@ inductive Instr
   UInt(operand2) MOD datasize, datasize)`.
 * "MUL" is `MADD` with the zero register as addend: `result =
   (UInt(operand1) * UInt(operand2))<destsize-1:0>`.
+* "UMULH": `result = UInt(operand1) * UInt(operand2); X[d, 64] = result<127:64>`,
+  without the flags.
 * "ADRP": `base = PC64; base<11:0> = Zeros(12); X[d, 64] = base + imm`, where the
   linker writes `imm` as `Page(S + A) - Page(P)` (AAELF64,
   `R_<CLS>_ADR_PREL_PG_HI21`), `P` the instruction's address: `Page(S + A)`. A
@@ -243,6 +247,8 @@ def exec : Instr → State → Option State
   | .lslv sz d n m, s => some (s.write sz d (s.read sz n <<< ((s.read sz m).toNat % sz.bits)))
   | .lsrv sz d n m, s => some (s.write sz d (s.read sz n >>> ((s.read sz m).toNat % sz.bits)))
   | .mul sz d n m, s => some (s.write sz d (s.read sz n * s.read sz m))
+  | .umulh d n m, s =>
+    some (s.setReg d (BitVec.ofNat 64 ((s.gpr n).toNat * (s.gpr m).toNat / 2 ^ 64)))
   | .adrp d t, s => some (s.setReg d (page (s.relAddr t)))
   | .addLo12 d n t, s => some (s.setReg d (s.gpr n + lo12 (s.relAddr t)))
   | .mrsTp d, s => some (s.setReg d s.tpidr)

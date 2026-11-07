@@ -104,7 +104,7 @@ def twoRegs : List (List (Reg × BitVec 64)) :=
 def oneReg : List (List (Reg × BitVec 64)) := edges.map fun a => [(.x1, a)]
 
 /-- The instructions on two registers. -/
-def binary : List Instr := [Size.x, .w].flatMap fun sz => [
+def binary : List Instr := .umulh .x0 .x1 .x2 :: [Size.x, .w].flatMap fun sz => [
   .add sz .x0 .x1 (.reg .x2), .sub sz .x0 .x1 (.reg .x2), .and sz .x0 .x1 (.reg .x2),
   .orr sz .x0 .x1 (.reg .x2), .cmp sz .x1 (.reg .x2), .tst sz .x1 (.reg .x2),
   .add sz .x0 .x1 (.lsl .x2 3), .sub sz .x0 .x1 (.lsl .x2 12), .and sz .x0 .x1 (.lsl .x2 1),

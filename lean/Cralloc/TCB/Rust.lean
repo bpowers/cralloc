@@ -772,6 +772,17 @@ def jumpNames {I C : Type} : Code I C → List String
   | .frame _ b _ => jumpNames b
   | .jump _ t => [t]
 
+/-- On a target whose out-of-line code an inlined function's conditional branch
+may not reach (`Printer.coldFar`), every exit of the sequence `body`, of the
+inlined function `n`, is to the end of the sequence. -/
+def nearExits {M : ISA} (P : Printer M) (n : String) (body : List (Step M.Instr M.Cond)) :
+    Except String Unit := do
+  for st in body do
+    if let .exit _ cold ext := st then
+      if P.coldFar && (!cold.isEmpty || ext.isSome) then
+        throw s!"{n} is inline, where a conditional branch may not reach an exit with code of \
+          its own or an external target"
+
 /-- The code of `p`'s artifact has a restartable sequence only as the whole
 of its code (`Code.rseq arm body`), or followed by code with no sequence
 (`.seq (.rseq arm body) tail`), the only place a `jump` may be, to a function
@@ -815,11 +826,9 @@ def checkRseq (p : Prepared) : Except String Unit := do
       unless P.plainStore i do
         throw s!"{a.target.name}: {a.name}'s restartable sequence does not commit with a plain store"
     | _ => throw s!"{a.target.name}: {a.name}'s restartable sequence does not end with its commit"
+    if a.target.inline then
+      nearExits P s!"{a.target.name}: {a.name}" body
     for st in body do
-      if let .exit _ cold ext := st then
-        if a.target.inline && P.coldFar && (!cold.isEmpty || ext.isSome) then
-          throw s!"{a.target.name}: {a.name} is inline, where a conditional branch may not reach \
-            an exit with code of its own or an external target"
       if let .exit _ _ (some t) := st then
         if a.target.inline then
           if (a.operands.lookup t).isSome then
@@ -831,19 +840,21 @@ def checkRseq (p : Prepared) : Except String Unit := do
     if hasRseq c then
       throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
 
-/-- A word read after `a`'s descriptor (`Printer.descWord`) is what its
-descriptor holds there: only `a`'s setup reads one, of one symbol, as the printer
-places one word (`Printer.descLines`), and `a` has a descriptor, a restartable
+/-- A word the routine `n` reads after its descriptor (`Printer.descWord`) is what
+its descriptor holds there: only its setup reads one, of one symbol, as the printer
+places one word (`Printer.descLines`), and it has a descriptor, a restartable
 sequence. -/
-def checkDescWord (a : Artifact) : Except String Unit := do
-  let P := a.target.printer
-  let n := s!"{a.target.name}: {a.name}"
-  let names := dedup (a.setup.filterMap P.descWord)
+def descWordCheck {M : ISA} (P : Printer M) (n : String) (setup : List M.Instr) (code : Prog M) :
+    Except String Unit := do
+  let names := dedup (setup.filterMap P.descWord)
   unless names.length ≤ 1 do throw s!"{n} reads two symbols' addresses after its descriptor"
-  if (ownFirstSome? P.descWord a.code).isSome then
+  if (ownFirstSome? P.descWord code).isSome then
     throw s!"{n} reads the word after its descriptor outside its setup"
-  unless names.isEmpty || hasRseq a.code do
+  unless names.isEmpty || hasRseq code do
     throw s!"{n} reads the word after its descriptor, but has no descriptor"
+
+def checkDescWord (a : Artifact) : Except String Unit :=
+  descWordCheck a.target.printer s!"{a.target.name}: {a.name}" a.setup a.code
 
 /-- No two artifacts of a target have the same name, but a pair selected by
 a `cfg` predicate, one compiled where it holds and one where it does not, of

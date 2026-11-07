@@ -127,6 +127,12 @@ No flags: `st`'s stay. A 32-bit result clears the high half. -/
 #guard (exec (.lslv .w .x0 .x10 .x3) (withReg .x3 36)).map (·.gpr .x0) == some 0x70000
 #guard (exec (.mul .x .x0 .x10 .x3) (withReg .x3 2)).map (·.gpr .x0) == some 0xE000
 #guard (exec (.mul .w .x0 .x1 .x1) st).map (·.gpr .x0) == some 1
+-- The high half of the product: none below 2^64, and of all ones squared, all ones but the low bit.
+#guard (exec (.umulh .x0 .x10 .x10) st).map (·.gpr .x0) == some 0
+#guard (exec (.umulh .x0 .x1 .x1) st).map (·.gpr .x0) == some 0xFFFFFFFFFFFFFFFE
+-- `calloc`'s check: 2^60 + 1 times 16 has 16 in its low word, and 1 in its high.
+#guard (exec (.umulh .x0 .x3 .x4) ((withReg .x3 0x1000000000000001).setReg .x4 16)).map (·.gpr .x0) == some 1
+#guard (exec (.mul .x .x0 .x3 .x4) ((withReg .x3 0x1000000000000001).setReg .x4 16)).map (·.gpr .x0) == some 16
 
 /-! ## Compares
 
