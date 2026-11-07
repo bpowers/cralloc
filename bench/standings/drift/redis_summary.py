@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarizes the mini-redis runs of docs/research/heap-drift.md (redis.py, redis-matrix.sh).
 
-    python3 -I bench/probes/heap-drift/redis_summary.py OUTDIR
+    python3 -I bench/standings/drift/redis_summary.py OUTDIR
 
 For each build, at the end of every phase and at the end of the quiet minute: the server's
 anonymous resident memory, and its cgroup's memory.current, over the live bytes the live-bytes

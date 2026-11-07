@@ -1,4 +1,4 @@
-//! Servers under an open load: the suite's load generator (bench/probes/loadgen) against a
+//! Servers under an open load: the suite's load generator (bench/loadgen) against a
 //! server the runner started, and what the run reports.
 //!
 //! The generator runs a plan of segments (closed loop, a fixed request rate, silence, closed
@@ -189,8 +189,8 @@ pub fn drive(
     arg("--cpus", cpus);
     arg("--plan", l.plan.clone());
     arg("--label", job.id.clone());
-    // Every request's record, for a probe that lines requests up with what the server did
-    // (bench/probes/default-thread): `BENCH_RAW_DIR/<server pid>.raw`. Large at high rates.
+    // Every request's record, for a probe that lines requests up with what the server did:
+    // `BENCH_RAW_DIR/<server pid>.raw`. Large at high rates.
     if let Some(dir) = std::env::var_os("BENCH_RAW_DIR") {
         arg("--raw", Path::new(&dir).join(format!("{}.raw", server.pid)).display().to_string());
     }

@@ -15,7 +15,7 @@ import tempfile
 from collections import defaultdict
 
 # The checkout this script is in, for scripts/memlimit.
-ME = str(__import__("pathlib").Path(__file__).resolve().parents[3])
+ME = str(__import__("pathlib").Path(__file__).resolve().parents[2])
 EVENTS = ["cycles:u", "cycles:k", "instructions:u", "page-faults", "context-switches",
           "dTLB-load-misses", "L1-dcache-load-misses"]
 TUNABLES = {"tcmalloc-percpu": "glibc.pthread.rseq=0"}

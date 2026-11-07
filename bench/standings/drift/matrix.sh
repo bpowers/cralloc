@@ -4,15 +4,15 @@
 # a run whose file already ends cleanly is skipped, so a matrix that was stopped resumes. Run
 # under scripts/heavy (these runs are not timed and need no measurement lock):
 #
-#   scripts/heavy bench/probes/heap-drift/matrix.sh OUTDIR "JOB..." "BUILD..." [key=value ...]
+#   scripts/heavy bench/standings/drift/matrix.sh OUTDIR "JOB..." "BUILD..." [key=value ...]
 #
-# Extra key=value arguments are passed to every run (account_every=12 for the memstat build).
+# Extra key=value arguments are passed to every run.
 set -euo pipefail
 out="$1" jobs="$2" builds="$3"
 shift 3
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# Each job about ten minutes of asmalloc on the eight CPUs of scripts/heavy, with a table of
+# Each job about ten minutes of cralloc on the eight CPUs of scripts/heavy, with a table of
 # sizes drawn for every phase, as the runs of 2026-10-24 were made (`tables=shared` after the
 # job's name gives phases that ask for the same sizes the same table).
 args_of() {
@@ -28,7 +28,10 @@ args_of() {
 
 mkdir -p "$out"
 for job in $jobs; do
-  read -r -a job_args <<< "$(args_of "$job")"
+  # Assigned first so that an unknown job stops the matrix: a failure inside `<<<` would not,
+  # and the run would go on with the workload's defaults.
+  args=$(args_of "$job")
+  read -r -a job_args <<< "$args"
   for build in $(printf '%s\n' $builds | shuf); do
     file="$out/$job.$build.txt"
     if [ -f "$file" ] && tail -1 "$file" | grep -q '^# exit 0'; then

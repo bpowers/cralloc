@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The servers' standing over placement sweeps: servers.py [--base asmalloc] FILE... (jsonl or .gz)
+"""The servers' standing over placement sweeps: servers.py [--base cralloc] FILE... (jsonl or .gz)
 
 Reads benchrun results whose allocators are `NAME@padNN` (pad-entries.sh) or plain names, and
 prints for each job:
@@ -16,8 +16,9 @@ prints for each job:
   runs that recorded it, "not recorded" for older results), and p99.9 against the base's,
   marked "confounded by idle" instead where the two deep-idle rates differ materially (the
   test is benchrun's, `bench/runner/src/cpuidle.rs`, whose constants this reads).
-- memory: the resident peak under load and the resident set at the end of the run (after the
-  connections closed), medians over the runs, MiB; and the cgroup peak.
+- memory: the resident peak under load and the resident set at the end of the plan (after the
+  connections closed, before the server is stopped), medians over the runs, MiB; and the cgroup
+  peak.
 - for a saturated job (`sat`): the saturated rate and the closed loop's p50, p99 and p99.9.
 
 --json OUT writes the numbers as well.
@@ -37,7 +38,7 @@ MiB = 2**20
 def runner_const(name):
     """A numeric constant of benchrun's cpuidle.rs, so that this report and benchrun's judge a
     comparison of tails by the same test."""
-    src = Path(__file__).resolve().parents[2] / "runner/src/cpuidle.rs"
+    src = Path(__file__).resolve().parents[1] / "runner/src/cpuidle.rs"
     m = re.search(rf"^pub const {name}: \w+ = ([0-9.]+);$", src.read_text(), re.M)
     if not m:
         raise SystemExit(f"servers.py: cannot read {name} from {src}")
@@ -72,8 +73,11 @@ def split(name):
     return tuple(name.split("@", 1)) if "@" in name else (name, "pad00")
 
 
-def last_point(served, col):
-    c = served.get("curve_kib") or []
+def at_end(served, col):
+    """The curve's column in MiB at the end of the plan. The curve goes on past it into the
+    server's shutdown, whose frees would count as memory it gave back while idle."""
+    end = next((m[0] for m in served.get("marks_ms") or [] if m[1] == "end"), float("inf"))
+    c = [p for p in served.get("curve_kib") or [] if p[0] <= end]
     return c[-1][col] / 1024 if c else None
 
 
@@ -99,7 +103,7 @@ def permutation_p(xs, ys):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
-    ap.add_argument("--base", default="asmalloc")
+    ap.add_argument("--base", default="cralloc")
     ap.add_argument("--json")
     a = ap.parse_args()
     runs = defaultdict(list)  # (job, alloc) -> runs
@@ -163,7 +167,7 @@ def main():
                 "loaded_peak": statistics.median(
                     [r["served"]["rss_max_loaded"] / MiB for r in rs if r["served"].get("rss_max_loaded")] or [0]
                 ),
-                "end": statistics.median([last_point(r["served"], 2 if anon else 1) or 0 for r in rs]),
+                "end": statistics.median([at_end(r["served"], 2 if anon else 1) or 0 for r in rs]),
                 "cgroup_peak": statistics.median([(r.get("cgroup") or {}).get("peak", 0) / MiB for r in rs]),
             }
             if sat:

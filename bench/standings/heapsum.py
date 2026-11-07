@@ -6,7 +6,7 @@ request at 70% (`s70`), p50/p99/p99.9 in us and deep-idle entries per thousand r
 70%, page faults a request at 70%, and the anonymous resident memory (the curve's third
 column, from the rollups once a second; for a server whose store is a mapped file this is the
 allocator's part) as its mean and peak from the first `s70` mark to the first `idle` mark, and
-its value at the end of the run. MiB.
+its value at the end of the plan, before the server is stopped. MiB.
 """
 import json
 import statistics
@@ -37,6 +37,13 @@ def window(served):
     return pts
 
 
+def at_end(served):
+    """The anonymous memory at the end of the plan. The curve goes on past it into the server's
+    shutdown, whose frees would count as memory it gave back while idle."""
+    end = next((m[0] for m in served["marks_ms"] if m[1] == "end"), float("inf"))
+    return [p[2] for p in served["curve_kib"] if p[0] <= end][-1]
+
+
 for job, by in runs.items():
     print(f"\n{job}")
     print("  allocator        n  cycles/req  p50 us   p99 us  p99.9 us  deep/k  faults/req  heap mean  heap peak  heap end")
@@ -48,7 +55,7 @@ for job, by in runs.items():
         w = [window(r["served"]) for r in rs]
         mean = med([statistics.mean(p) / MiB for p in w if p])
         peak = med([max(p) / MiB for p in w if p])
-        end = med([r["served"]["curve_kib"][-1][2] / MiB for r in rs])
+        end = med([at_end(r["served"]) / MiB for r in rs])
         cyc = med([r["primary"]["value"] for r in rs])
         print(f"  {a:15s} {len(rs):2d}  {cyc:10.0f}  {lat('p50'):6.0f}  {lat('p99'):7.0f}  {lat('p999'):8.0f}  {deep:6.1f}"
               f"  {faults:10.2f}  {mean:9.0f}  {peak:9.0f}  {end:8.0f}")

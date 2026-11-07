@@ -3,7 +3,7 @@
 # in a random order, the live-bytes build (the denominator) among them. Run from the
 # repository root under scripts/heavy, after requests.py has written the inputs:
 #
-#   scripts/heavy bench/probes/heap-drift/redis-matrix.sh OUTDIR "BUILD..." [redis.py options]
+#   scripts/heavy bench/standings/drift/redis-matrix.sh OUTDIR "BUILD..." [redis.py options]
 #
 # A measurement on both L3s freezes heavy work, the server and the load generator with it,
 # but the generator's clock runs on, so a phase it falls in is cut short and its requests

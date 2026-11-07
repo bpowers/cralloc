@@ -175,7 +175,7 @@ impl BenchService for StoreTail {
 }
 
 /// Record `i` of connect-rust's `log_request` pattern, numbered across batches so that stored
-/// records differ; `probes/loadgen/connect_store_requests.py` writes the same ones.
+/// records differ; `loadgen/connect_store_requests.py` writes the same ones.
 pub fn log_record(i: usize) -> LogRecord {
     crate::log_records(i, 1).pop().expect("one record")
 }

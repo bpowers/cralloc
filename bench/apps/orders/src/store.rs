@@ -1,7 +1,6 @@
-//! The order service the axum and actix-web servers share (copied from
-//! bench/probes/rust-screen/servers, where the screening ran it): POST /orders parses an order,
-//! prices it, keeps it in a sharded in-memory store that holds the most recent `keep` orders,
-//! and answers with the stored order as JSON. Old orders are dropped by whichever worker
+//! The order service the axum and actix-web servers share: POST /orders parses an order, prices
+//! it, keeps it in a sharded in-memory store that holds the most recent `keep` orders, and
+//! answers with the stored order as JSON. Old orders are dropped by whichever worker
 //! inserts the order that displaces them, so blocks cross threads as they do in a cache.
 //!
 //! A shard's table grows by doubling, rehashing every entry while the shard's lock is held,

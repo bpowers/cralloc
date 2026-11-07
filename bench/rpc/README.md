@@ -12,7 +12,7 @@ A port of connect-rust's `echo_bench` and `log_bench` (github.com/connectrpc/con
   latest `keep` of them (a million by default, about 1.4 GiB), and its bench service's
   `ServerStream` tailing them, each record turned into a `BenchResponse`. It starts with the
   store full. Its load, `store.http` in the connect inputs, is written by
-  `probes/loadgen/connect_store_requests.py`: ingests of 50 new records alternating with tails
+  `loadgen/connect_store_requests.py`: ingests of 50 new records alternating with tails
   of the latest 100, over HTTP/1.1 in the Connect protocol, streaming for the tail.
 - `rpc-client <echo|log> addr=...`: the load loops of `echo_bench.rs` (one pooled
   `HttpClient`) and `log_bench.rs` (`conns` HTTP/2 connections), against one server, at one

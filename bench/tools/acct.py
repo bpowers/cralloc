@@ -1,8 +1,10 @@
 """Every page a process was charged for, by structure (docs/research/memory.md, "Small heaps").
 
-usage: acct.py [-v] [-t] PREFIX...    (PREFIX is <out>/<job>.<label>.<round>, as acct.sh writes)
+usage: acct.py [-v] [-t] PREFIX...
 
-Reads PREFIX.acct (bench/alloc/src/memacct.rs: the cgroup's counters, smaps and the anonymous
+To make the files, run a build with bench-alloc's `memacct` or `cralloc-memstat` feature under
+scripts/memlimit, with BENCH_MEMACCT=PREFIX.acct, CRALLOC_MEMSTAT=PREFIX.memstat and
+BENCH_MEMACCT_WAIT_MS=2500. Reads PREFIX.acct (bench/alloc/src/memacct.rs: the cgroup's counters, smaps and the anonymous
 pages of every mapping at exit) and, for cralloc builds, PREFIX.memstat (memstat.rs: the heap's
 regions, metadata, magazine area and slabs, and, at the sample where the program held the most,
 each class's objects by use). Prints, per prefix, KiB by structure; -v adds each symbol of the

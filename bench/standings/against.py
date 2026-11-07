@@ -2,9 +2,9 @@
 """One allocator's server jobs against an earlier standings: against.py --old FILE... --new FILE...
 
 For each server job in both sets (allocators `NAME@padNN` folded into NAME), the allocator's
-(default asmalloc) cycles a request at s70 as the mean over pads of the per-pad medians,
+(default cralloc) cycles a request at s70 as the mean over pads of the per-pad medians,
 page faults a request at s70 (median over runs), p99.9 (median and range over runs), the
-resident peak under load and at the end (medians), old against new, and flags: cycles more
+resident peak under load and at the end of the plan (medians), old against new, and flags: cycles more
 than 2% up, faults a tenth or more up (and at least 0.05 a request), a p99.9 median outside
 the old runs' range.
 """
@@ -34,6 +34,14 @@ def runs(files, want):
     return by
 
 
+def at_end(served):
+    """The resident MiB at the end of the plan. The curve goes on past it into the server's
+    shutdown, whose frees would count as memory it gave back while idle."""
+    end = next((m[0] for m in served.get("marks_ms") or [] if m[1] == "end"), float("inf"))
+    c = [p for p in served.get("curve_kib") or [] if p[0] <= end]
+    return c[-1][1] / 1024 if c else 0
+
+
 def summary(rs):
     per = defaultdict(list)
     for r in rs:
@@ -48,7 +56,7 @@ def summary(rs):
             "faults": statistics.median(x["server"]["faults_per_req"] for x in g),
             "p999": statistics.median(p), "p999_lo": min(p), "p999_hi": max(p),
             "peak": statistics.median(r["served"].get("rss_max_loaded", 0) / MiB for r in rs),
-            "end": statistics.median((r["served"].get("curve_kib") or [[0, 0]])[-1][1] / 1024 for r in rs),
+            "end": statistics.median(at_end(r["served"]) for r in rs),
         }
     return out
 
@@ -57,7 +65,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--old", nargs="+", required=True)
     ap.add_argument("--new", nargs="+", required=True)
-    ap.add_argument("--alloc", default="asmalloc")
+    ap.add_argument("--alloc", default="cralloc")
     a = ap.parse_args()
     old, new = runs(a.old, a.alloc), runs(a.new, a.alloc)
     for job in sorted(set(old) & set(new)):

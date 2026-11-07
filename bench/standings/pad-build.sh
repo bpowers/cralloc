@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # usage: pad-build.sh PART [ALLOC...]
 #   PART: workloads, or one of the servers' programs (orders, sozu, miniredis, router, qdrant)
-#   ALLOC: asm jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64"
+#   ALLOC: cra jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64"
 # Builds this checkout's servers at bench-alloc's layout pads 0, 16, 32, 48 and 64
 # (BENCH_LAYOUT_PAD, as `benchrun layout --layouts pads` does) for each allocator: the workloads
 # and rpc-server into bench/target/ALLOC-pNN, a program into bench/target/ALLOC-pNN/apps/PROGRAM.
 # Local allocators.toml entries `NAME@padNN` with `build = "ALLOC-pNN"` (`pad-entries.sh`
 # prints them) then run every placement of every allocator in one benchrun session,
-# interleaved, and `probes/spawn-gap/padsweep.py` or `servers.py` combines the sessions.
+# interleaved, and `padsweep.py` or `servers.py` combines the sessions.
 # `benchrun layout` does the same for rpc-server but builds no app, and one mechanism for both
 # keeps the sessions alike. Run under scripts/heavy. The parts share no build directory, so
 # they can build at once: a program's fat-LTO link runs on one core.
@@ -15,7 +15,7 @@
 # The build names have one length, so every binary's path has one length: the path's length
 # moves the initial stack, which moved glibc's tokio jobs by up to 18% (`spawn-gap.md`).
 set -euo pipefail
-W=$(cd "$(dirname "$0")/../../.." && pwd)
+W=$(cd "$(dirname "$0")/../.." && pwd)
 common="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/.."
 data="${BENCH_APPS_DATA:-$common/bench/apps/target}"
 export BENCH_BASELINES="${BENCH_BASELINES:-$common/bench/baselines/out}"
@@ -23,10 +23,10 @@ unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
 part="${1:?usage: pad-build.sh PART [ALLOC...]}"
 shift
 allocs=("$@")
-[ ${#allocs[@]} -gt 0 ] || allocs=(asm jem tcm mim gli)
+[ ${#allocs[@]} -gt 0 ] || allocs=(cra jem tcm mim gli)
 feature() {
   case "$1" in
-    asm) echo asmalloc ;; jem) echo je ;; tcm) echo tc ;; mim) echo mi ;; gli) echo "" ;;
+    cra) echo cralloc ;; jem) echo je ;; tcm) echo tc ;; mim) echo mi ;; gli) echo "" ;;
     *) echo "pad-build: unknown allocator $1" >&2; exit 2 ;;
   esac
 }

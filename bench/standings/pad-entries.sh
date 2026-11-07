@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# usage: pad-entries.sh [ALLOC...]   (ALLOC: asm jem tcm mim gli; default all five)
+# usage: pad-entries.sh [ALLOC...]   (ALLOC: cra jem tcm mim gli; default all five)
 # Prints the allocators.toml entries for pad-build.sh's builds, `NAME@padNN` with
 # `build = "ALLOC-pNN"` and the environment and checks of the entry NAME, to append to
 # bench/allocators.toml for the sessions and take out after them (local, never committed).
 set -euo pipefail
 allocs=("$@")
-[ ${#allocs[@]} -gt 0 ] || allocs=(asm jem tcm mim gli)
+[ ${#allocs[@]} -gt 0 ] || allocs=(cra jem tcm mim gli)
 for a in "${allocs[@]}"; do
   case "$a" in
-    asm) name=asmalloc feature=asmalloc extra='expect = { allocator = "asmalloc", library = "executable" }' ;;
+    cra) name=cralloc feature=cralloc extra='expect = { allocator = "cralloc", library = "executable" }' ;;
     jem) name=jemalloc feature=je extra='expect = { allocator = "jemalloc", library = "executable" }' ;;
     tcm) name=tcmalloc-percpu feature=tc
          extra='env = { GLIBC_TUNABLES = "glibc.pthread.rseq=0" }

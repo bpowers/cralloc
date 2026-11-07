@@ -2,7 +2,7 @@
 """The mini-redis run of docs/research/heap-drift.md: a real server whose keys are overwritten
 at changing value sizes. Run from the repository root under scripts/heavy:
 
-    scripts/heavy python3 -I bench/probes/heap-drift/redis.py BUILD OUTFILE [--keys N]
+    scripts/heavy python3 -I bench/standings/drift/redis.py BUILD OUTFILE [--keys N]
         [--phases wide,small,...] [--rate 80000] [--quiet 60]
 
 BUILD is a directory of bench/target with apps/miniredis/release/miniredis in it
@@ -120,8 +120,6 @@ def main():
     env = dict(os.environ)
     if build == "tc":
         env["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
-    if build == "asmalloc-memstat":
-        env.update(ASMALLOC_MEMSTAT=f"{out}.memstat", ASMALLOC_MEMSTAT_MS="5000", ASMALLOC_MEMSTAT_CPU="15")
     memlimit = str(ROOT / "scripts/memlimit")
     server = subprocess.Popen(
         [memlimit, "-m", "8G", "-t", "60m", "--", "taskset", "-c", SERVER_CPUS, str(exe), "serve", f"preload={keys}"],

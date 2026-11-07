@@ -5,7 +5,7 @@
 # on them: these sessions measure the tails with deep idle off, and a session that ran with it
 # on would mix two settings.
 set -euo pipefail
-W=$(cd "$(dirname "$0")/../../.." && pwd)
+W=$(cd "$(dirname "$0")/../.." && pwd)
 s=$("$W/scripts/deep-idle" status)
 echo "$s"
 if ! grep -q '^every deep state .* is disabled on these CPUs$' <<<"$s"; then

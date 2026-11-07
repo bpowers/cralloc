@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Request files for the mini-redis run of docs/research/heap-drift.md.
 
-    python3 -I bench/probes/heap-drift/requests.py OUTDIR [KEYS]
+    python3 -I bench/standings/drift/requests.py OUTDIR [KEYS]
 
-Writes OUTDIR/<name>-<KEYS>.resp for each size band below: every key of a server preloaded
-with KEYS keys (`miniredis serve preload=KEYS`, keys `key:00000000` on) SET once, in a seeded
+Writes OUTDIR/<name>-<KEYS>.resp for each size band below (redis.py reads them from
+target/heap-drift/redis-inputs of the repository root): every key of a server preloaded with
+KEYS keys (`miniredis serve preload=KEYS`, keys `key:00000000` on) SET once, in a seeded
 random order, to a value of a size drawn log-uniformly from the band, each SET followed by a
 GET of a random key. Sent once from end to end, a file overwrites every key at the band's
 sizes, the old values going in random order; the load generator sends a file once when its

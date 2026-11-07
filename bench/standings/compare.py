@@ -1,7 +1,7 @@
-"""asmalloc against the best incumbent per job: compare.py [--asm NAME] FILE... (jsonl or .gz).
+"""cralloc against the best incumbent per job: compare.py [--base NAME] FILE... (jsonl or .gz).
 
-The best incumbent is the incumbent (not asmalloc, not a control) with the lowest median cost;
-the gap is the median of per-round ratios of asmalloc's cost to it, with a 95% bootstrap
+The best incumbent is the incumbent (not the base, not a control) with the lowest median cost;
+the gap is the median of per-round ratios of the base's cost to it, with a 95% bootstrap
 interval over those ratios: "level" when the interval includes 1. Cost is time (lower is
 better) or the inverse of a rate. Memory is the cgroup peak against the smallest incumbent and
 against jemalloc, the same way. Prints a table, the counts and the geometric mean of the time
@@ -33,7 +33,7 @@ def boot(ratios, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+")
-    ap.add_argument("--asm", default="asmalloc")
+    ap.add_argument("--base", default="cralloc")
     ap.add_argument("--json")
     ap.add_argument("--exclude", default="")
     a = ap.parse_args()
@@ -62,15 +62,15 @@ def main():
     rows = []
     for i, job in enumerate(sorted(cost)):
         per = cost[job]
-        if a.asm not in per:
+        if a.base not in per:
             continue
-        inc = [x for x in per if x != a.asm and x not in controls and x not in excluded]
+        inc = [x for x in per if x != a.base and x not in controls and x not in excluded]
         if not inc:
             continue
 
         def compare(table, against, seed):
-            asm = table[a.asm]
-            ratios = [asm[k] / table[against][k] for k in asm if k in table[against]]
+            base = table[a.base]
+            ratios = [base[k] / table[against][k] for k in base if k in table[against]]
             if len(ratios) < 3:
                 return None
             lo, hi = boot(ratios, seed)
@@ -80,13 +80,13 @@ def main():
         t = compare(per, best, i)
         pinc = [x for x in inc if x in peak[job] and peak[job][x]]
         small = min(pinc, key=lambda x: statistics.median(peak[job][x].values())) if pinc else None
-        m = compare(peak[job], small, i + 7) if small and a.asm in peak[job] else None
-        je = compare(peak[job], "jemalloc", i + 13) if "jemalloc" in peak[job] and a.asm in peak[job] else None
+        m = compare(peak[job], small, i + 7) if small and a.base in peak[job] else None
+        je = compare(peak[job], "jemalloc", i + 13) if "jemalloc" in peak[job] and a.base in peak[job] else None
         rows.append({
             "job": job, "metric": metric[job], "best": best,
-            "asm_med": statistics.median(per[a.asm].values()), "best_med": statistics.median(per[best].values()),
+            "base_med": statistics.median(per[a.base].values()), "best_med": statistics.median(per[best].values()),
             "time": t, "smallest": small,
-            "asm_peak": statistics.median(peak[job][a.asm].values()) / 2**20 if a.asm in peak[job] else None,
+            "base_peak": statistics.median(peak[job][a.base].values()) / 2**20 if a.base in peak[job] else None,
             "small_peak": statistics.median(peak[job][small].values()) / 2**20 if small else None,
             "mem": m, "je": je,
         })
@@ -112,7 +112,7 @@ def main():
             else:
                 behind += 1
         print(f"| {r['job']} | {r['best']} | {w} | {word(r['mem'])} vs {r['smallest']} "
-              f"({r['asm_peak'] or 0:.1f} / {r['small_peak'] or 0:.1f} MiB) | {word(r['je'])} |")
+              f"({r['base_peak'] or 0:.1f} / {r['small_peak'] or 0:.1f} MiB) | {word(r['je'])} |")
     gm = math.exp(sum(logs) / len(logs)) if logs else float("nan")
     print(f"ahead {ahead}, level {level}, behind {behind} of {len(logs)}; geomean {gm:.3f}")
     if a.json:

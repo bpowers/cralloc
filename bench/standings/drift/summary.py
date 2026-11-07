@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarizes the drift runs of docs/research/heap-drift.md.
 
-    python3 -I bench/probes/heap-drift/summary.py OUTDIR [--phases] [--series JOB]
+    python3 -I bench/standings/drift/summary.py OUTDIR [--phases] [--series JOB]
 
 For every OUTDIR/JOB.BUILD.txt (run.sh's output) prints, per job and build: the operations
 done, the wall time of the load, cycles per operation (all threads), the ratio of resident
@@ -100,34 +100,10 @@ def series(job, builds):
             print(f"{epoch} {phase} " + " ".join(cells))
 
 
-def timed(outdir):
-    """timed.sh's runs: cycles per operation (all threads) and wall seconds of the load, per
-    job and build, each round's value, slowest last."""
-    by = {}
-    for f in sorted(Path(outdir).glob("timed.*.txt")):
-        _, job, build, _ = f.name.split(".", 3)
-        _, result, _ = load(f)
-        if result:
-            by.setdefault(job, {}).setdefault(build, []).append(
-                (result["primary"]["value"], result["phases"]["load"]["wall_ns"] / 1e9, result["phases"]["load"]["multiplexed"])
-            )
-    for job, builds in sorted(by.items()):
-        print(f"\n## {job} (timed)\n\n| build | cycles/op by round | load s by round | against asmalloc |\n|---|---|---|---|")
-        base = sorted(c for c, _, _ in builds.get("asmalloc", [(float("nan"), 0, False)]))
-        base = base[len(base) // 2]
-        for build, rs in sorted(builds.items(), key=lambda kv: sorted(c for c, _, _ in kv[1])[0]):
-            cs = sorted(c for c, _, _ in rs)
-            mux = " (multiplexed)" if any(m for _, _, m in rs) else ""
-            print(f"| {build}{mux} | {', '.join(f'{c:.0f}' for c, _, _ in rs)} | {', '.join(f'{w:.0f}' for _, w, _ in rs)} | {cs[len(cs) // 2] / base:.2f} |")
-
-
 def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
-    if "--timed" in args:
-        timed(args[0])
-        return
     data = runs(args[0])
     if "--series" in args:
         job = args[args.index("--series") + 1]
