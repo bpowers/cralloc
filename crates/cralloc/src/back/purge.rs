@@ -20,7 +20,8 @@
 //! when a whole pass purged nothing, taking what was left for fragmentation. That is wrong in
 //! a storm of frees: every page still has a live neighbour while a pass runs, the pages
 //! become wholly free a moment later, and their bytes are then in no count, so the cap never
-//! acts again (`docs/research/memory.md`: 136 MiB free and resident under a 64 MiB cap).
+//! acts again (`docs/research/memory.md`, "Purge on a clock, never on a level": 136 MiB free
+//! and resident under a 64 MiB cap).
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
 //! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: everything the
@@ -36,17 +37,17 @@
 //! count, which also holds every free slot on a page with a live neighbour: a 1.4 GiB server
 //! retained 185 MiB, of which 1.4 MiB could be returned, so by the count the floor never
 //! applied, and the passes took the last free pages, which the next burst faulted straight
-//! back (`docs/research/default-thread-servers.md`). Every step of the walk adds up the free,
-//! resident pages it sees and leaves, purgeable whether or not its scope or goal let it take
-//! them, and the step that ends a lap (finishes the lowest region) makes that the count, and
-//! starts what has been purged since at zero ([`Back::returnable`]). A pass is held to the
-//! last lap's count less what has been purged since: while that is no more than the floor
-//! it returns nothing, and over it it stops at the floor. Until the first lap has ended there
-//! is no count, and a pass is held to the retained count, which is never less. A pass held to
-//! nothing still walks its lap, purging nothing, so that the next count is taken: a heap with
-//! nothing to return costs one walk of its bitmaps an interval, as a heap of fragmentation
-//! always has. The cheap test stays first: a due pass that finds no more than the floor
-//! retained ends as it starts, since no more could be returned. What a heartbeat's pass
+//! back (`docs/research/servers.md`, "The first requests after a silence"). Every step of the
+//! walk adds up the free, resident pages it sees and leaves, purgeable whether or not its scope
+//! or goal let it take them, and the step that ends a lap (finishes the lowest region) makes
+//! that the count, and starts what has been purged since at zero ([`Back::returnable`]). A pass
+//! is held to the last lap's count less what has been purged since: while that is no more than
+//! the floor it returns nothing, and over it it stops at the floor. Until the first lap has
+//! ended there is no count, and a pass is held to the retained count, which is never less. A
+//! pass held to nothing still walks its lap, purging nothing, so that the next count is taken:
+//! a heap with nothing to return costs one walk of its bitmaps an interval, as a heap of
+//! fragmentation always has. The cheap test stays first: a due pass that finds no more than the
+//! floor retained ends as it starts, since no more could be returned. What a heartbeat's pass
 //! walks, it walks down to the frontiers, so while the program runs the count is of what lies
 //! above them, what such a pass could take; in a silence `maintain`'s passes walk every
 //! region whole. The count is a hint: a lap's steps race with frees, claims and the hold, and
@@ -150,14 +151,14 @@
 //! slow paths pay it as if there were no thread: a grower pays a step itself, and so does each
 //! heartbeat, so that what the thread's lag can add to retained memory is bounded whatever the
 //! scheduler does. A grower's step alone would not do: it pays half a megabyte while a carve
-//! may owe tens, and on DataFusion a thread that waited for a CPU behind the four that carved
-//! let the peak rise by 180 MiB in one run in five (`docs/research/purge-off-path.md`). Past
-//! the limit they pay whether a pass is under way or not, and a pass still under way an
-//! interval after it began, which the thread has not stepped, is the heartbeats' again.
-//! The thread's own steps (`StepSize::THREAD`) are a heartbeat's in size but `maintain`'s in
-//! kind: they do not count an interval as one the program ran in, and its looks of the hold
-//! take `maintain`'s reach, so that a silence ages nothing and a quiet program's held slots go
-//! back at the thread's second round.
+//! may owe tens, and the thread can wait for a CPU behind the threads that carve, 87 ms a run
+//! on DataFusion, though no run there has needed this limit (`docs/research/memory.md`,
+//! "Returning memory off request paths"). Past the limit they pay whether a pass is under way
+//! or not, and a pass still under way an interval after it began, which the thread has not
+//! stepped, is the heartbeats' again. The thread's own steps (`StepSize::THREAD`) are a
+//! heartbeat's in size but `maintain`'s in kind: they do not count an interval as one the
+//! program ran in, and its looks of the hold take `maintain`'s reach, so that a silence ages
+//! nothing and a quiet program's held slots go back at the thread's second round.
 //!
 //! A claim that makes purged pages resident again is reuse, not growth, though it raises
 //! resident memory as growth does. Charging it made the allocator chase its own tail: with
@@ -913,8 +914,8 @@ impl<O: Os> Back<'_, O> {
         // pass ends. `maintain`'s steps never do: its readings step the counted clock through a
         // silence, and a silence must not age the frontiers. Only a pass that is due reads the
         // retained count: its tallies are written by frees and claims, and reading them on every
-        // heartbeat took their lines from the threads writing them (`docs/research/memory.md`,
-        // "The cost of a large block, by cause").
+        // heartbeat took their lines from the threads writing them
+        // (`docs/research/large-blocks.md`, "What one large allocation and free cost").
         let time = if seen & ACTIVE != 0 { 0 } else { now() };
         if seen & ACTIVE == 0 && size.heartbeat {
             self.note_epoch(time);

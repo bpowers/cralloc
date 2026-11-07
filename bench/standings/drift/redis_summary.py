@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Summarizes the mini-redis runs of docs/research/heap-drift.md (redis.py, redis-matrix.sh).
+"""Summarizes the mini-redis runs of docs/research/memory.md, "When the size mix wanders, huge
+pages ratcheted" (redis.py, redis-matrix.sh).
 
     python3 -I bench/standings/drift/redis_summary.py OUTDIR
 

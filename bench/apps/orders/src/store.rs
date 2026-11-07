@@ -6,7 +6,7 @@
 //! A shard's table grows by doubling, rehashing every entry while the shard's lock is held,
 //! and with inserts and removes churning it, a table more than half full doubles again once
 //! the churn has used up its room: one stall per shard, all shards within seconds, long after
-//! the store reached `keep` (docs/research/servers-large.md, "The 4 GiB tail"). `presize`
+//! the store reached `keep` (docs/research/servers.md, "The program's own events"). `presize`
 //! gives each shard room for twice its share from the start, so that it never doubles. Every
 //! rehash is timed, with the page faults it took, for the job that measures the doubling.
 use serde::{Deserialize, Serialize};

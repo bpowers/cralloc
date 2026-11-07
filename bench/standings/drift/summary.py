@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Summarizes the drift runs of docs/research/heap-drift.md.
+"""Summarizes the drift runs of docs/research/memory.md, "A steady heap does not drift" and
+"When the size mix wanders, huge pages ratcheted".
 
     python3 -I bench/standings/drift/summary.py OUTDIR [--phases] [--series JOB]
 

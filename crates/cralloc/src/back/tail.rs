@@ -1,5 +1,6 @@
 //! The tail of a region's huge-page part: where the advice for huge pages has come off again
-//! because the purge returned part of its huge pages (`docs/research/huge-tail.md`).
+//! because the purge returned part of its huge pages (`docs/research/memory.md`, "The tail
+//! rule, and what it cost").
 //!
 //! In a region's huge-page part the purge returned only whole huge pages, so a class whose
 //! demand fell kept every huge page that still held one object: fills take the lowest free

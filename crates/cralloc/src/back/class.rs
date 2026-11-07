@@ -110,7 +110,8 @@ impl Sink for [*mut u8] {
 /// the end, so the lowest address lands in the last slot, which is the first one popped, and a
 /// magazine hands its objects out in ascending address order. Walking memory upwards is what
 /// the hardware prefetchers follow; a magazine popped from its highest address first made a
-/// walk of a freshly built tree two and a half times slower (`docs/research/launder-and-fill.md`).
+/// walk of a freshly built tree two and a half times slower
+/// (`docs/research/program-effects.md`, "Order, and lines and pages").
 pub struct Descending<'s>(pub &'s [AtomicPtr<u8>]);
 
 impl Sink for Descending<'_> {
@@ -185,7 +186,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// returns what it has, fewer than asked if the words were sparse. A claim takes what one
     /// word has free, so the bound caps the search and the atomic instructions a fill spends,
     /// whatever its length: a fill from words with one free slot each costs about a hundred
-    /// cycles a claim (`docs/research/launder-and-fill.md`). A bound of zero is taken as one.
+    /// cycles a claim (`docs/research/magazines.md`, "What launder and fill cost"). A bound of
+    /// zero is taken as one.
     pub fn fill_within<S: Sink + ?Sized>(
         &self,
         class: SmallClass,
@@ -719,16 +721,17 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// A step at most, the bound of every other purge on a request's path: the slack can be
     /// most of a slot of tens of megabytes, and returned at once it stalled a claim for
-    /// milliseconds (`docs/research/large-slack.md`). What a trim leaves below the step stays
-    /// in the slot, resident and in no count, until the slot's next claim trims again or its
-    /// free charges it. A step here is pages and never whole huge pages, as the purge walk's
-    /// pieces are in a class of a huge page or more: those pieces must not split a huge page of
-    /// a free slot that kept its advice, and a slot that kept it here, which only a refused call
-    /// to take it back leaves, has its range cut inward to whole huge pages by `purge_part`:
-    /// nothing of a step inside the slot's whole huge pages goes, and a part in its unaligned
-    /// tail, which the advice never covered, goes with `purge_part` reporting false, so its
-    /// pages stay counted. Every other slot of a large class is advised against huge pages,
-    /// and its clean bits are per page.
+    /// milliseconds (`docs/research/large-blocks.md`, "Slack: what earlier tenants left in an
+    /// occupied slot"). What a trim leaves below the step stays in the slot, resident and in no
+    /// count, until the slot's next claim trims again or its free charges it. A step here is
+    /// pages and never whole huge pages, as the purge walk's pieces are in a class of a huge
+    /// page or more: those pieces must not split a huge page of a free slot that kept its
+    /// advice, and a slot that kept it here, which only a refused call to take it back leaves,
+    /// has its range cut inward to whole huge pages by `purge_part`: nothing of a step inside
+    /// the slot's whole huge pages goes, and a part in its unaligned tail, which the advice
+    /// never covered, goes with `purge_part` reporting false, so its pages stay counted. Every
+    /// other slot of a large class is advised against huge pages, and its clean bits are per
+    /// page.
     ///
     /// Where the kernel refuses purges, as on locked memory, each claim of a slot with slack
     /// makes this one failing call and nothing more: a documented limit (`hold`).
@@ -896,12 +899,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// few bytes, into the next one. Those bytes give the page a page table, and advice given
     /// to a page that has one changes nothing: when the block grows over it, the rest of it
     /// faults 4 KiB at a time, 511 faults where one huge one would do, at each such doubling
-    /// (`docs/research/memory.md`, "Growing blocks fault their spilled huge page in small
-    /// pages"). So the page of bytes is copied aside into the block's own new room, the huge
-    /// page is returned, which frees its emptied page table, and the bytes are copied back,
-    /// which faults the huge page whole under its new advice. Where the OS keeps the page
-    /// table, or refuses the purge, the copy back restores the bytes all the same, and the page
-    /// goes on in small pages, as before.
+    /// (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense"). So the
+    /// page of bytes is copied aside into the block's own new room, the huge page is returned,
+    /// which frees its emptied page table, and the bytes are copied back, which faults the huge
+    /// page whole under its new advice. Where the OS keeps the page table, or refuses the
+    /// purge, the copy back restores the bytes all the same, and the page goes on in small
+    /// pages, as before.
     ///
     /// Only when the rest of the huge page is not resident, which the OS is asked: in a slot
     /// kept resident from its last tenant, or one the block shrank in and grows back over, the
@@ -1114,7 +1117,8 @@ impl<'a, O: Os> Back<'a, O> {
         // free. And a block advised for huge pages: its slot's pages fault back 2 MiB at a time
         // for a fraction of the small pages' cost, and the next block, written over memory that
         // is resident but cold, took more time than the faults it saved (a buffer grown to
-        // 64 MiB over and over, 31% slower kept; `docs/research/grown-slots.md`).
+        // 64 MiB over and over, 31% slower kept; `docs/research/large-blocks.md`, "What growth
+        // leaves behind").
         let keep = match (&host, slot) {
             (Some((host, region, index)), Some(class)) if why == Move::Outgrown => {
                 !region::recorded(host, *region, *index).is_some_and(|r| r.unwritten || r.huge)

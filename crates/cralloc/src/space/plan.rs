@@ -172,15 +172,16 @@ impl Plan {
     /// every region's base, the first pages of all the classes in use share their low virtual
     /// page numbers, which index the sets of the second-level data TLB: a small heap spread
     /// over many classes walked the page tables up to every few operations while using a few
-    /// hundred kilobytes (`docs/research/baselines.md`, section 15). The origin spreads the
-    /// classes over [`ORIGIN_SPAN_PAGES`] pages: class `i` at `i * ORIGIN_STEP` modulo the span,
-    /// a golden-ratio step, so that classes of neighbouring sizes, which programs tend to use
-    /// together, lie far apart, and no two small classes start on the same page however the
-    /// origin is rounded (`tests::small_classes_start_on_pages_of_their_own`). It is a multiple
-    /// of the class's alignment, so every slot keeps the alignment the class gives, and it lies
-    /// in the first [`ORIGIN_SHARE`]th of a region: far inside the span in the design's
-    /// regions, and in the simulator's small ones a few pages, so that the tests that run there
-    /// see origins too. The pages below it are never committed: it costs address space only.
+    /// hundred kilobytes (`docs/research/program-effects.md`, "Order, and lines and
+    /// pages"). The origin spreads the classes over [`ORIGIN_SPAN_PAGES`] pages: class `i` at
+    /// `i * ORIGIN_STEP` modulo the span, a golden-ratio step, so that classes of neighbouring
+    /// sizes, which programs tend to use together, lie far apart, and no two small classes
+    /// start on the same page however the origin is rounded
+    /// (`tests::small_classes_start_on_pages_of_their_own`). It is a multiple of the class's
+    /// alignment, so every slot keeps the alignment the class gives, and it lies in the first
+    /// [`ORIGIN_SHARE`]th of a region: far inside the span in the design's regions, and in the
+    /// simulator's small ones a few pages, so that the tests that run there see origins too.
+    /// The pages below it are never committed: it costs address space only.
     #[inline(always)]
     pub const fn slot_origin(self, class: Class) -> usize {
         if !class.is_small() {

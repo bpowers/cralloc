@@ -28,4 +28,4 @@ ships with jemalloc.
   1.20 keeps "in RAM" vectors that way), so the page cache holds them; the heap is the HNSW
   graphs, the payload indices, the request work and, under upserts, the optimizers'.
 
-`docs/research/servers-qdrant.md` has the measurements.
+`docs/research/servers.md`, "What each program taught us", has the measurements.

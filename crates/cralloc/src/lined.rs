@@ -13,8 +13,8 @@
 //! time that its size is the number of lines it means to use (`lines`), so that a field added
 //! later without a line of its own fails the build instead of quietly sharing one.
 //!
-//! Lines are 64 bytes. The measurement behind this is in `docs/research/memory.md`, "Lines
-//! between CPUs": in a two-thread pipeline of large objects, six of every ten cache lines one
+//! Lines are 64 bytes. The measurement behind this is in `docs/research/program-effects.md`,
+//! "False sharing": in a two-thread pipeline of large objects, six of every ten cache lines one
 //! core took from the other were shared by accident.
 
 use core::ops::Deref;

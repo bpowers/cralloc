@@ -6,9 +6,9 @@
 //! by way of the OS. A program whose phases use different large classes (a query engine whose
 //! next query's blocks fall in other classes, a server whose request mix changes) otherwise
 //! holds every phase's free large slots on top of the next phase's live ones, until the
-//! clocked pass, a second's step, returns them (`docs/research/memory.md`, "DataFusion's peak
-//! against jemalloc's"). A free large slot is reused within tens of milliseconds when it is
-//! reused at all ("Faults and system calls in real programs": 86 to 100% of the slots taken
+//! clocked pass, a second's step, returns them (`docs/research/large-blocks.md`, "Free slots: a
+//! hold, and why no hold serves everyone"). A free large slot is reused within tens of
+//! milliseconds when it is reused at all (the same section: 86 to 100% of the slots taken
 //! again after a purge were taken within 60 ms), so a hold of that order returns what the
 //! program has moved away from and keeps what it is reusing.
 //!
@@ -22,22 +22,22 @@
 //! **Each free slot ages on its own.** A region's stamp is its latest free's, so under steady
 //! churn no region is ever a hold old, and a slot idle for minutes stays resident beside one
 //! freed a moment ago: on a cache of large buffers, a gigabyte of free slots stood that way
-//! (`docs/research/large-churn.md`). So the free that leaves a slot resident also stamps the
-//! slot, in its size word (`Recorded::freed`), as its holder, before it releases it. A look at a
-//! region whose own stamp is young walks the region's free slots from its watermark down and
-//! returns each one whose own stamp is a hold old, claiming it first as every purge does
-//! ([`walk_aged`]), within the look's bounds and down to the floor as any look. The walk carries
-//! on across looks from where it stopped (the region's `AgeWalk` word), so every free slot of
-//! the region is looked at once a walk, wherever it lies. A walk starts at most once a hold
-//! (the hold the look takes): so a slot goes back between one hold and two after its free
-//! where heartbeats look, and within about three where the background thread does, whose look
-//! is planned from the region's newest stamp and can arrive just before a walk may start. And
-//! a young region costs one pass over its free slots a hold, whoever makes it. Walking whenever
-//! some slot came of age was a walk at nearly every fine step under steady churn, which is the
-//! case the rule is for (a third of the steps, on a region of 3,000 slots under drifting
-//! demand). A walk under way is more for the look to do: the next caller carries on at once,
-//! so that a walk takes its looks one after another and not one a fine step. A region whose
-//! stamp is old goes back whole, as before.
+//! (`docs/research/large-blocks.md`, "Each free slot ages on its own"). So the free that leaves
+//! a slot resident also stamps the slot, in its size word (`Recorded::freed`), as its holder,
+//! before it releases it. A look at a region whose own stamp is young walks the region's free
+//! slots from its watermark down and returns each one whose own stamp is a hold old, claiming
+//! it first as every purge does ([`walk_aged`]), within the look's bounds and down to the floor
+//! as any look. The walk carries on across looks from where it stopped (the region's `AgeWalk`
+//! word), so every free slot of the region is looked at once a walk, wherever it lies. A walk
+//! starts at most once a hold (the hold the look takes): so a slot goes back between one hold
+//! and two after its free where heartbeats look, and within about three where the background
+//! thread does, whose look is planned from the region's newest stamp and can arrive just before
+//! a walk may start. And a young region costs one pass over its free slots a hold, whoever
+//! makes it. Walking whenever some slot came of age was a walk at nearly every fine step under
+//! steady churn, which is the case the rule is for (a third of the steps, on a region of 3,000
+//! slots under drifting demand). A walk under way is more for the look to do: the next caller
+//! carries on at once, so that a walk takes its looks one after another and not one a fine
+//! step. A region whose stamp is old goes back whole, as before.
 //!
 //! **Time is counted.** The fine count steps when a heartbeat's reading of the counted clock
 //! (`crate::clock`) finds that [`policy::FINE_TICKS`] have passed since its last step, and by
@@ -90,15 +90,16 @@
 //! bottom (a look stopped at its bound of bitmap, or at the floor), and sets the next look at
 //! the next step, as a heartbeat would take it: planning only from stamps still held let a
 //! look that stopped at its bound wait a whole hold or more, and DataFusion's peak rose by
-//! 180 MiB in one run in ten (`docs/research/purge-off-path.md`). The walks by slot ages plan
-//! nothing: a young region's stamp already wakes the thread a hold on, which is when a walk of
-//! it may start again, and a walk under way is carried on in the same wake-up. In a silence no
-//! free stamps anything, every region's stamp goes old, and the regions go back whole.
+//! 180 MiB in one run in ten (`docs/research/memory.md`, "Returning memory off request paths").
+//! The walks by slot ages plan nothing: a young region's stamp already wakes the thread a hold
+//! on, which is when a walk of it may start again, and a walk under way is carried on in the
+//! same wake-up. In a silence no free stamps anything, every region's stamp goes old, and the
+//! regions go back whole.
 //!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
 //! the clock) held DataFusion's peak at the same level for 9% more faults, so it was not kept
-//! (`docs/research/large-hold.md`).
+//! (`docs/research/large-blocks.md`, "Free slots: a hold, and why no hold serves everyone").
 //!
 //! **The words.** The fine count, the count of the last look, the walk's position and the
 //! thread's next look, on the hold's line in the back end's state. A stamp per large-class

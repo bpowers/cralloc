@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Request files for the mini-redis run of docs/research/heap-drift.md.
+"""Request files for the mini-redis run of docs/research/memory.md, "When the size mix wanders,
+huge pages ratcheted".
 
     python3 -I bench/standings/drift/requests.py OUTDIR [KEYS]
 

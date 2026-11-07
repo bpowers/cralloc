@@ -20,7 +20,8 @@ mi-crate = ["dep:mimalloc"]
 # right for the workload binaries, which are executables.
 cralloc = ["dep:cralloc", "cralloc/executable"]
 # cralloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
-# Not an allocator of its own: build.rs does not count it. For docs/research/memory.md.
+# Not an allocator of its own: build.rs does not count it. For docs/research/memory.md, "How
+# memory is accounted".
 cralloc-memstat = ["cralloc", "cralloc/internals", "memacct"]
 # Every resident page of the process at exit, for any allocator (src/memacct.rs). Not an
 # allocator: build.rs does not count it.

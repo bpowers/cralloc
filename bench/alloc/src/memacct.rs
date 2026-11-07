@@ -1,5 +1,5 @@
-//! Every resident page of the process at exit, for any allocator (feature `memacct`; method and
-//! results in docs/research/memory.md, "Small heaps").
+//! Every resident page of the process at exit, for any allocator (feature `memacct`; method in
+//! docs/research/memory.md, "How memory is accounted", and results in "Small heaps").
 //!
 //! With `BENCH_MEMACCT=<file>` set, an exit handler writes to the file:
 //!

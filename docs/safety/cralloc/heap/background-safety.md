@@ -98,16 +98,16 @@ returns or unwinds; its stack holds its deepest frames.
   `errno`, as glibc's `free` changes none.
 - I6. The stack holds the thread. It is the C library's default, the one the program's own
   threads get, which the library sizes against its own thread-local data
-  (`docs/research/thread-stack.md`). The thread's frames reach about 8 KiB in a release
-  build and 34 KiB in a debug one (*measured*). glibc's default (*measured*, and read in the
-  2.43 source by the reviewer) is the soft `RLIMIT_STACK` fixed at start, 2 MiB if it is
-  unlimited and 16 KiB if it is below that, raised to at least a page plus the static
-  thread-local block plus 2048 bytes, so the frames get the limit less the static block,
-  and at least about 6 to 10 KiB: 250,000 bytes of thread-local data under `ulimit -s 256`
-  or `-s 128` left the thread 9,776 bytes, and 104 bytes under `ulimit -s 16` left 11.6 KiB.
-  musl's default (*read in source* and *measured*) is 128 KiB plus the thread-local data and
-  its own block. A limit: a process started with a stack limit below its static thread-local
-  data plus about 40 KiB, or a program that lowers the default with
+  (`docs/research/portability.md`, "The background thread's stack"). The thread's frames reach
+  about 8 KiB in a release build and 34 KiB in a debug one (*measured*). glibc's default
+  (*measured*, and read in the 2.43 source by the reviewer) is the soft `RLIMIT_STACK` fixed at
+  start, 2 MiB if it is unlimited and 16 KiB if it is below that, raised to at least a page plus
+  the static thread-local block plus 2048 bytes, so the frames get the limit less the static
+  block, and at least about 6 to 10 KiB: 250,000 bytes of thread-local data under
+  `ulimit -s 256` or `-s 128` left the thread 9,776 bytes, and 104 bytes under `ulimit -s 16`
+  left 11.6 KiB. musl's default (*read in source* and *measured*) is 128 KiB plus the
+  thread-local data and its own block. A limit: a process started with a stack limit below its
+  static thread-local data plus about 40 KiB, or a program that lowers the default with
   `pthread_setattr_default_np`, gives this thread the same few KiB as its own default threads,
   which a release build's rounds fit and a debug build's may not. Another: a program that
   locks all its memory (`mlockall(MCL_FUTURE)`) gets the whole default stack resident, 8 MiB

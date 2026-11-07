@@ -4,9 +4,9 @@
 //! Why: a request that finds the CPU that would run it in a deep state waits for the exit
 //! (18 us for C2 on the reference host), and at one fixed rate the faster server idles longer
 //! between requests and goes deep more often. So a tail at a common rate can rank the idle
-//! states and not the allocator (docs/research/h2-tail.md). The counters say how much deep
-//! idle took part in each window, and the report marks a comparison of tails whose deep-idle
-//! rates differ (`confounded`).
+//! states and not the allocator (docs/research/measuring.md, "A tail at one fixed rate can rank
+//! the CPU's idle states"). The counters say how much deep idle took part in each window, and
+//! the report marks a comparison of tails whose deep-idle rates differ (`confounded`).
 //!
 //! The kernel keeps, per CPU and state, under `<root>/cpuN/cpuidle/stateK/`: `name`, the
 //! declared exit `latency` in microseconds, `usage` (entries), `time` (microseconds in the
@@ -32,7 +32,7 @@ pub const DEEP_LATENCY_US: u64 = 5;
 /// a difference between their tails may be idle exits and not the allocator, when the higher
 /// is at least this many times the lower...
 ///
-/// Chosen from the 26 valid runs of docs/research/data/h2-tail-2026-10-24.tar.gz, each run's
+/// Chosen from the 26 valid runs of a session of 2026-10-24, each run's
 /// deep entries over its `s70` window against its p99.9 and p99. Runs of one mode at one rate
 /// differ by at most 1.09 when something other than idle sets the tail (`orders axum h2` at
 /// 166k req/s: every run goes deep 84 to 91 times a thousand requests, and p99.9 still differ
@@ -370,7 +370,8 @@ pub fn warning(root: &Path, cpus: &[usize]) -> Option<String> {
     (!on.is_empty()).then(|| {
         format!(
             "benchrun: deep idle states ({}) are enabled on the servers' CPUs {}, so fixed-rate tails include \
-             waking from them (docs/research/h2-tail.md); `scripts/deep-idle off` disables them",
+             waking from them (docs/research/measuring.md, \"A tail at one fixed rate can rank the CPU's idle \
+             states\"); `scripts/deep-idle off` disables them",
             s.deep_names().join(", "),
             list(&on)
         )

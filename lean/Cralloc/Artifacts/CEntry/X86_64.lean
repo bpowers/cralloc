@@ -11,7 +11,8 @@ C symbols its `Api` names (`Api.exports`). One form only, reading glibc's
 `__rseq_offset` through a word holding its address (`movGot`): the exported copies are expanded in
 the crate that invokes the export macro, whose cargo features are not the
 allocator's, and out of line the direct load saves nothing
-(docs/research/zen5-roofline.md, section 13). -/
+(docs/research/roofline.md, "Reaching the path: inlining, LTO and how the
+call is made"). -/
 
 @[expose] public section
 

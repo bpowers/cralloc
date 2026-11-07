@@ -1,8 +1,9 @@
-//! The huge-page tail (`back::tail`, `docs/research/huge-tail.md`): each numbered point of
-//! the rule, the bounded step, every refused call, the concurrency of lowering against
-//! raising, and the fork child's repair. On the simulator's model of huge pages: a huge page
-//! committed under the advice is charged whole, a purge of part of it without a split leaves
-//! it charged, and khugepaged rebuilds an advised huge page that holds anything.
+//! The huge-page tail (`back::tail`, `docs/research/memory.md`, "The tail rule, and what it
+//! cost"): each numbered point of the rule, the bounded step, every refused call, the
+//! concurrency of lowering against raising, and the fork child's repair. On the simulator's
+//! model of huge pages: a huge page committed under the advice is charged whole, a purge of
+//! part of it without a split leaves it charged, and khugepaged rebuilds an advised huge page
+//! that holds anything.
 
 use super::super::layout::{Grow, Hints};
 use super::super::tail::{self, Tail};

@@ -8,13 +8,14 @@ The routines load the thread's rseq offset on every call: the executable's copy 
 `__rseq_offset` (R_X86_64_COPY), or a word of their own holding its address (R_X86_64_64) and
 then the variable in the dynamic linker. A load whose bytes overlap a hot word in the low 12
 bits of its address can wait for the previous call's store to that word, and a loop of
-allocations of that class then runs one at a time (docs/research/zen5-roofline.md, section 16).
-The routines' words are 16-aligned by construction, so they should never collide; this checks
-that the link kept them so. Builds from before 2026-10-19 read a GOT slot (R_X86_64_GLOB_DAT)
-instead, which the linker places at any 8-aligned address; for them the slot is checked too.
-Prints each place, with its page offset, and exits 1 if one that fast paths load on every call
-collides, 0 otherwise; a file with no such relocation (built without cralloc, or statically
-linked) passes. Needs `readelf` (binutils).
+allocations of that class then runs one at a time (docs/research/roofline.md, "A load at the
+page offset of a store in flight can stall the whole loop"). The routines' words are 16-aligned
+by construction, so they should never collide; this checks that the link kept them so. Builds
+from before 2026-10-19 read a GOT slot (R_X86_64_GLOB_DAT) instead, which the linker places at
+any 8-aligned address; for them the slot is checked too. Prints each place, with its page
+offset, and exits 1 if one that fast paths load on every call collides, 0 otherwise; a file with
+no such relocation (built without cralloc, or statically linked) passes. Needs `readelf`
+(binutils).
 """
 
 import re
@@ -110,7 +111,8 @@ def main() -> int:
                   "clear")
     if bad:
         print("rseq-offset-check: a routine's every call can wait on the previous call's store "
-              "to a hot word; see docs/research/zen5-roofline.md, section 16", file=sys.stderr)
+              "to a hot word; see docs/research/roofline.md, \"A load at the page offset of a store "
+              "in flight can stall the whole loop\"", file=sys.stderr)
     return 1 if bad else 0
 
 

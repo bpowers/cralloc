@@ -510,10 +510,10 @@ const GROW_FILL: u64 = 0x5a5a_5a5a_5a5a_5a5a;
 /// It does not push because a push loop stores the vector's length and loads it back for
 /// every element, and that chain took most of the job's time at a speed that depended on
 /// where the loop's code landed: an unrelated edit to this file once made the job 40% slower,
-/// and each allocator's build put the loop elsewhere (docs/research/memory.md, "The grow
-/// loop's 40%"). Nor does it copy a chunk from the stack: the copy's loads then alias the
-/// stores to the vector at 4 KiB strides, which made it 6% slower or faster by where the
-/// stack began in each process. A fill of up to 4 KiB a step by `memset`, whose code is the
+/// and each allocator's build put the loop elsewhere (docs/research/large-blocks.md,
+/// "Growth: moving with room"). Nor does it copy a chunk from the stack: the copy's loads then
+/// alias the stores to the vector at 4 KiB strides, which made it 6% slower or faster by where
+/// the stack began in each process. A fill of up to 4 KiB a step by `memset`, whose code is the
 /// same in every build and which only stores, leaves the time in what the job is for: the
 /// allocator's growth path, its copies, and the page faults. Out of line, so that a profile
 /// names it and its code does not move with `main`'s.

@@ -4,8 +4,9 @@
 # Why: a request that finds the CPU that would run it in a deep idle state waits for the exit
 # (18 us for C2 on the reference host), and at one fixed rate the faster server idles longer
 # and goes deep more often, so a server's tail can rank the idle states rather than the
-# allocator (docs/research/h2-tail.md). benchrun records the setting and the entries in every
-# server run, and warns when a server session starts with deep states enabled.
+# allocator (docs/research/measuring.md, "A tail at one fixed rate can rank the CPU's idle
+# states"). benchrun records the setting and the entries in every server run, and warns when a
+# server session starts with deep states enabled.
 #
 # Usage: scripts/deep-idle status|off|on|defaults [CPUS]
 #   status    each idle state of each CPU, its exit latency, and whether it is disabled

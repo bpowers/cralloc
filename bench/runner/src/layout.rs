@@ -2,9 +2,10 @@
 //!
 //! A job whose time is one short loop can measure where that loop landed as much as what it
 //! does: on Zen 5 the same instructions at another address have run 40% slower
-//! (docs/research/memory.md, "The grow loop's 40%"). Every variant here compiles the same
-//! sources to the same work and changes only addresses, so a job whose cycles move across
-//! the variants while its instructions stay level is measuring code layout.
+//! (docs/research/measuring.md, "One number from each of two builds measures where the code
+//! landed"). Every variant here compiles the same sources to the same work and changes only
+//! addresses, so a job whose cycles move across the variants while its instructions stay level
+//! is measuring code layout.
 //!
 //! The variants move the allocator's code too (the Rust in all of them; with a shuffle, the
 //! C libraries linked in as well). They are a check, never the build a session measures: the
@@ -15,7 +16,8 @@
 //! the linker places after bench-alloc's pad, the allocator's and the program's, by exactly N
 //! bytes and change nothing else, so a sweep over them (`pads`) is a controlled range of
 //! placements: what one build's number stands for, and the way to compare allocators on a job
-//! that is sensitive to it (`docs/research/grpc-placement.md`).
+//! that is sensitive to it (`docs/research/measuring.md`, "One number from each of two builds
+//! measures where the code landed").
 use crate::config::Allocator;
 use crate::stats::{half_iqr_rel, median};
 use serde_json::Value;

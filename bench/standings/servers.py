@@ -225,7 +225,8 @@ def main():
             print(
                 f"  confounded by idle: the deep-idle rates differ by a factor of {CONFOUND_RATIO:g} or more (and by at "
                 f"least {CONFOUND_FLOOR:g} a thousand requests), so the p99.9 differ in how often the server's CPUs woke "
-                "from deep idle, which follows the server's speed (docs/research/h2-tail.md)"
+                "from deep idle, which follows the server's speed (docs/research/measuring.md, "
+                "\"A tail at one fixed rate can rank the CPU's idle states\")"
             )
         if not sat:
             print(f"\nmemory, MiB ({'anonymous' if anon else 'resident'} at the end): loaded peak, at the end, cgroup peak")

@@ -11,8 +11,8 @@
 //! metrics, and the primary metric: the cycles of every thread (user and kernel) over the
 //! measured phases, in billions. Not wall time: a parallel program's wall time depends on how
 //! its threads were scheduled, which moves it by more than the allocator does (DataFusion on
-//! two L3 domains ran in two modes 40% apart; docs/research/apps.md). The wall time is
-//! recorded as the metric `s`.
+//! two L3 domains ran in two modes 40% apart; docs/research/workloads.md, "Batch programs").
+//! The wall time is recorded as the metric `s`.
 //!
 //! A driver checks that the program did the work it was meant to (the number of
 //! diagnostics, the rows each query returned, the script's result). A run whose output is

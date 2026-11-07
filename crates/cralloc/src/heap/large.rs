@@ -49,7 +49,7 @@ use core::ptr::NonNull;
 /// and a move copies dense pieces whole, but it does cost address space and, under strict
 /// overcommit, commit charge, both in proportion to the factor, where the copying saved falls
 /// only with its logarithm: 32 would copy a sixth instead of a fifth for twice the room
-/// (`docs/research/memory.md`, "Headroom for growing blocks").
+/// (`docs/research/large-blocks.md`, "Growth: moving with room").
 pub(crate) const HEADROOM: usize = 16;
 
 /// The headroom a growing block gets where [`HEADROOM`] times its size would take a slot past
@@ -63,8 +63,7 @@ const FALLBACK_HEADROOM: usize = 4;
 /// fraction of a region, a sixteenth, so that its class has sixteen slots or more to a region.
 /// Regions are assigned to a class for good, so a slot that left a class one to a region took a
 /// region for every buffer that grew there, and when they were gone nothing of another class
-/// could be had (`docs/research/memory.md`, "Headroom only while it is a small part of a
-/// region").
+/// could be had (`docs/research/large-blocks.md`, "Growth: moving with room").
 const HEADROOM_SHARE: usize = 16;
 
 /// Whether a heap laid out as `plan` got its full reservation. One that did not has had its

@@ -5,9 +5,9 @@ public import Cralloc.Spec.CEntry
 
 /-! # The C entry points on x86-64
 
-docs/research/zen5-roofline.md, section 14, recommendations 1, 2 and 5,
-with the front half inside the sequence: every routine arms first (`arm`),
-reads the CPU number and leaves for the slow path if it has no slab
+docs/research/roofline.md, "The C entry points", with the front half inside
+the sequence: every routine arms first (`arm`), reads the CPU number and
+leaves for the slow path if it has no slab
 (`cpuSteps`), then finds its class into `r9`, the address of the class's
 word in slab 0, `SLABS + 8 * class`, and ends with the out-of-line pop's or
 push's steps on `r9` (`popSteps`, `pushSteps`). An abort restarts the whole

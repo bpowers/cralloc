@@ -166,7 +166,7 @@ offset from it the linker fixes, so the area lies at that page offset in
 every thread: away from the slab words the routines store to. A load of
 `cpu_id` at the page offset of a slab word stored just before is taken to
 depend on the store, which costs a pair two cycles
-(docs/research/musl-and-static.md). -/
+(docs/research/portability.md, "The area's page offset"). -/
 
 /-- The bytes the crate registers: the original `struct rseq`
 (`ORIG_RSEQ_SIZE`), which every kernel with rseq accepts. -/

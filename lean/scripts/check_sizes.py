@@ -3,7 +3,8 @@
 writes, by assembling it. Exits non-zero on violations, naming each.
 
 The design's rule for a routine emitted as a naked function
-(docs/design.md, "Front end"; docs/research/zen5-roofline.md, section 13):
+(docs/design.md, "Front end"; docs/research/roofline.md, "The front end sets a
+cliff by micro-op count and by lines, not by alignment"):
 it starts on a 64-byte boundary, and its hot path is at most 64 bytes, or
 from 76 to 128: one line crossing costs nothing unless only the last few
 instructions spill into the second line, which 65 to 75 bytes would do. The micro-op half of the rule is

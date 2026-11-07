@@ -82,12 +82,13 @@ The size-class function must therefore give the same class for every size in tha
 Work-stealing runtimes free on a different thread from the one that allocated as a matter of
 course. In the Rust services that motivated this project, jemalloc beat a mimalloc-shaped
 allocator, and the cross-thread free path is the likely cause. Our own measurements
-(`docs/research/zen5-roofline.md`, `docs/research/baselines.md`) agree: when objects cross
-threads mimalloc takes 1.5 to 2.7 times as long as jemalloc in all but the shortest one-way
-bursts, and both are several times slower than the cheapest code that can do the same job.
-The same baselines show where each incumbent is strong: mimalloc on building and dropping
-large structures, because it faults in huge pages; jemalloc on memory use and on churn;
-per-CPU tcmalloc on large objects that cross threads.
+(`docs/research/roofline.md`, "The floor and where cralloc stands";
+`docs/research/workloads.md`, "The kernel suite") agree: when objects cross threads mimalloc
+takes 1.5 to 2.7 times as long as jemalloc in all but the shortest one-way bursts, and both
+are several times slower than the cheapest code that can do the same job. The same baselines
+show where each incumbent is strong: mimalloc on building and dropping large structures,
+because it faults in huge pages; jemalloc on memory use and on churn; per-CPU tcmalloc on
+large objects that cross threads.
 
 ### What Linux provides
 
@@ -117,8 +118,8 @@ can briefly show a thread a garbage concurrency ID after a failed `execve`.
 ### What the hardware says
 
 We measured candidate fast paths and the primitives around them on the reference machine
-(AMD Zen 5, Linux 7.2). The full study is `docs/research/zen5-roofline.md`. The numbers that
-shaped the design:
+(AMD Zen 5, Linux 7.2). The full study is `docs/research/roofline.md` and
+`docs/research/hardware.md`. The numbers that shaped the design:
 
 | Operation | Cost |
 |---|---|
@@ -130,7 +131,7 @@ shaped the design:
 | the same delay through an absolute address (what `thread_local!` compiles to), or with a zero-extending 8- or 16-bit load | 5 to 7 cycles |
 | one uncontended atomic read-modify-write | 20 cycles |
 | a cache line handed from one core to another | 21 ns within an L3 domain, 79 ns across |
-| first touch of a 4 KiB page; the same amount of memory inside a 2 MiB huge page | 566 ns; 119 ns |
+| first touch of a 4 KiB page; the same amount of memory inside a 2 MiB huge page | 1,750 to about 2,850 cycles (310 to about 505 ns at 5.64 GHz), by how far the page falls out of cache; 117 to 214 ns |
 
 Four conclusions follow.
 
@@ -327,8 +328,9 @@ slab 0, a link-time constant plus 32 times the class, with no pointer to load. U
 slabs cost no memory.
 A routine compares the CPU number with the array length and takes the slow path if
 it is out of range. That one compare keeps a thread with no rseq
-registration, which reads a negative number, away from every slab, and it means memory
-safety does not depend on what the OS writes there.
+registration, which reads a negative number, away from every slab, and it means no value the
+OS writes there can index outside the slabs. A wrong value in range would put two threads on
+one slab, so that the number is right is trusted (see "What is trusted").
 
 A **magazine** is a block of 8-byte slots, a power of two in size and aligned to its size.
 Slot 0 is a link word used by the depot, the last slot holds the fill level while the
@@ -389,7 +391,8 @@ come from one static, placed clear of the page offsets of every slab field. The 
 takes the mask in a register on purpose. A routine that loaded the mask itself would save
 the run-time case an instruction and cost the constant case, which has the mask as an
 immediate, half a cycle a pair or more; and the second load is not on the critical path,
-which runs through the CPU number to the slab word (`docs/research/fast-lookup.md`).
+which runs through the CPU number to the slab word (`docs/research/roofline.md`, "A store
+whose address arrives late holds up the next load").
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
@@ -468,15 +471,15 @@ Work that swings both ways from where it started, a few allocations of a class a
 more frees than that, then crosses the far end of the new magazine, and so does every
 repetition after it: two swaps each time, for as long as the work is steady. A server
 whose requests do this ran several percent slower in the processes where its first
-magazines happened to land that way (`docs/research/rpc-slow-mode.md`). So two reversals
-in a row, a swap that reverses a swap of that class on that CPU which itself reversed the
-one before, are taken as evidence of such a lock, and the slow path then leaves the loaded
-magazine half full: it takes the loaded magazine out of the slab and moves half of one
-magazine's objects into the other while it holds both. A swing of less than half a
-magazine never leaves the loaded magazine again, and servers whose requests swing this way
-then take almost no slow paths at all (`docs/research/servers-h2.md`). A flow never
-reverses, and a swing longer than a magazine reverses once at each turn, not twice, so
-neither pays for the move.
+magazines happened to land that way (`docs/research/magazines.md`, "The magazine-end lock").
+So two reversals in a row, a swap that reverses a swap of that class on that CPU which
+itself reversed the one before, are taken as evidence of such a lock, and the slow path then
+leaves the loaded magazine half full: it takes the loaded magazine out of the slab and moves
+half of one magazine's objects into the other while it holds both. A swing of less than half
+a magazine never leaves the loaded magazine again, and servers whose requests swing this way
+then take almost no slow paths at all (`docs/research/magazines.md`, "When a server's load
+reaches the slow path"). A flow never reverses, and a swing longer than a magazine reverses
+once at each turn, not twice, so neither pays for the move.
 
 Half a magazine cannot absorb a swing longer than that, and a swing between half a
 magazine and a whole one would be centred at every turn without ever fitting. So the rule
@@ -594,13 +597,13 @@ for the life of the process. Back to back in a class smaller than a cache line t
 lines, and every write by one worker stalls its neighbour. A runtime's per-worker queue
 headers sat that way, and a program that did nothing but spawn tasks lost a seventh of its
 time to them, where an allocator with other size classes kept them apart by luck
-(`docs/research/spawn-gap.md`). So in classes smaller than a line, the fill that opens a
-run, one whose region shows no claim earlier in the interval, hands out its first objects a
-stride of slots apart, far enough that no two share a line, and then the ones between. No
-slot is skipped. Only the order changes, for a bounded part of one magazine, and a fill
-that continues a run is dense, so a program building a structure has its stream back after
-the first magazine. The same order on every fill cost such programs up to half again of
-their time.
+(`docs/research/program-effects.md`, "False sharing"). So in classes smaller than a line,
+the fill that opens a run, one whose region shows no claim earlier in the interval, hands
+out its first objects a stride of slots apart, far enough that no two share a line, and then
+the ones between. No slot is skipped. Only the order changes, for a bounded part of one
+magazine, and a fill that continues a run is dense, so a program building a structure has
+its stream back after the first magazine. The same order on every fill cost such programs up
+to half again of their time.
 
 ### Heartbeat
 
@@ -643,9 +646,9 @@ sixty. The evidence the rules act on is that something went unused while the pro
 running, and a silence is not that. Counted by the clock alone, the first requests after a
 silence find every cache marked idle and pay to tear down what they are about to use: a
 server driven in bursts spent the first milliseconds of each burst purging single pages
-and draining other CPUs' slabs (`docs/research/server-latency.md`). Memory that should go
-back during a silence needs something that runs during it, which is what the rest of this
-section is about.
+and draining other CPUs' slabs (`docs/research/servers.md`, "The first requests after a
+silence"). Memory that should go back during a silence needs something that runs during it,
+which is what the rest of this section is about.
 
 Nothing runs on the fast path, so a thread whose allocations and frees are all served by
 its loaded magazines never runs a heartbeat. Other threads cover for it: any slow path
@@ -659,11 +662,11 @@ Going quiet is where steady work on one thread ends up, not a corner case. A swi
 allocations and frees smaller than a magazine settles, after a few swaps, into a loaded
 magazine that holds exactly one swing, and never leaves it. A program that frees a burst
 and then works lightly on the thread that freed it kept the whole burst in more than half
-of its runs (`docs/research/memory.md`). Programs whose threads free each other's objects,
-or grow buffers, enter slow paths constantly and are not affected. Nothing on the freeing
-path can stand in for the clock here: a free cannot tell memory that is idle from memory
-about to be reused, and purging on a level makes the programs that reuse it fault it
-straight back.
+of its runs (`docs/research/memory.md`, "After a peak, and in a silence"). Programs whose
+threads free each other's objects, or grow buffers, enter slow paths constantly and are not
+affected. Nothing on the freeing path can stand in for the clock here: a free cannot tell
+memory that is idle from memory about to be reused, and purging on a level makes the
+programs that reuse it fault it straight back.
 
 So there is a background thread, and by default it starts itself, once two things are
 true together: the process holds more free memory that is still resident than the floor
@@ -713,15 +716,15 @@ a slow path, so there the thread keeps to its timed sleep and never parks.
 While the thread runs, returning memory is its work and not a slow path's. A request that
 returns memory makes every request queued behind it on that worker wait, and a server
 whose tables grew by doubling had its slowest doublings set by the purge steps that
-happened to fall on them, not by the copy (`docs/research/doubling-tail.md`). So a slow
-path that finds such work due, a hold that has matured, growth over the cap to be paid
-for, an interval's pass, does none of it. It records what is due and, if the thread is
-asleep, wakes it. The thread takes the same bounded steps under the same rules until
-nothing is due. Before it sleeps it publishes when its next look at the holds falls due, in
-counted time, and the heartbeat whose reading of the clock reaches that wakes it. Counted
-time moves only when a slow path reads the clock, so a timer of the thread's own could not
-follow it, and in a silence would wake the thread for holds that cannot mature. What goes
-back, and when to within milliseconds, is unchanged.
+happened to fall on them, not by the copy (`docs/research/large-blocks.md`, "A doubling's
+tail is the purge that falls on it"). So a slow path that finds such work due, a hold that
+has matured, growth over the cap to be paid for, an interval's pass, does none of it. It
+records what is due and, if the thread is asleep, wakes it. The thread takes the same
+bounded steps under the same rules until nothing is due. Before it sleeps it publishes when
+its next look at the holds falls due, in counted time, and the heartbeat whose reading of
+the clock reaches that wakes it. Counted time moves only when a slow path reads the clock,
+so a timer of the thread's own could not follow it, and in a silence would wake the thread
+for holds that cannot mature. What goes back, and when to within milliseconds, is unchanged.
 The thread starts when free memory first passes the floor, and the clocked rules return
 nothing below the floor, so in a program that has the thread a request's slow path takes
 none of their steps. What a request still returns is what its own call decides, each of
@@ -737,7 +740,7 @@ pay a step each themselves, and a pass that nobody has stepped for an interval i
 paths' again. The thread does not give up the CPU between its steps. Yielding after each
 one handed a busy worker a whole time slice every time, and the thread fell far enough
 behind on holds and payments to cost a query engine its peak in half its runs, while no
-server's tail moved (`docs/research/purge-off-path.md`).
+server's tail moved (`docs/research/memory.md`, "Returning memory off request paths").
 
 It is an ordinary thread of the process, created through the C library by the layer that
 links one, not by the allocator with a bare system call. A bare thread could be created
@@ -782,17 +785,17 @@ glibc grants a smaller request that leaves almost nothing beside the data, on wh
 thread would crash. Sizing a request to fit needs the loader's list of modules, which is
 read under a lock that a fork does not release in the child and that the program's own
 callbacks run under. The default is sized by the library against that data, and a smaller
-stack would save only address space (`docs/research/thread-stack.md`). A program that
-gives all its threads a stack of a few kilobytes gives this one the same. The thread
-names itself with a system call of the allocator's own, so that nothing opens a file when
-it starts. If the thread cannot be
-created at all the allocator carries on without it. A process under a system-call filter
-that kills on thread creation, which no allocator can detect, must turn it off. The child
-of a fork does not inherit the thread and starts its own on the same conditions, its own
-first thread included. The word that says whether the thread exists also names the
-generation it belongs to (see "Process lifecycle"), so that claiming the right to create
-it is one atomic instruction, a fork child reads its parent's word as stale, and a child
-that shares its parent's memory is not taken for a new process.
+stack would save only address space (`docs/research/portability.md`, "The background
+thread's stack"). A program that gives all its threads a stack of a few kilobytes gives this
+one the same. The thread names itself with a system call of the allocator's own, so that
+nothing opens a file when it starts. If the thread cannot be created at all the allocator
+carries on without it. A process under a system-call filter that kills on thread creation,
+which no allocator can detect, must turn it off. The child of a fork does not inherit the
+thread and starts its own on the same conditions, its own first thread included. The word
+that says whether the thread exists also names the generation it belongs to (see "Process
+lifecycle"), so that claiming the right to create it is one atomic instruction, a fork child
+reads its parent's word as stale, and a child that shares its parent's memory is not taken
+for a new process.
 
 A program with a timer of its own can call `maintain` from it instead, and a process that
 calls `maintain` does not get the thread by default. In an async runtime that is a task
@@ -825,7 +828,8 @@ what a process parks in its caches depends on how many CPUs it runs on and how m
 classes it uses, and not on how much it has live. The fast path pays nothing for any of
 it: a magazine's size is fixed per class, and everything else is read and written by slow
 paths. A design in which every one of these sizes follows the program was studied and not
-built; `docs/research/adaptive-sizing.md` has it, with the prior art.
+built; `docs/research/magazines.md`, "Sizing on evidence", has it, and
+`docs/research/prior-art.md`, "How others size their buffers", the prior art.
 
 The bounds:
 
@@ -892,7 +896,8 @@ A huge-page fault delivers 512 pages for about a fifth of the per-page price of 
 faults, and a page returned too early is faulted straight back. Against that, memory the
 program has stopped using must go back to the OS within seconds, or a process keeps its peak
 for ever. Memory the program is not using sits in one of the places below, and each has a
-rule that returns it (`docs/research/memory.md` has the measurements behind them).
+rule that returns it (`docs/research/memory.md` and `docs/research/large-blocks.md` have the
+measurements behind them).
 
 | What holds the memory | What returns it | When |
 |---|---|---|
@@ -935,7 +940,7 @@ Nine rules stand behind the table.
   frontiers already keep that to what two intervals did not reuse, and holding part of it
   back for later only keeps memory the program has shown it does not need: a pass that
   took a quarter an interval kept more at the troughs of a large heap and saved nothing
-  in time (`docs/research/trough-gap.md`). While the
+  in time (`docs/research/memory.md`, "How much a clocked pass returns"). While the
   program runs it never takes pages below a frontier, however high the count. Those are the
   pages the next fills take, and purging them only makes the program fault them back. What
   two intervals did not need goes back, which is the rule the depot stacks and the spares
@@ -944,11 +949,11 @@ Nine rules stand behind the table.
   background thread's rounds through a quiet half minute would otherwise age every
   frontier, return the pages its own drains had just completed, and leave the first
   requests of the next burst to fault them back
-  (`docs/research/default-thread-servers.md`). In a silence a pass takes what lies above
-  the frontiers first, and goes below them only while more than the floor could still be
-  returned, each region from its top down, so that what a region keeps is its lowest
-  pages, the ones its next fills take. A frontier is a hint: a wrong one costs a purge too many or
-  too few, never a page in use, because the purge is a claim.
+  (`docs/research/servers.md`, "The first requests after a silence"). In a silence a pass
+  takes what lies above the frontiers first, and goes below them only while more than the
+  floor could still be returned, each region from its top down, so that what a region keeps
+  is its lowest pages, the ones its next fills take. A frontier is a hint: a wrong one costs
+  a purge too many or too few, never a page in use, because the purge is a claim.
 - **Purge in runs, and let short runs wait.** Returning memory costs a system call and a
   round of interrupts to the other CPUs for each call, whatever its size, so a pass
   returns adjacent free pages together, as one claim and one call, up to a bound on the
@@ -958,8 +963,8 @@ Nine rules stand behind the table.
   one pass in every few takes a run of any length: scattered pages that stay free that
   long do go back, and a program that reuses them in the meantime never paid to return
   them. A server driven in bursts spent the first milliseconds of each burst returning
-  single pages it was about to refill (`docs/research/burst-start.md`). Growth over the
-  cap, and `collect`, take runs of any length.
+  single pages it was about to refill (`docs/research/servers.md`, "The first requests after
+  a silence"). Growth over the cap, and `collect`, take runs of any length.
 - **A step on a request's slow path is bounded, whatever the unit.** A request that
   returns memory delays every request queued behind it on that worker, so a millisecond
   spent there once a second is the server's tail. Every step a slow path takes, of the
@@ -969,38 +974,40 @@ Nine rules stand behind the table.
   slot counts as zero only once every page of it has gone, so a request for zeroed memory
   that takes one partly returned zeroes it, as it would any other. In a class of a huge page or more a piece is whole
   huge pages, so a purge does not split the pages it leaves behind
-  (`docs/research/bounded-purge.md`). `collect` and `malloc_trim` are the program's own
-  calls and are not bounded. Where the background thread runs, a slow path takes none of
-  these steps and the thread takes them all (see "Heartbeat").
+  (`docs/research/memory.md`, "Returning memory off request paths"). `collect` and
+  `malloc_trim` are the program's own calls and are not bounded. Where the background thread
+  runs, a slow path takes none of these steps and the thread takes them all (see
+  "Heartbeat").
 - **Free large slots do not wait for the frontier.** A large class's region serves one
   size, so a program that frees blocks of many large sizes between phases of its work
   holds them all, class by class, for the two intervals the frontier rule waits. A query
   engine held a third of its peak this way between queries
-  (`docs/research/large-hold.md`). So free large slots follow a shorter clock. A large
-  free that leaves its slot resident stamps its region with a fine count, which steps
-  every couple of milliseconds that a heartbeat observes and at most one step for each
-  reading of the clock, so that a silence ages a hold by one step, as it ages everything
-  else by one interval. Once a region has gone a hold of some tens of steps without such a
-  free, heartbeats return its free slots, a bounded amount for each heartbeat, while the
-  free large memory that is still resident exceeds the floor, and only down to it. A
-  region that tenants keep taking and freeing never goes a hold without such a free, and by
-  the region's clock alone its free slots would stay for as long as the churn lasts
-  (`docs/research/large-churn.md`). So the free stamps the slot too, in its size word, and
-  a look at a region whose own stamp is young walks the region's free slots, carrying on
-  from where the last look stopped, and returns those that have themselves been free for
-  the hold. A region is walked at most once a hold, whoever looks, so the walk costs one
-  pass over its free slots a hold, and a slot goes back within a few holds of its free. The
-  hold is a constant found by measurement: a shorter one returns memory that is about to
-  be reused and pays for it in faults, and a longer one keeps the peak. It stays a
-  constant because the two ways of doing better that were built did not. A hold that
-  learned a length for each region halved the faults of a program that takes its blocks
-  back a second after freeing them, changed neither its time nor its tail, and cost a
-  query engine a tenth of its peak. A long hold under which any growth pays for itself, by
-  returning as much free memory elsewhere, kept that peak only to within the cap and
-  removed fewer faults, for an account of every way memory becomes resident
-  (`docs/research/hold-credit.md`). The faults a short hold costs are cheap, and the peak
-  a long one costs is not. `maintain` takes the same
-  bounded looks once an interval, and in a silence returns held slots at its second round.
+  (`docs/research/large-blocks.md`, "Free slots: a hold, and why no hold serves everyone").
+  So free large slots follow a shorter clock. A large free that leaves its slot resident
+  stamps its region with a fine count, which steps every couple of milliseconds that a
+  heartbeat observes and at most one step for each reading of the clock, so that a silence
+  ages a hold by one step, as it ages everything else by one interval. Once a region has
+  gone a hold of some tens of steps without such a free, heartbeats return its free slots, a
+  bounded amount for each heartbeat, while the free large memory that is still resident
+  exceeds the floor, and only down to it. A region that tenants keep taking and freeing
+  never goes a hold without such a free, and by the region's clock alone its free slots
+  would stay for as long as the churn lasts (`docs/research/large-blocks.md`, "Each free
+  slot ages on its own"). So the free stamps the slot too, in its size word, and a look at a
+  region whose own stamp is young walks the region's free slots, carrying on from where the
+  last look stopped, and returns those that have themselves been free for the hold. A region
+  is walked at most once a hold, whoever looks, so the walk costs one pass over its free
+  slots a hold, and a slot goes back within a few holds of its free. The hold is a constant
+  found by measurement: a shorter one returns memory that is about to be reused and pays for
+  it in faults, and a longer one keeps the peak. It stays a constant because the two ways of
+  doing better that were built did not. A hold that learned a length for each region halved
+  the faults of a program that takes its blocks back a second after freeing them, changed
+  neither its time nor its tail, and cost a query engine a tenth of its peak. A long hold
+  under which any growth pays for itself, by returning as much free memory elsewhere, kept
+  that peak only to within the cap and removed fewer faults, for an account of every way
+  memory becomes resident (`docs/research/large-blocks.md`, "Free slots: a hold, and why no
+  hold serves everyone"). The faults a short hold costs are cheap, and the peak a long one
+  costs is not. `maintain` takes the same bounded looks once an interval, and in a silence
+  returns held slots at its second round.
 - **Under a floor, the clock returns nothing.** The floor (see "Sizing the
   caches") is measured against what a pass could return: resident pages with
   nothing live on them, and while the program runs only those above the frontiers. While
@@ -1070,7 +1077,7 @@ Nine rules stand behind the table.
     four, and a heap in steady use, whose share stays well under the first step, pays
     nothing. The rate steps back down once a lap as the evidence goes, and a pass that
     finds no more than the floor retained steps it down too, so it falls in a quiet
-    program as well (`docs/research/trough-gap.md`).
+    program as well (`docs/research/memory.md`, "Refresh on evidence").
 - **Huge pages only where objects are dense.** A region starts marked against transparent
   huge pages, so a lightly used class costs only the 4 KiB pages it touches. Two things
   count as evidence of dense use. A class of objects of at most a kilobyte, several to a
@@ -1093,7 +1100,8 @@ Nine rules stand behind the table.
   block touched sparsely holds many times its memory, and on a machine short of free huge
   pages the faults stall. Telling the two apart needs a look at the block while it lives,
   which would put a second writer on a slot the design gives to its holder alone
-  (`docs/research/whole-block-huge.md`).
+  (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense";
+  `docs/research/program-effects.md`, "TLB and huge pages").
 - **Split a huge page only where fills have stopped reaching.** Returning part of a huge
   page costs the page its mapping, so below a region's frontier, in its huge-page part,
   purging works only in whole 2 MiB units. That includes the unit holding the watermark,
@@ -1103,17 +1111,18 @@ Nine rules stand behind the table.
   enough. Fills take the lowest free slots, so when a class's demand falls its short-lived
   objects pack into the bottom of the region, and the top is left a few long-lived objects
   to a huge page, each holding 2 MiB. A program whose sizes shift between phases kept most
-  of every trough that way (`docs/research/huge-tail.md`). So a step that may return memory
-  treats the huge pages above the frontier as small pages. One that is wholly free goes back
-  whole. One with a quarter of its pages or more free and resident is split, and its free
-  runs are returned. Under a quarter, what would go back is not worth the mapping, and the
-  huge page stays whole. A sample of a few pages, at places that move with every lap,
-  chooses which huge pages are counted, so a lap over dense huge pages reads little more
-  than it would without the rule. The purge asks the kernel to split a huge page before it
-  returns part of it: pages returned from a huge page that is not split leave the resident
-  set but stay charged to the cgroup until reclaim splits it, and the thread that meets the
-  limit pays tens of milliseconds for that. A split costs a slow path what a step of returns
-  does, and counts as one.
+  of every trough that way (`docs/research/memory.md`, "When the size mix wanders, huge
+  pages ratcheted"). So a step that may return memory treats the huge pages above the
+  frontier as small pages. One that is wholly free goes back whole. One with a quarter of
+  its pages or more free and resident is split, and its free runs are returned. Under a
+  quarter, what would go back is not worth the mapping, and the huge page stays whole. A
+  sample of a few pages, at places that move with every lap, chooses which huge pages are
+  counted, so a lap over dense huge pages reads little more than it would without the rule.
+  The purge asks the kernel to split a huge page before it returns part of it: pages
+  returned from a huge page that is not split leave the resident set but stay charged to the
+  cgroup until reclaim splits it, and the thread that meets the limit pays tens of
+  milliseconds for that. A split costs a slow path what a step of returns does, and counts
+  as one.
 
   The advice follows what went back. Under the advice the kernel rebuilds any huge page
   with one page in use, so when a pass is done with a region it takes the advice off, in
@@ -1203,7 +1212,7 @@ What the look finds chooses between two valid frees and nothing else, so it does
 be right. It sees pages touched, not pages written, so a block the program read widely
 counts as used, and it can miss a written run shorter than an eighth of the block. Below
 16 MiB the look would be a visible share of a block's life
-(`docs/research/meili-peak.md`).
+(`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
 
 ### Large objects
 
@@ -1275,9 +1284,10 @@ What a growing block leaves behind is a choice between two cases that pull again
 other. A buffer grown and freed again and again should find its memory resident each time;
 many buffers growing at once should not leave a trail of the blocks they outgrew.
 
-A grown block that is freed is an ordinary free. Its slot stays resident, the hold decides
-when it goes back, and it is charged as any free is: a program that grew one buffer is
-likely to grow another.
+A grown block that is freed is an ordinary free, unless it carries huge-page advice, when
+its slot goes back whole (see "Returning memory and huge pages"). Otherwise its slot stays
+resident, the hold decides when it goes back, and it is charged as any free is: a program
+that grew one buffer is likely to grow another.
 
 A slot that a block has outgrown is kept resident, whole, while the outgrown slots that
 nothing has taken again total no more than 64 MiB, and goes back behind the copy beyond
@@ -1288,10 +1298,10 @@ stays small. Where many grow at once the slots pile up, and the count is the tra
 Counting anything wider does not work. The level was first set against all retained large
 memory, which the hold keeps above its floor by design, so on any heap of size it was
 always exceeded, and every outgrown slot went back and was faulted in again within
-milliseconds (`docs/research/grown-slots.md`). The bound also limits how much the two
-copies of one moving block can hold between them. The purge falls only on a block the
-program copied to reach its size, so it costs at most about what the program has already
-spent on that block.
+milliseconds (`docs/research/large-blocks.md`, "What growth leaves behind"). The bound also
+limits how much the two copies of one moving block can hold between them. The purge falls
+only on a block the program copied to reach its size, so it costs at most about what the
+program has already spent on that block.
 
 A kept slot carries a mark in its size word. The count rises by the slot's charge when it
 is kept, and falls by what is removed when a claim takes the slot or a purge returns its
@@ -1323,8 +1333,9 @@ claimer does this, before it hands the block out, because nothing but its holder
 an occupied slot. What a trim has not reached stays resident, and uncounted until the
 slot's free charges it. The price is page faults when a later, larger tenant needs the room
 back: a program that churns large buffers of many sizes gives a few percent of its time
-for a lower peak (`docs/research/large-slack.md`). Where the kernel refuses to take memory
-back, as it does for locked memory, each such claim makes one call that fails.
+for a lower peak (`docs/research/large-blocks.md`, "Slack: what earlier tenants left in an
+occupied slot"). Where the kernel refuses to take memory back, as it does for locked memory,
+each such claim makes one call that fails.
 
 Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory
@@ -1357,7 +1368,7 @@ saved; we copy.
   engine's C++ library defines the operators, blocks reach us that are not ours. And we
   cannot export all of them: a throwing `new` that fails must raise `std::bad_alloc`, and an
   exception cannot unwind through the allocator's Rust frames. The price is a call layer for
-  C++ and the size that sized deletes carry; `docs/research/zen5-roofline.md`, section 14,
+  C++ and the size that sized deletes carry; `docs/research/roofline.md`,
   "C++ new and delete without our operators", measures it. An implementation of every form
   but the throwing ones was built and then removed; the last commit that has it is
   `58bf936`, under `crates/cralloc/src/c/`.
@@ -1410,11 +1421,11 @@ the one a Rust `Layout` of the same size implies.
   it at run time.
 - **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
   routine sends it to the slow path and it never touches a slab. That covers a whole process
-  under valgrind or with the C library's registration turned off, and a single thread whose
-  registration a sandbox refused. The slow path then serves small objects the way it always
-  serves large ones, straight from the region bitmaps with atomic instructions. This is the
-  same code, so it adds no second implementation, and it costs tens of cycles per call
-  instead of a few.
+  under valgrind or with the C library's registration turned off, and on musl a single
+  thread whose registration a sandbox refused. The slow path then serves small objects the
+  way it always serves large ones, straight from the region bitmaps with atomic
+  instructions. This is the same code, so it adds no second implementation, and it costs
+  tens of cycles per call instead of a few.
 - **Under Miri.** Miri runs neither assembly nor system calls, so the allocator's handle does
   not exist there. A program that is checked with Miri declares its global allocator only
   when not under Miri and keeps Miri's own, which checks each of its blocks individually.

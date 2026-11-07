@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# The long memory runs of docs/research/heap-drift.md: every job with every build, one run at
-# a time, the builds in a new random order for each job. Each run writes OUTDIR/JOB.BUILD.txt;
-# a run whose file already ends cleanly is skipped, so a matrix that was stopped resumes. Run
-# under scripts/heavy (these runs are not timed and need no measurement lock):
+# The long memory runs of docs/research/memory.md, "A steady heap does not drift" and "When the
+# size mix wanders, huge pages ratcheted": every job with every build, one run at a time, the
+# builds in a new random order for each job. Each run writes OUTDIR/JOB.BUILD.txt; a run whose
+# file already ends cleanly is skipped, so a matrix that was stopped resumes. Run under
+# scripts/heavy (these runs are not timed and need no measurement lock):
 #
 #   scripts/heavy bench/standings/drift/matrix.sh OUTDIR "JOB..." "BUILD..." [key=value ...]
 #

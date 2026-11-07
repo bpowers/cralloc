@@ -33,8 +33,9 @@ Batch programs (`--suite apps`):
 | `datafusion` 55.2.0 | the 22 TPC-H queries at scale factor 3 on Parquet, as datafusion-cli runs them; 3.6 s, 1 GB | 4 (tokio) | analytics: large buffers, hash tables that grow, async tasks moving between workers | mimalloc |
 | `boa` 0.22.0 | the V8 benchmark suite (v7), each benchmark a fixed number of times; 8 s, 250 MB | 1 | an interpreter with a tracing GC: many small objects, one thread | jemalloc |
 
-(Times and peaks are rough, with glibc on the reference machine; `docs/research/apps.md` has
-measurements.) "Ships with" is the allocator the project's own release binary uses on Linux.
+(Times and peaks are rough, with glibc on the reference machine;
+`docs/research/workloads.md`, "Batch programs", has measurements.) "Ships with" is the
+allocator the project's own release binary uses on Linux.
 
 ## What belongs here
 
@@ -131,24 +132,26 @@ load, the curve, the cgroup peak and the THP counters. It ranks by cycles per re
 **Idle states.** Between requests a server's cores go idle, and the deepest state on the
 reference machine (C3) takes about 350 us to leave. A faster allocator leaves more idle time,
 hence more C3, and with the states left alone the 70% tail ranks the machine's idle states
-and the runtime's parking, not the allocator: p99.9 of 1 to 7 ms for every allocator, with
-the slowest allocator's often the best (`docs/research/server-latency.md`). So by default the
-runner holds the server's cores out of deep idle while the server runs, the same way for
-every allocator: a spinning thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it
-needs no root, which disabling the state would). p99.9 then falls to tens of microseconds.
-The spinner shares the core, so the server's cycles per request rise (by a third on the
-order service) and its saturated rate falls, alike for every allocator. Every run records
-which way it ran (`idle_states`); `--idle-states free` leaves the states alone, and its
-tails measure the machine as much as the allocator.
+and the runtime's parking, not the allocator: p99.9 of 2 to 4 ms for every allocator, with
+the slowest allocator's often the best (`docs/research/servers.md`, "At one fixed rate a
+tail can rank idle states, not allocators"). So by default the runner holds the server's
+cores out of deep idle while the server runs, the same way for every allocator: a spinning
+thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it needs no root, which disabling
+the state would). p99.9 then falls to tens of microseconds. The spinner shares the core, so
+the server's cycles per request rise (by 17% on the order service) and its saturated rate
+falls, alike for every allocator. Every run records which way it ran (`idle_states`);
+`--idle-states free` leaves the states alone, and its tails measure the machine as much as
+the allocator.
 
 With the spinners the server's CPUs still enter C2 (18 us to leave) and C3 as the kernel
 counts them, and those exits still set tails in the tens of microseconds: at one fixed rate
-the faster server idles longer and goes deep more often (`docs/research/h2-tail.md`). So the runner reads
-the server CPUs' idle-state counters (`/sys/devices/system/cpu/cpuN/cpuidle`, no root
-needed) at every mark, and each group of a server run records, per state, its entries,
-time, name, exit latency and the CPUs where it was disabled, and the deep entries (states
-whose exit latency is above `DEEP_LATENCY_US`, `runner/src/cpuidle.rs`) per thousand
-requests (`served.groups.<group>.idle`). Each run also records the setting it started under
+the faster server idles longer and goes deep more often (`docs/research/measuring.md`, "A
+tail at one fixed rate can rank the CPU's idle states"). So the runner reads the server
+CPUs' idle-state counters (`/sys/devices/system/cpu/cpuN/cpuidle`, no root needed) at every
+mark, and each group of a server run records, per state, its entries, time, name, exit
+latency and the CPUs where it was disabled, and the deep entries (states whose exit latency
+is above `DEEP_LATENCY_US`, `runner/src/cpuidle.rs`) per thousand requests
+(`served.groups.<group>.idle`). Each run also records the setting it started under
 (`cpuidle`). A window the counters cannot cover (none on the host, a CPU taken offline, a
 state switched during it) says why instead. A session of servers prints a warning when deep
 states are enabled on the servers' CPUs; `scripts/deep-idle status` shows them, and

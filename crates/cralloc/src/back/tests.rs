@@ -1911,10 +1911,11 @@ fn pass_under_way<O: Os>(state: &State<O>) -> bool {
     state.decay.word.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
 }
 
-/// The defect the reset caused (`docs/research/memory.md`): in a storm of frees every page
-/// still has a live neighbour while a purge runs, so it purges nothing. The count must keep
-/// those bytes, so that when the neighbours are freed too the memory is still known and is
-/// returned. The old code zeroed the count after a fruitless pass.
+/// The defect the reset caused (`docs/research/memory.md`, "Purge on a clock, never on a
+/// level"): in a storm of frees every page still has a live neighbour while a purge runs, so it
+/// purges nothing. The count must keep those bytes, so that when the neighbours are freed too
+/// the memory is still known and is returned. The old code zeroed the count after a fruitless
+/// pass.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_fruitless_purge_does_not_make_the_count_forget() {

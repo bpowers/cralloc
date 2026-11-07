@@ -1,6 +1,7 @@
-//! Long runs at a large heap, for docs/research/heap-drift.md: does an allocator's resident
-//! memory creep up against the bytes the program holds as the size mix, the lifetimes and the
-//! set of busy threads change?
+//! Long runs at a large heap, for docs/research/memory.md, "A steady heap does not drift" and
+//! "When the size mix wanders, huge pages ratcheted": does an allocator's resident memory creep
+//! up against the bytes the program holds as the size mix, the lifetimes and the set of busy
+//! threads change?
 //!
 //!   workload drift shape=<steady|shift|lifetime|swing|large> [key=value ...]
 //!

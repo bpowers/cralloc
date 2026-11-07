@@ -7,14 +7,14 @@
 //! loads its entries right after the previous operation stored a hot word, and on Zen 5 a load
 //! whose page offset overlaps a store still in flight can be held until that store is done;
 //! since the store's address comes from the previous lookup, a loop of them then runs one at a
-//! time (`docs/research/zen5-roofline.md`, section 16). `front` asserts the placement for every
-//! class.
+//! time (`docs/research/roofline.md`, "A load at the page offset of a store in flight can stall
+//! the whole loop"). `front` asserts the placement for every class.
 //!
 //! The mask stays a table entry handed to the routine in a register, not something the routine
 //! loads: a mask that comes from memory costs a loop of constant-size calls up to a cycle a pair,
-//! where a constant class folds its entry to an immediate (`docs/research/fast-lookup.md`).
-//! Each entry is a constant built from the class functions, so a constant layout folds every
-//! load away.
+//! where a constant class folds its entry to an immediate (`docs/research/roofline.md`, "A
+//! store whose address arrives late holds up the next load"). Each entry is a constant built
+//! from the class functions, so a constant layout folds every load away.
 
 use super::{Class, MAX_SMALL_SIZE, QUANTUM, SMALL_COUNT, SmallClass, WORD_STRIDE};
 

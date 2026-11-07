@@ -1,9 +1,9 @@
 //! The copies, beside the slabs, of what the generated C frees read about the heap: its region
 //! shift and base index, and the class byte of
-//! each region that holds small blocks (`front::Front`, `docs/research/zen5-roofline.md` section
-//! 14). The routines read them at fixed distances from `SLABS` with no lookup of their own; the
-//! back end's region table and the published heap word stay the truth, which every slow path
-//! uses.
+//! each region that holds small blocks (`front::Front`, `docs/research/roofline.md`, "The C
+//! entry points"). The routines read them at fixed distances from `SLABS` with no lookup of
+//! their own; the back end's region table and the published heap word stay the truth, which
+//! every slow path uses.
 //!
 //! The copies are written only here, and only ever in one direction: a zero becomes the right
 //! value. Every value is all-zero at load, and zero sends every free that reads it to its slow

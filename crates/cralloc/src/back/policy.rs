@@ -3,7 +3,8 @@
 //! They are stated in pages and huge pages so that the simulated heaps, whose pages are
 //! smaller, scale with them. The comment on each gives its value in the design's geometry (4 KiB
 //! pages, 2 MiB huge pages) and why it has that value. The memory-side values come from
-//! `docs/research/memory.md`; none has been tuned against speed yet.
+//! `docs/research/memory.md` and `docs/research/large-blocks.md`; none has been tuned against
+//! speed yet.
 
 use crate::space::Geometry;
 
@@ -11,19 +12,20 @@ use crate::space::Geometry;
 /// 64 MiB. Retained memory is free memory in the bitmaps that is believed resident. The cap
 /// is enforced when the heap grows, never when it frees: a level cannot tell memory that is
 /// idle from memory about to be reused, and purging on frees faulted reused memory straight
-/// back (`docs/research/memory.md`). Address space is segregated by class, so free memory of
-/// one class serves another only through the kernel; the cap bounds what a phase change can
-/// leave resident above what is live. The clocked pass returns memory in the ordinary case.
+/// back (`docs/research/memory.md`, "Purge on a clock, never on a level"). Address space is
+/// segregated by class, so free memory of one class serves another only through the kernel; the
+/// cap bounds what a phase change can leave resident above what is live. The clocked pass
+/// returns memory in the ordinary case.
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
 /// The floor of the allowance, in huge pages: 16, or 32 MiB. Memory up to this much is spent
 /// freely: the clocked pass returns nothing while what a purge could return (by the last
 /// lap's count, `purge`) totals no more than the floor, and stops at the floor when above it. Tens of megabytes cost a server nothing that
 /// matters, and returning them costs `madvise` calls and the refaults of the next burst
-/// (`docs/research/burst-start.md`). The same floor is what the default background thread's
-/// start waits for, since below it the thread would have nothing to do, and what the
-/// allowance for holding large slots starts from. `collect` (and `malloc_trim`) and growth
-/// over the cap are not floored.
+/// (`docs/research/servers.md`, "What returning memory costs a request"). The same floor is
+/// what the default background thread's start waits for, since below it the thread would have
+/// nothing to do, and what the allowance for holding large slots starts from. `collect` (and
+/// `malloc_trim`) and growth over the cap are not floored.
 pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
 
 // The floor is spent freely and the cap is what growth pays down to, so the floor must be the
@@ -67,8 +69,9 @@ pub const FILL_CLAIMS: usize = 256;
 /// The most pages a purge returns in one call: 64, 256 KiB. Adjacent free pages go back
 /// together, since a call costs about the same whatever it returns (about 2 us in a process
 /// whose other threads are running, for its TLB shootdowns, against 0.05 us a page:
-/// `docs/research/burst-start.md`); the bound keeps one call's claims, a few hundred bitmap
-/// words for the smallest classes, from holding up the allocations that want them.
+/// `docs/research/servers.md`, "What returning memory costs a request"); the bound keeps one
+/// call's claims, a few hundred bitmap words for the smallest classes, from holding up the
+/// allocations that want them.
 pub const PURGE_MAX_RUN_PAGES: u32 = 64;
 
 /// The most bitmap words a run's looks read, and so about the most its purge claims at once:
@@ -80,8 +83,8 @@ pub const PURGE_MAX_RUN_WORDS: usize = 64;
 /// The clocked pass returns a run of free pages only if it has at least this many: 4. A call
 /// for one page costs four times as much a page as one for four, and a short run is the kind a
 /// burst's next allocations land on. Growth over the cap and `collect` take any run. Runs of 8
-/// saved few more calls and left twice the memory waiting after a peak
-/// (`docs/research/burst-start.md`).
+/// left twice the memory waiting after a peak (`docs/research/servers.md`, "What returning
+/// memory costs a request").
 pub const PURGE_MIN_RUN_PAGES: u32 = 4;
 
 /// One clocked pass in this many takes runs of any length: 8, so a single free page goes back
@@ -103,12 +106,12 @@ pub const PURGE_STEP_WORDS: usize = 256;
 /// How many pages a heartbeat's step of a decay pass may purge, in 4 KiB pages: 128, half a
 /// MiB, checked between units and within a unit that is one large slot, which a step returns
 /// a piece at a time (`purge`). A heartbeat runs on a request's slow path, and at about
-/// 0.15 us a page and a few microseconds a call (`docs/research/burst-start.md`) this is some
-/// 20 to 30 us. Without it one step made 4 `madvise` calls over 7,685 pages, about 1 ms. In a
-/// class of a huge page or more a piece is a whole huge page at least, 512 pages, so that a
-/// slot kept with its huge-page advice is not left with one partly returned, which stays
-/// charged whole (`region`, "Huge pages for grown blocks"); the hold's look and a growth
-/// payment are raised the same way.
+/// 0.15 us a page and a few microseconds a call (`docs/research/servers.md`, "What returning
+/// memory costs a request") this is some 20 to 30 us. Without it one step made 4 `madvise`
+/// calls over 7,685 pages, about 1 ms. In a class of a huge page or more a piece is a whole
+/// huge page at least, 512 pages, so that a slot kept with its huge-page advice is not left
+/// with one partly returned, which stays charged whole (`region`, "Huge pages for grown
+/// blocks"); the hold's look and a growth payment are raised the same way.
 pub const PURGE_STEP_PAGES: u32 = 128;
 
 /// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
@@ -120,8 +123,8 @@ pub const PURGE_MAINTAIN_STEP_WORDS: usize = 64;
 /// How many pages one of `maintain`'s steps of the clocked pass may purge before it stops, in
 /// 4 KiB pages: 128, half a MiB. A `madvise` costs about 0.4 us a call and 0.1 us a resident
 /// page alone, and a few microseconds a call more with other threads to shoot down
-/// (`docs/research/burst-start.md`). Checked between units, so a step that meets a unit
-/// larger than this, one slot of a large class, purges that whole slot.
+/// (`docs/research/servers.md`, "What returning memory costs a request"). Checked between units
+/// and within a unit that is one large slot, which a step returns a piece at a time (`purge`).
 pub const PURGE_MAINTAIN_STEP_PAGES: u32 = 128;
 
 /// How much bitmap a step of growth over the cap may read while it purges, in words: 16384,
@@ -134,11 +137,12 @@ pub const PURGE_CAP_WORDS: usize = 1 << 14;
 /// them: 8, or 16 MiB. The first touch of a huge page makes all of it resident, so the page at
 /// the watermark costs up to one huge page that the program never asked for: at most an
 /// eighth of the class. Below the threshold a class pays 4 KiB faults and dTLB misses, which
-/// are all of the build phases' gap to mimalloc (`docs/research/memory.md`, "Build phases
-/// against mimalloc"): 4 MiB would close much of it, but would take churn at 1M live objects
-/// 5% over jemalloc's memory and still leave BTreeMap behind mimalloc, whose remaining lead
-/// there is the drop. A simulated heap whose regions are smaller than four times this uses a
-/// quarter of a region instead, and at least one huge page.
+/// are most of the build phases' gap to mimalloc (`docs/research/program-effects.md`, "TLB and
+/// huge pages"): 4 MiB would close much of it, but would take churn at 1M live objects 5% over
+/// jemalloc's memory (`docs/research/memory.md`, "The huge-page threshold") and still leave
+/// BTreeMap behind mimalloc, whose remaining lead there is the drop. A simulated heap whose
+/// regions are smaller than four times this uses a quarter of a region instead, and at least
+/// one huge page.
 pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
 /// When claims reach above a region's tail (`tail`), the advice goes back on up to the
@@ -147,16 +151,18 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 /// the address-space lock; 8 cut that five times and 32 seven times, with no change in memory.
 /// It is bounded because under the advice khugepaged rebuilds any huge page with one page in
 /// use, so advice over units that stay sparse brings their memory back
-/// (`docs/research/huge-tail.md`).
+/// (`docs/research/memory.md`, "Returning part of a huge page frees nothing until it is split",
+/// "The tail rule, and what it cost").
 pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 
 /// The pages of a huge page above the frontier that the walk's cheap look samples before it
 /// reads the huge page a page at a time: 8, one in each eighth of the huge page, so that a
 /// look at a dense huge page reads a few words more than main's did (its leaf words to the
 /// first live slot). Reading a dense huge page a page at a time cost the background thread
-/// four times main's walk at the start of a server's burst (`docs/research/huge-tail.md`,
-/// "The burst start"). A fixed count, not one scaled with the region or the heap: it bounds
-/// the cost of a look at one huge page, and the walk's budget bounds how many it looks at.
+/// four times main's walk at the start of a server's burst (`docs/research/memory.md`,
+/// "The tail rule, and what it cost"). A fixed count, not one scaled with the region or the
+/// heap: it bounds the cost of a look at one huge page, and the walk's budget bounds how many
+/// it looks at.
 pub const TAIL_SAMPLE_PAGES: u32 = 8;
 
 /// A huge page above the frontier is counted exactly (`tail::free_resident`), and so may be
@@ -202,8 +208,9 @@ pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
 /// ...and only if it at most doubles at once: a doubling is the signature of appending. A
 /// larger jump is a one-off reserve that says nothing about how densely the buffer will be
 /// used, and khugepaged would make every huge page it touches resident whole
-/// (`docs/research/zen5-roofline.md`, section 7): a buffer written 1 MiB densely, grown to
-/// 4 MiB and then written sparsely kept all 4 MiB resident.
+/// (`docs/research/hardware.md`, "Huge pages are bound by zeroing, and by free 2 MiB blocks"):
+/// 64 buffers written 1 MiB densely, grown to 4 MiB at once and then written sparsely held
+/// 160 MiB with huge pages against 77 without.
 pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 
 /// A large block whose alignment allows it starts this many bytes past its slot's start for
@@ -211,7 +218,8 @@ pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 /// same offset in large blocks of one class falls in different cache sets. Slots are spaced by
 /// their class size, often a power of two, and buffers walked together at slot starts compete
 /// for one set of every cache level: 64 buffers of 4 MiB written round-robin took 7.9 ns an
-/// element at slot starts and 0.79 staggered (`docs/research/zen5-roofline.md`, section 7).
+/// element at slot starts and 0.74 to 0.80 staggered (`docs/research/program-effects.md`,
+/// "Order, and lines and pages").
 pub const STAGGER_STEP: usize = 64;
 
 /// The number of distinct staggers: 64, so they span a page, 4 KiB, which is every set of the
@@ -242,7 +250,8 @@ pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
 /// its floor by design, so that any budget set against it was always spent on a large heap.
 /// The bound is what a trail of outgrown slots may cost: where the moves land in slots the
 /// heap reuses, growth pays nothing toward the cap, and 256 buffers grown on a 2 GiB heap left
-/// 540 MiB behind them with no bound (`docs/research/grown-slots.md`).
+/// 540 MiB behind them with no bound (`docs/research/large-blocks.md`, "What growth leaves
+/// behind").
 ///
 /// It equals the retained cap today because the two bound the same thing from two sides: the
 /// cap is what free memory may reach while the heap grows by carving, and this is what a trail
@@ -259,7 +268,7 @@ pub const KEPT_OUTGROWN_HUGE_PAGES: usize = 32;
 /// tenant left it mostly unwritten: 8, or 16 MiB. Not a bound on risk, since both outcomes of
 /// the look are ordinary frees, but the size at which the look's fixed cost, about 12k cycles
 /// for the sample and the `madvise`, is under 3% of the life of a block whose tenant writes a
-/// sixteenth of it (`docs/research/meili-peak.md`, "Evidence at the free").
+/// sixteenth of it (`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
 pub const UNWRITTEN_FLOOR_HUGE_PAGES: usize = 8;
 
 /// How many pages of a marked block's extent its free looks at, one `mincore` of one page each,
@@ -273,7 +282,7 @@ pub const UNWRITTEN_SAMPLES: usize = 16;
 /// faulted costs about thirteen times what clearing a resident page does, so a tenant that
 /// writes more than about a thirteenth of its block is cheaper served by a slot kept resident
 /// and cleared; at a sixteenth the next sparse tenant costs no more than the clearing did
-/// (`docs/research/meili-peak.md`, "Evidence at the free").
+/// (`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
 pub const UNWRITTEN_RESIDENT_ONE_IN: usize = 16;
 
 /// The floor of [`UNWRITTEN_FLOOR_HUGE_PAGES`] in bytes for a geometry.
@@ -303,9 +312,10 @@ pub const COMMIT_AHEAD_HUGE_PAGES: usize = 1;
 /// process's memory-map lock for writing and the region's mapping with it, which stops every
 /// page fault in that region and every other change to the address space until it is done:
 /// at 64 KiB a step a parallel program growing its heap made thousands of calls a second and
-/// its threads queued behind them (`docs/research/memory.md`, "Faults and system calls in real
-/// programs"). The bound keeps what is writable and never touched, which costs commit charge
-/// under strict overcommit but no memory, to at most the region's use or 64 MiB.
+/// its threads queued behind them (`docs/research/memory.md`, "Commit calls grow with the
+/// logarithm of a region's use, up to 64 MiB"). The bound keeps what is writable and never
+/// touched, which costs commit charge under strict overcommit but no memory, to at most the
+/// region's use or 64 MiB.
 pub const COMMIT_AHEAD_MAX_HUGE_PAGES: usize = 32;
 
 /// How many pages a commit makes writable beyond what its carve needs, in a region with
@@ -330,18 +340,18 @@ pub const FINE_TICKS: u64 = 1 << 23;
 /// before its free slots may go back to the OS: 64, about 125 ms for a program that beats at
 /// least once a fine step (`hold`). Long enough for most of the reuse that
 /// follows a free (86 to 100% of the large slots taken again after a purge were taken within
-/// 60 ms in tpchgen, gix-hours and datafusion, `docs/research/memory.md`, "Faults and system
-/// calls in real programs"); short next to the clocked pass's second, which let DataFusion
-/// hold every query's free large slots on top of the next query's ("DataFusion's peak against
-/// jemalloc's"). On DataFusion 125 ms held the peak lower than 60 ms (842 against 848 MiB)
-/// with fewer faults (+14% against +19% over no hold); 250 ms let it back up to 1,075 MiB, as
-/// its queries' free blocks outlived the hold of the next (`docs/research/large-hold.md`).
+/// 60 ms in tpchgen, gix-hours and datafusion, `docs/research/large-blocks.md`, "Free slots: a
+/// hold, and why no hold serves everyone"); short next to the clocked pass's second, which let
+/// DataFusion hold every query's free large slots on top of the next query's. On DataFusion 125
+/// ms held the peak lower than 60 ms (842 against 848 MiB) with fewer faults (+14% against +19%
+/// over no hold); 250 ms let it back up to 1,075 MiB, as its queries' free blocks outlived the
+/// hold of the next (the same section).
 pub const HOLD_STEPS: u32 = 64;
 
 /// The most a heartbeat's look at the hold returns, in huge pages: 1, or 2 MiB, checked between
-/// units. A large class's unit is at most a slot, so a look that meets a slot larger than the
-/// rest of this returns that whole slot: DataFusion's longest look, about a millisecond,
-/// returned one slot of 34 MiB (`docs/research/large-hold.md`). The look runs on whichever slow
+/// units and within a slot, which a look returns a piece at a time: one look returning a whole
+/// slot of 34 MiB took about a millisecond on DataFusion (`docs/research/large-blocks.md`,
+/// "Free slots: a hold, and why no hold serves everyone"). The look runs on whichever slow
 /// path took the heartbeat, so this bounds what a request pays for it, as a step of the clocked
 /// pass bounds its walk; a look that stops here with more over the floor has the next heartbeat
 /// carry on. The growth step and a moving block's piece return the same at a time.
@@ -401,8 +411,8 @@ pub const fn move_piece(geometry: Geometry) -> usize {
 /// return, against a floor of `floor`: everything over the floor. What the pass may take is
 /// already only what the last two intervals did not reuse (the frontiers), so a share of it
 /// held back only keeps memory the program has shown it does not need: with a quarter an
-/// interval the lifetime job's 18-second troughs ended 0.43 GiB higher at 2 GiB, for a third
-/// fewer faults that cost no measurable cycles (`docs/research/trough-gap.md`, "How much a
+/// interval the lifetime job's 18-second troughs ended 0.4 GiB higher at 2 GiB, for a third
+/// fewer faults that cost no measurable cycles (`docs/research/memory.md`, "How much a clocked
 /// pass returns"). The retained count and the cap play no part: the count is mostly free slots
 /// beside live ones, which no purge can return, and the cap is growth's to enforce.
 #[inline(always)]
@@ -413,7 +423,7 @@ pub const fn decay_goal(returnable: usize, floor: usize) -> usize {
 /// The most the refresh is raised (`refresh_raise`): 3 halvings, from one retiring full
 /// magazine in `depot::REFRESH_EVERY` (32) to one in 4. One in 4 took the lifetime job's 2 GiB
 /// trough down by 16% for about 1% of cycles; one in every took little more for 10%
-/// (`docs/research/trough-gap.md`).
+/// (`docs/research/memory.md`, "Refresh on evidence").
 pub const REFRESH_RAISE_MAX: u32 = 3;
 
 /// How many halvings of the refresh interval the fragmentation of the small classes earns:

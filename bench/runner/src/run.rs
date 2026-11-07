@@ -861,7 +861,8 @@ fn gate(o: &Options, cpus: &CpuSets) -> Value {
 /// as `scripts/rseq-offset-check` reports it, by allocator. An `Err` names the builds where one
 /// of those places shares a page offset with a slab hot word: every allocation of that class
 /// could then wait on the previous one's store, which would make the session measure the link,
-/// not the allocator (docs/research/zen5-roofline.md, section 16).
+/// not the allocator (docs/research/roofline.md, "A load at the page offset of a store in
+/// flight can stall the whole loop").
 fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value, String> {
     let script = o.bench_dir.join("../scripts/rseq-offset-check");
     let mut report = serde_json::Map::new();
@@ -906,8 +907,8 @@ fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value
     } else {
         Err(format!(
             "an cralloc build loads its rseq offset at a hot word's page offset, so its fast paths \
-             depend on the link (docs/research/zen5-roofline.md, section 16); rebuild it or report \
-             it:\n{}",
+             depend on the link (docs/research/roofline.md, \"A load at the page offset of a store \
+             in flight can stall the whole loop\"); rebuild it or report it:\n{}",
             bad.join("\n")
         ))
     }

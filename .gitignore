@@ -3,4 +3,3 @@ target/
 .worktrees/
 .claude/
 __pycache__/
-/docs/research/data/

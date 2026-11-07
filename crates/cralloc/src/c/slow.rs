@@ -5,8 +5,8 @@
 //!
 //! They take the C function's own arguments and are `extern "C"`, so that a generated routine
 //! that misses can leave for one with a `jmp` and its argument registers intact
-//! (`docs/research/zen5-roofline.md` section 14): `malloc_slow(size)` for any size, `free_slow(ptr)`
-//! for any pointer, `calloc_slow_args(n, size)` for any arguments, and
+//! (`docs/research/roofline.md`, "The C entry points"): `malloc_slow(size)` for any size,
+//! `free_slow(ptr)` for any pointer, `calloc_slow_args(n, size)` for any arguments, and
 //! `calloc_zero_tail(n, size, block)` after a routine popped a block; and for the sized frees,
 //! `free_sized_slow(ptr, size)` and `free_aligned_sized_slow(ptr, align, size)`, which complete
 //! one whatever the size says. The ledger entry is
@@ -115,7 +115,8 @@ unsafe fn zero_block(block: *mut c_void, total: usize) {
 }
 
 /// The largest block [`zero_small`] zeroes with stores of its own rather than `memset`: above
-/// it, glibc's `memset` was as fast or faster (`docs/research/zen5-roofline.md` section 14).
+/// it, glibc's `memset` was as fast or faster (`docs/research/roofline.md`, "The C entry
+/// points").
 const SMALL_ZERO: usize = 32;
 
 /// Zeroes the `len` bytes at `block`, a C class's size up to [`SMALL_ZERO`]: 8, or a multiple
@@ -123,7 +124,7 @@ const SMALL_ZERO: usize = 32;
 ///
 /// The stores are volatile only so that LLVM keeps them as stores: it turns a plain loop into a
 /// call of `memset`, which for small blocks costs more than the zeroing (a call through the GOT
-/// and glibc's dispatch; `docs/research/zen5-roofline.md` section 14).
+/// and glibc's dispatch; `docs/research/roofline.md`, "The C entry points").
 ///
 /// # Safety
 ///
