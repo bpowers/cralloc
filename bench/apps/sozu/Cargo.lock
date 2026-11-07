@@ -87,6 +87,7 @@ dependencies = [
  "sozu",
  "sozu-command-lib",
  "sozu-lib",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

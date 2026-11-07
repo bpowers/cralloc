@@ -7,9 +7,9 @@
 //! whose backend is `upstream`, `workers` worker processes (default: one per CPU it may run
 //! on), and Sōzu's defaults otherwise (buffers, timeouts, connection limits). The main process
 //! forks its workers and each re-executes this binary as `sozu worker ...`, which runs Sōzu's
-//! worker entry (`worker.rs`, copied from Sōzu's binary). So every process of the proxy runs
-//! the allocator this binary was built with, and the runner's counters, which follow forks,
-//! count all of them.
+//! worker entry, compiled here from the `sozu` crate's own source (`build.rs`). So every
+//! process of the proxy runs the allocator this binary was built with, and the runner's
+//! counters, which follow forks, count all of them.
 //!
 //! When the proxy answers a request on its port (forwarded to the upstream), the driver prints
 //! `BENCH_LISTEN addr`. On SIGTERM Sōzu's main process stops its workers and returns, and the
@@ -22,11 +22,19 @@
 #[macro_use]
 extern crate sozu_command_lib;
 
-mod worker;
+// The `sozu` crate's `src/worker.rs`, unchanged, which its library keeps private. Only the
+// worker entry runs from here: the rest of the file forks a worker, which the main process
+// does from the library's own copy.
+#[allow(dead_code)]
+mod worker {
+    include!(env!("SOZU_WORKER_RS"));
+}
 
 use bench_app::{Driver, fail};
 use clap::Parser;
 use sozu::cli::{Args, SubCmd};
+// The worker module names its crate's `util` as `crate::util`.
+use sozu::util;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};

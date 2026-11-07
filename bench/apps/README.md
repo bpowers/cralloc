@@ -206,8 +206,8 @@ generator's L3 domain (two of them already keep up): `upstream`, a binary of
 `bench/loadgen` built with glibc, which answers every request with the same response.
 The proxy's driver (`sozu/src/main.rs`) runs Sōzu's own main process, which forks a worker
 process a CPU, each re-running the driver's binary as Sōzu's worker (Sōzu's library keeps
-that entry private, so the driver carries a verbatim copy of the one function,
-`sozu/src/worker.rs`); so the counters, which
+that entry private, so the driver compiles the `sozu` crate's own file from cargo's copy of
+the crate, `sozu/build.rs`, and the repository holds none of it); so the counters, which
 follow forks, count every process, and memory is summed over the processes of the run's
 cgroup (the executable's shared pages once). Sōzu's command library compiles protobuf with
 `protoc` at build time; `sozu/fetch.sh` fetches a pinned release of it, and `build-apps` puts
