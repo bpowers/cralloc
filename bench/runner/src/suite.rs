@@ -697,8 +697,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin"),
-            // The slowest is snmalloc at 122k req/s (closed loop, 2026-10-20), half the others'
-            // 216k to 256k; glibc is next slowest.
+            // The slowest is snmalloc's Debug configuration at 122k req/s (closed loop, 2026-10-20),
+            // half the others' 216k to 256k; glibc is next slowest.
             rates: (36_000, 85_000),
         },
         // The same service over HTTP/2: gRPC, as connect-rust's own log_bench drives it, and
@@ -708,7 +708,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: h2(connect("application/grpc", vec!["te: trailers"], "{inputs}/log50.grpc")),
-            // Slowest snmalloc 89k req/s, then glibc 146k; the others 174k to 192k (2026-10-20).
+            // Slowest snmalloc's Debug configuration 89k req/s, then glibc 146k; the others 174k to
+            // 192k (2026-10-20).
             rates: (27_000, 63_000),
         },
         Served {
@@ -716,7 +717,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: h2(connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin")),
-            // Slowest snmalloc 91k req/s, then glibc 148k; the others 172k to 194k.
+            // Slowest snmalloc's Debug configuration 91k req/s, then glibc 148k; the others 172k to
+            // 194k.
             rates: (27_000, 63_000),
         },
         Served {
@@ -761,7 +763,8 @@ fn served() -> Vec<Served> {
                 }),
                 ..order("/orders")
             },
-            // Every allocator saturates at 265k to 276k req/s, snmalloc slowest (2026-10-21).
+            // Every allocator saturates at 265k to 276k req/s, snmalloc's Debug configuration slowest
+            // (2026-10-21).
             rates: (80_000, 186_000),
         },
         // The Apollo Router, federating the four subgraphs of Apollo's demo (bench/apps/router):

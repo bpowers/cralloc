@@ -26,7 +26,14 @@ codegen-units = 1
 debug = 1
 panic = "abort"
 
-# snmalloc-sys reads `debug` in its profile as asking for snmalloc's Debug configuration: no
-# optimization, and its assertions. The default release profile, which sets no `debug`, gets Release.
+# The allocator crates' build scripts read `debug` in their own profile, which the default release
+# profile does not set, so these build what a user of that profile gets: snmalloc-sys would build
+# snmalloc's Debug configuration (no optimization, and its assertions), and `cc` adds frame pointers.
 [profile.release.package.snmalloc-sys]
+debug = false
+
+[profile.release.package.tikv-jemalloc-sys]
+debug = false
+
+[profile.release.package.libmimalloc-sys]
 debug = false
