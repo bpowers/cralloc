@@ -11,22 +11,24 @@ to another CPU").
 | `call` and `ret` | 4 cycles | Zen 5 |
 | Cache line to another core, same L3 / other L3 | 16 to 22 / 76 to 79 ns | Topology |
 | Next user of an object another core wrote, per 64 bytes, same L3 / other L3 | 7 to 8 / 27 ns | Topology |
-| First touch of a 4 KiB page, clears in cache / past the L3 | 1,750 / 2,250 to 2,850 cycles, 310 / 400 to 505 ns | Kernel, then cache and DRAM |
+| First touch of a 4 KiB page at 5.64 GHz, pages just given back / past the L3 | 1,750 / 2,250 to about 2,850 cycles, 310 / 400 to about 505 ns | Kernel, then cache and DRAM |
 | The same memory inside a 2 MiB huge page | 117 to 214 ns per 4 KiB | DRAM bandwidth |
 | `MADV_DONTNEED` of one page, alone / with other threads running | 0.36 / 1.80 us | Kernel, core count |
 | Clock after 1.5 s of idle | 4.38 GHz for 200 to 260 ms, then 5.7 | Platform |
 | Exit from the C2 idle state | 18 us | Platform |
 
-A page fault is the most expensive thing an allocator causes: 350 to 570 inlined pairs. Most of it
-is bookkeeping, so reuse comes before fresh pages, a populate call saves only about 600 cycles a
-page, and a huge page costs a fifth to a third as much per byte when a free 2 MiB block exists. And
-quote cycles: the clock moves a job's time by 30% at the same cycles.
+A page fault is the most expensive thing an allocator causes: 350 to 570 inlined pairs. The profiles
+put most of it in bookkeeping, so reuse comes before fresh pages, a populate call saves only about
+600 cycles a page, and a huge page costs a fifth to a third as much per byte when a free 2 MiB block
+exists. Quote cycles for work in cache, where the clock moves a job's time by up to 30% at the same
+cycles. Past the L3 neither unit is clock-free, because DRAM latency is in nanoseconds.
 
 **The machine.** AMD Ryzen 9 9950X: 16 cores with SMT, 48 KiB L1d and 1 MiB L2 a core, two L3
 domains of 32 MiB (CPUs 0 to 7 with siblings 16 to 23, and 8 to 15 with 24 to 31), 60 GiB. Linux
 7.2.9, `amd-pstate-epp`, governor `powersave`, boost on. Transparent huge pages and defrag on
-`madvise`, multi-size huge pages off. The time-stamp counter runs at 4.3 GHz, so 1,350 ticks are
-about 1,770 core cycles.
+`madvise`, multi-size huge pages off. The kernel has `INIT_ON_ALLOC`, `CONFIG_PER_VMA_LOCK` and
+`CONFIG_PT_RECLAIM`, and no rseq time-slice extension. The time-stamp counter runs at 4.3 GHz, so a
+fault's 1.35k in ticks is about 1,770 core cycles.
 
 ## What belongs to Zen 5's core
 
@@ -53,46 +55,61 @@ wall clock, single runs in two sessions.)
 ## First touch of a 4 KiB page: 1,750 to 2,850 cycles, by how far the page falls out of cache
 
 The handler's work is fixed; what moves is whether the page it clears and the kernel data it touches
-are still in cache. The two figures in circulation, 305 to 400 ns and 535 to 566 ns, are one curve
-at different places:
+are still in cache. Four quiet rows from one probe are one curve. Every row writes one byte a page;
+writing whole pages adds about 80 cycles.
 
 | Memory passing through, machine | Cycles a page | ns a page |
 |---|---:|---:|
-| 2 MiB at a time, quiet | 1,730 to 1,830 | 305 to 320 |
+| 2 MiB at a time, pages just given back, quiet | 1,730 to 1,830 | 305 to 320 |
 | 32 MiB at a time, quiet | 2,245 to 2,290 | 398 to 405 |
 | 64 MiB at a time, quiet (computed) | about 2,540 | about 450 |
 | 256 MiB at a time, quiet (computed) | about 2,850 | about 505 |
 | 64 MiB at a time, the other L3 busy | 2,310 to 2,530 in the kernel alone | 523 to 582 |
-| 512 MiB in one pass, the clock not recorded | not counted | 535 to 566 |
+| 512 MiB in one pass, clock unknown, not on the curve | no counter in that pass | 535 to 566 |
 
-**Trust the first four.** They come from one probe that counted core cycles and time together with
-heavy work paused, 15 rounds, in two sessions within 3%, at a measured 5.62 to 5.69 GHz (2026-10-25
-at `49986cf`). The computed rows are one `MADV_POPULATE_WRITE` over that much memory (1,901 and
-2,211 cycles a page) plus the 640 cycles a fault costs over a populate at 2 and at 32 MiB. The last
-two rows are earlier, less controlled runs. The 64 MiB one (2026-10-17) shared the machine with
-other work, and its excess is what that should cost: 16 to 29% over the quiet estimate, with the
-populate beside it 17 to 30% over the quiet populate, at about 5.2 GHz by its cycles. The first
-probe on a busy machine read 3.1k cycles. The 512 MiB one (2026-10-16) is a single wall-clock pass
-with no cycle count, a little past where the curve is heading. So 566 ns is not wrong: it is the top
-of the curve, and it overstates a fault in a program that grows a little at a time.
+**Trust the first four,** which hold at 5.62 to 5.69 GHz, measured in the same runs, with heavy work
+paused (2026-10-25 at `49986cf`). The measured rows are 15 rounds in two sessions within 3%. The
+computed rows are medians of 9 single `MADV_POPULATE_WRITE` calls over that much memory (1,901 and
+2,211 cycles a page) plus the 640 cycles a fault costs over a populate at 2 and at 32 MiB. Each
+round maps, touches and unmaps, so the low end is what a thread pays for pages it just gave back. No
+run measures a heap that grows without freeing, whose pages nobody touched recently.
 
-**Most of it is bookkeeping.** With the clear in cache, clearing is 7 to 9% of the profile, and the
-zeroing rates predict 90 to 150 cycles of 1,750. Past the caches, clearing alone is 650 to 720
-cycles of 2,850, about a quarter, and by inference misses on kernel data make up the rest of the
-rise. The largest items are setting the page-table entry under its lock, the memory-cgroup charge
-and the LRU. Pages returned with `MADV_DONTNEED` cost the same as fresh ones within 2%. Each new
-64-byte object carries 27 to 45 cycles of first touch, five to nine inlined pairs.
+The 64 MiB busy row (2026-10-17) shared the machine with other work. It ran 16 to 29% over the quiet
+estimate and the populate beside it 17 to 30% over the quiet populate, at about 5.2 GHz by its
+cycles, so by inference the excess is the load. The first-touch probe on a busy machine read 3.1k
+cycles.
+
+**The 512 MiB figure cannot be placed on this curve, so do not quote it.** It is one wall-clock pass
+of about 70 ms, over about 125 ms after the program started (estimated from the program's order, not
+timed), inside the 200 to 260 ms a cold package spends at 4.38 GHz. Whether the package was cold
+that day is not recorded. At 4.38 GHz the pass is about 2,400 cycles, beside the 32 MiB row; at 5.65
+GHz about 3,100, past every quiet row; and cycles at different clocks do not compare past the L3
+anyway. Two things point to the cold clock. A profile of the fault path read about 2,100 kernel
+cycles, though perhaps in another run. And the same program's refault of the same 512 MiB, about 100
+ms later, read 484 to 490 ns, though returned pages cost the same as fresh ones within 2%: less time
+for the same work is what a clock ramp does.
+
+**The profiles put most of it in bookkeeping, and how the rise divides is not known.** One profile
+of the fault path, about 2,100 kernel cycles, has 30% in spinlocks, 10% in list checks and 7%
+clearing the page. One of a populate on the busy machine has 28% in the page-table lock and 9%
+clearing, and the first-touch probe's has setting the page-table entry as the largest item, then the
+memory-cgroup charge and the LRU. So clearing reads as about 150 to 200 cycles, where the sustained
+zeroing rate past the L3 would predict 650 to 720. These disagree, so the rise from 1,750 to 2,850
+cannot be split between clearing and misses on kernel data. Each new 64-byte object carries 27 to 45
+cycles of first touch, five to nine inlined pairs.
 
 **A populate saves about 600 cycles a page, the exception and the mapping lookup,** whatever the
-total: a third of an in-cache fault, 27% past the L3, a fifth to a quarter on the busy machine. It
-saves nothing on a run of one page and 18 to 22% on four. So we do not batch first touches. Turning
-every fault into a populate would save at most 0.9% of DataFusion's cycles (about a million faults),
-1.1% of a HashMap job's and 0.5% of tpchgen's. Populate-ahead for dense classes, built and removed,
-cut faults three to five times and kernel time by under a tenth, for about 1 MiB at each peak. One
-call holds the thread 100 us at 2 MiB and 25.6 ms at 256 MiB.
+total: a third at 2 MiB, 27% at 32 MiB, a fifth to a quarter on the busy machine. It saves nothing
+on a run of one page and 18 to 24% on four. So we do not batch first touches. Turning every fault
+into a populate would save at most 0.9% of DataFusion's cycles (about a million faults), 1.1% of a
+HashMap job's and 0.5% of tpchgen's, and no way of using it reaches them all: a move's destination
+is a minority of the faults, a fill is usually under a few pages, and a block made resident whole
+pays a full fault per page it never uses. Populate-ahead for dense classes, built and removed, cut
+faults three to five times and kernel time by under a tenth, for about 1 MiB at each peak. One call
+holds the thread 100 us at 2 MiB and 25.6 ms at 256 MiB.
 
-Four threads faulting at once on their own mappings cost 761 ns against 539 alone, since page-table
-locks are per table and page lists per CPU.
+Four threads faulting at once on their own mappings cost 761 ns against 539 alone, a small rise
+because page-table locks are per table and page lists per CPU.
 
 ## Huge pages are bound by zeroing, and by free 2 MiB blocks
 
@@ -110,8 +127,10 @@ fault, because together they zero about 28 GB/s, roughly what one core complex c
   cgroup's limit stalls 40 to 50 ms. `MADV_COLD` splits it first, for 20 to 80 us (`memory.md`).
 - **khugepaged collapses sparse memory.** 64 MiB with one page written per 2 MiB, then advised for
   huge pages, became 64 MiB resident within 40 seconds. Advice must never cover memory used
-  sparsely. A call of advice itself is about 1 us. (2026-10-16 and 17, medians of 3 to 9 interleaved
-  rounds on 64 MiB, ranges over two sessions.)
+  sparsely.
+- **Advice itself is cheap and leaves nothing behind:** about 1 us a call, and over 4,000 rounds of
+  advising, filling and purging slots the process's mappings went from 31 to at most 41 and back to
+  31. (2026-10-16 and 17, medians of 3 to 9 interleaved rounds on 64 MiB, ranges over two sessions.)
 
 ## What other calls charge
 
@@ -126,7 +145,7 @@ fault, because together they zero about 28 GB/s, roughly what one core complex c
 | `mmap` and `munmap` of 2 MiB untouched; `mprotect` to none and back | 0.79 us; 0.83 to 0.92 us |
 | `MADV_GUARD_INSTALL` and `REMOVE`, one page | 0.20 us |
 
-So a purge is about 2 us for the shootdown plus 0.05 us a page, which is why the clocked pass
+So a purge is about 1.7 us for the shootdown plus 0.05 us a page, which is why the clocked pass
 returns runs of adjacent pages with one call. (Calls of 1 to 64 pages 2026-10-20, 600 times per
 length; the rest 2026-10-16, single runs in two sessions.)
 
@@ -145,9 +164,12 @@ held an `mprotect` for a median of 5 ms when populates ran back to back.
   at startup, each overlapping purges of 100 to 200 us.
 - **The servers' own writers outnumber ours:** about 130 write-locked calls a second of
   Meilisearch's own under load.
+- **A long call is not by itself the lock.** 69 of Meilisearch's 76 calls of 300 us or more were
+  preempted, and 5 slept.
 
-**Rule.** A writer on the address space has to be rare and off the request path. (2026-10-25 at
-`49986cf`, every call timed through a ring read from outside the process, one run per job.)
+**Rule.** A writer on the address space has to be rare and off the request path; budget milliseconds
+a call for one on a busy lock, as the 10 ms seen on Qdrant shows. (2026-10-25 at `49986cf`, every
+call timed through a ring read from outside the process, one run per job.)
 
 ## Moving a block with `mremap` is fast, and we copy
 
@@ -174,9 +196,13 @@ It decays between 200 and 400 ms of idle. Other work keeps the boost and lowers 
 GHz with seven other CPUs busy).
 
 So a job shorter than that runs entirely on the cold clock, and short multithreaded jobs spread by
-up to 30% in time at the same cycles. Mined from the first-touch runs: an 8 MiB populate took 413 us
-warm and 524 us cold, at 2.33 and 2.31 Mcycles. The runner warms each job's CPUs first, 15.4 ms a
-run (`measuring.md`; 2026-10-19 at `35b00fa`).
+up to 30% in time at the same cycles. The runner warms each job's CPUs first, 15.4 ms a run
+(`measuring.md`; 2026-10-19 at `35b00fa`).
+
+**Cycles are clock-free only in cache.** Mined from the first-touch runs, one pair each: an 8 MiB
+populate took 413 us warm and 524 us cold, at 2.33 and 2.31 Mcycles. A 32 MiB one took 2,439 us and
+13.67 Mcycles warm, and 2,774 us and 12.23 Mcycles cold: 10% fewer cycles and only 14% more time, as
+expected when DRAM latency is in nanoseconds. So the cycle rows past the L3 hold at 5.64 GHz.
 
 ## Idle states are the platform's, and they land in the tail
 
@@ -187,8 +213,9 @@ extra 18 to 20 us is the declared exit. Two exits in turn take 42 to 48 us. That
 20 to 60 us, long enough for the governor to go deep, so the charge falls where idle periods meet
 the 36 us residency, and it is not monotone in load.
 
-With C2 and C3 off, one server's p99.9 fell from 45.1 to 37.8 us, the others moved within 0.4 us,
-and cycles a request and saturated rates moved under 1%. CPUs that never idle at all run 2 to 3%
+With C2 and C3 off on the servers' CPUs, cralloc's p99.9 on the Connect over HTTP/2 job fell from
+45.1 to 37.8 us, the incumbents' on that job moved within 0.4 us, and cycles a request and saturated
+rates moved under 1% (only the two HTTP/2 jobs were run). CPUs that never idle at all run 2 to 3%
 fewer cycles a request. `servers.md` has what this does to comparing allocators, and
 `scripts/deep-idle` shows and sets the states. (2026-10-24 and 25, 10 to 12 runs a cell over five
 placements at 63k requests a second.)
@@ -215,6 +242,10 @@ machine, and the runner learns its warm clock.
 
 - **Everything beyond one machine:** no second CPU model, kernel configuration or multi-socket host,
   and no quiet fault past 256 MiB.
+- **What a steadily growing heap pays per fault.** Every quiet row re-faults pages the kernel just
+  got back.
+- **How the rise from 1,750 to 2,850 cycles divides** between clearing and misses on kernel data:
+  the profiles and the zeroing rate disagree.
 - **Why glibc's large-object pipeline reads 4.4 to 4.5 GHz however warm the package,** when a thread
   faulting in a loop reads 5.64. Cycles over wall time undercount a thread that blocks in the
   kernel, which would explain it; that was not checked.
