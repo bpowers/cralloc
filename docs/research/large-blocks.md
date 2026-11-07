@@ -3,9 +3,10 @@
 What governs blocks past the small classes, those above 32 KiB: how growth, slack, holds and huge
 pages decide faults and peak. The rules are in `docs/design.md`, "Large objects" and "Returning
 memory and huge pages". The whole heap, and terms such as heartbeat, floor, cap and frontier, are in
-[memory.md](memory.md). A *slot* is one block's place in a class's region, and to *claim* one is to
-take its bit in the bitmap. *Advice* is `MADV_HUGEPAGE`. Measured on one machine (Ryzen 9 9950X,
-Linux 7.2.9, transparent huge pages `madvise`), 2026-10-17 to 28.
+[memory.md](memory.md), and the jobs in [workloads.md](workloads.md). A *slot* is one block's place
+in a class's region, and to *claim* one is to take its bit in the bitmap. *Advice* is
+`MADV_HUGEPAGE`. Measured on one machine (Ryzen 9 9950X, Linux 7.2.9, transparent huge pages
+`madvise`), 2026-10-17 to 28.
 
 ## The answer
 
@@ -17,34 +18,40 @@ Linux 7.2.9, transparent huge pages `madvise`), 2026-10-17 to 28.
   hold, each slot ageing on its own. What an occupied slot keeps past its block: a trim at the
   claim. What growth leaves behind: a bound of 64 MiB, counted on its own.
 - **No single hold time serves all programs.** DataFusion's blocks come back within 60 ms or not at
-  all, and it needs about 125 ms to keep its peak; at 250 ms the peak is 230 MiB higher. Meilisearch
-  takes its blocks back up to 2 s later, and only half a second or more stopped those faults. A hold
-  that adapted and a long hold paid for by growth were both built and lost. The price turned out
-  small: most of Meilisearch's excess faults were zeroed buffers it barely wrote and outgrown slots
-  returned on a level. With those fixed it takes 42 faults a request, level with jemalloc, at less
-  heap.
+  all, and a hold of at most about 125 ms keeps its peak; at 250 ms the peak is 230 MiB higher.
+  Meilisearch takes its blocks back up to 2 s later, and only half a second or more stopped those
+  faults. A hold that adapted and a long hold paid for by growth were both built and lost. The price
+  turned out small: most of Meilisearch's excess faults were zeroed buffers it barely wrote and
+  outgrown slots returned on a level. With those fixed it takes 42 faults a request, level with
+  jemalloc, at less heap under load (697 MiB mean against 749). While indexing, before any load, it
+  peaks higher: 1,388 to 1,433 MiB against 1,230 to 1,251.
 - **Faults are the cheap side of the trade.** A return and refault costs about 2.4 to 7 kcycles, and
   these rules move tens of MiB of peak for a percent or two of cycles.
-- **Where it loses.** tpchgen takes the most faults (337k against 78k to 282k) for a middling peak
-  and 0.4 to 2.7% more cycles. HashMap's peak is 204 MiB against jemalloc's 182 to 184. Blocks of 4
-  to 32 MiB under churn hold 1.53 times live against jemalloc's 1.28, which returns every free of 8
-  MiB or more at once.
+- **Where it loses.** tpchgen takes the most faults (337k against 78k to 282k) for a middling peak,
+  with cycles inside the runs' spread. HashMap's peak is 204 MiB against jemalloc's 182 to 184.
+  Blocks of 4 to 32 MiB under churn hold 1.53 times live against jemalloc's 1.28, which returns
+  every free of 8 MiB or more at once.
+- **The large-buffer cache has no one winner.** Geomean of its phases, the rules beat tcmalloc,
+  mimalloc and glibc at every size. Against jemalloc they lose at 0.5 GiB (1.82 against 1.46), lead
+  at 1 GiB on one phase (1.41 against 1.52), and tie at 2 and 5 GiB (1.27, 1.19).
 
 | Job | cralloc | jemalloc | tcmalloc | mimalloc | glibc |
 |---|---:|---:|---:|---:|---:|
 | DataFusion: peak MiB, M faults, Gcycles | 857, 1.09, 70.6 | 861, 1.03, 72.3 | 999, 0.45, 67.6 | 1,659, 0.12, 70.0 | 933, 0.80, 70.5 |
 | tpchgen: peak MiB, k faults, Gcycles | 559, 337, 25.3 | 567, 182, 24.8 | 540, 156, 25.0 | 813, 78, 24.6 | 518, 282, 25.2 |
-| Meilisearch at 70%: heap MiB, faults and Mcycles a request | 697, 42, 16.8 | 749, 42, 17.4 | 980, 0.1, 17.1 | 1,675, 23, 18.0 | 1,191, 1.0, 18.0 |
-| Large-buffer cache: geomean over live, Mcycles an operation | 1.41, 8.3 | 1.52, 13.6 | 2.02, 14.5 | 2.11, 12.8 | 2.05, 10.0 |
+| Meilisearch at 70%: heap mean MiB, faults and Mcycles a request | 697, 42, 16.8 | 749, 42, 17.4 | 980, 0.1, 17.1 | 1,675, 23, 18.0 | 1,191, 1.0, 18.0 |
+| Large-buffer cache at 1 GiB: geomean over live, Mcycles an operation | 1.41, 8.3 | 1.52, 13.6 | 2.02, 14.5 | 2.11, 12.8 | 2.05, 10.0 |
 | 64 Vecs grown to 4 MiB: Mcycles, peak MiB | 655, 327 | 1,163, 305 | | 636, 266 | 1,169, 269 |
 | HashMap 1M: cycles an entry, peak MiB | 561, 204 | 631, 182 | | 432, 199 | 1,103, 208 |
 
-*First three 2026-10-28 at `2ff7322`, medians of four to six rounds. The cache: geomean of four
-phases, computed from each phase's end over the cycles, 2026-10-24 and 25. Kernel jobs 2026-10-18 to
-24, sessions that differ by up to 10%.* *DataFusion* runs TPC-H SF3 on four threads, *tpchgen*
-writes TPC-H SF1 to Parquet on eight, *Meilisearch* serves 930 requests a second. The *large-buffer
-cache* is 1 GiB of buffers on eight threads, log-uniform in 40 to 256 KiB, 256 KiB to 4 MiB, 4 to 32
-MiB, then all of that; half are built by doubling with `realloc`.
+*First three 2026-10-28 at `2ff7322`, medians of three to six rounds. The cache: geomean of four
+phases, computed from each phase's end over the cycles, 2026-10-24 and 25; the ladder above at
+`bf837db`. The hold counts time, so this job's peak follows core speed: at 2 GiB 2.03 times live on
+the measurement CPUs, 1.39 on shared cores. Kernel jobs 2026-10-18 to 24, sessions that differ by up
+to 10%.* *DataFusion* runs TPC-H SF3 on four threads, *tpchgen* writes TPC-H SF1 to Parquet on
+eight, *Meilisearch* serves 930 requests a second. The *large-buffer cache* is 1 GiB of buffers on
+eight threads, log-uniform in 40 to 256 KiB, 256 KiB to 4 MiB, 4 to 32 MiB, then all of that; half
+are built by doubling with `realloc`.
 
 What each rule trades:
 
@@ -62,11 +69,11 @@ What each rule trades:
 
 ## Free slots: a hold, and why no hold serves everyone
 
-**The gap it closes.** At DataFusion's peak without a hold the program held 659 MiB and 421 more sat
-free, 420 of it on wholly free pages: 144 MiB in the 160 KiB class, 137 in 20 MiB, 69 in 10 MiB.
-Earlier queries freed those slots and the next query's blocks fell in other classes. The clocked
-pass, a second to a query's 150 ms, was too slow. jemalloc holds a similar 334 MiB dirty, but any
-size can reuse it: it wins by holding less, not by packing tighter.
+**The gap it closes.** At DataFusion's peak without a hold (2026-10-20 at `af45917`) the program
+held 659 MiB and 421 more sat free, 420 of it on wholly free pages: 144 MiB in the 160 KiB class,
+137 in 20 MiB, 69 in 10 MiB. Earlier queries freed those slots and the next query's blocks fell in
+other classes. The clocked pass, a second to a query's 150 ms, was too slow. jemalloc holds a
+similar 334 MiB dirty, but any size can reuse it: it wins by holding less, not by packing tighter.
 
 **The rule.** A free that leaves a slot resident stamps its region with a fine count, a step per 2
 ms that a heartbeat observes. Once a region has had no such free for 64 steps, about 125 ms, its
@@ -154,21 +161,23 @@ the next may need it. It takes no new number.
 | Resident over live, by phase | 40 to 256 KiB | 256 KiB to 4 MiB | 4 to 32 MiB | Mixed | Faults, millions |
 |---|---:|---:|---:|---:|---:|
 | Neither rule | 2.14 | 1.52 | 1.93 | 2.04 | 9.1 to 9.9 |
-| Ageing alone | 2.22 | 1.45 | 1.74 | 1.79 | 14.7 |
-| Trim alone | 1.32 | 1.49 | 1.97 | 2.14 | 13 |
+| Prototype: ageing alone | 2.22 | 1.45 | 1.74 | 1.79 | 14.7 |
+| Prototype: trim alone | 1.32 | 1.49 | 1.97 | 2.14 | 13 |
+| Prototype: both | 1.33 | 1.40 | 1.53 | 1.77 | |
 | Both, as built | 1.30 | 1.27 | 1.53 | 1.56 | 22.6 to 24.2 |
 | jemalloc | 1.47 | 2.12 | 1.28 | 1.36 | 410 |
 | glibc | 1.45 | 1.85 | 2.63 | 2.49 | 62 |
 
-*2026-10-25 at `47e88d4` and `0eaf879`. First, fourth and last two rows are means over the phase
-ends of three runs or four cycles, computed (standard deviation of as built 0.01, 0.05, 0.10, 0.13).
-Single-run rows move by up to 0.3 between runs of one code.* The big-buffer climb stops at 1.36 to
+*2026-10-25. The prototype, at `47e88d4`, is one run each, and its ageing walk did not carry on
+across looks; ageing alone was not run on what shipped. The other rows are means over phase ends of
+three runs or four cycles at `0eaf879`, computed (standard deviation as built 0.01, 0.05, 0.10,
+0.13). A phase moves by up to 0.3 between runs of one code.* The big-buffer climb stops at 1.36 to
 1.41. Every build takes 8.2 to 8.4 Mcycles an operation, since the job writes every buffer it makes.
 
 **A step, not the whole.** Slack can be most of a slot of tens of megabytes. Returned at once, trims
 of 1,024 pages or more stalled a claim 0.8 ms on average and up to 3 ms. The step is 128 pages, the
-bound of every purge on a request's path: p99.9 250 to 500 us, for 0.02 to 0.06 of a phase's ratio.
-Even a 128-page `madvise` is sometimes stalled 2 to 6 ms, the call waiting whatever its size.
+bound of a step on a request's path: p99.9 250 to 500 us, for 0.02 to 0.06 of a phase's ratio. Even
+a 128-page `madvise` is sometimes stalled 2 to 6 ms, the call waiting whatever its size.
 
 **The price is faults where a later tenant wants the room.** tpchgen +60%, +2.0% cycles, 97 MiB less
 peak; only 12% of what the trim returned was faulted back by the tenant that trimmed it, and the
@@ -214,7 +223,7 @@ fitted 396, but 28 of 4 MiB against 394. A failed commit falls back to less room
 
 **Regions decide the limits.** A region is never taken back from a class, so room past a region once
 took regions until `malloc(256)` failed under an address-space limit. So sixteen times is given only
-where a region holds a dozen or more such slots, and a heap short of address space does not trade
+where a region holds sixteen or more such slots, and a heap short of address space does not trade
 any for speed: at every limit from 16 to 256 GiB the buffers that fit equal four times' count. In
 the full reservation it takes at least 770 GiB of live buffers to run out. Such a heap is a
 different allocator: one session under `prlimit --as` got 2 MiB regions and measured that, with
@@ -241,7 +250,8 @@ returned every outgrown slot and the program faulted it back within 32 ms: about
 kept and not yet taken again never passed 3 MiB on Meilisearch and 42 on tpchgen.
 
 **The rule.** An outgrown slot stays resident while such slots, counted on their own, total at most
-64 MiB, and goes back behind the copy past it. A plain free of a grown block is an ordinary free.
+64 MiB, and goes back behind the copy past it. A free of a grown block is an ordinary free, unless
+it carries huge-page advice, when it goes back whole.
 
 | Against the budget it replaced | Before | Rule |
 |---|---:|---:|
@@ -251,7 +261,8 @@ kept and not yet taken again never passed 3 MiB on Meilisearch and 42 on tpchgen
 | DataFusion: Gcycles, faults, peak MiB | 69.80, 1,030k, 863 | 70.09, 1,025k, 864 |
 
 *2026-10-24 at `4c0047a` against `46126f0`, three to six rounds, medians.* The order service and the
-log store are level.
+log store are level. The 64 Vecs gain half of what a prototype did (-31%): the rest was keeping the
+advised slots of its drops, which what shipped returns.
 
 **The trail.** 256 buffers grown round-robin to 4 MiB beside 1 GiB of ballast, freed and collected
 each round, so the next round's moves land in returned slots and pay nothing toward the cap. Peak
@@ -314,7 +325,8 @@ the cost above.
 Meilisearch's indexer asks for four buffers of about 50 MiB with `alloc_zeroed`, 7.7 a second, and
 writes about 0.3% of each. cralloc cleared all of each one four times in five, which made every page
 resident. jemalloc purges every free of 8 MiB or more at once, so its next such block is fresh and
-uncleared. (About 587 MiB of the process is glibc's arenas, which its C code fills, under either.)
+uncleared; glibc is as lazy from 32 MiB and mimalloc after a second idle, and tcmalloc always
+clears. (About 587 MiB of the process is glibc's arenas, which its C code fills, under either.)
 
 **The rule.** A zeroed request of at least 16 MiB answered from a slot known to be zero is marked.
 Its free asks `mincore` about the middle page of each sixteenth, and if at most one is resident the
@@ -359,17 +371,20 @@ peak; cralloc returns it, 3,008 faults and a quarter less user time.
 Alone, a 64 KiB and a 1 MiB block in a loop, per allocation and free (2026-10-19 at `a92d51a` and
 after): 271 cycles, 1,290 instructions, 4 atomic instructions, 48 ns (tcmalloc 62, jemalloc 134,
 glibc 8 on its top-of-heap case). The floor for this design is about 140 cycles and 300
-instructions. Across two threads, a pipeline of 4 to 256 KiB objects takes 656 cycles an allocation
-against tcmalloc's 402 to 459.
+instructions; about a thousand instructions of layering remain, left because the job leads every
+incumbent but glibc and the pipeline is not bound by instructions. Across two threads, a pipeline of
+4 to 256 KiB objects takes 656 cycles an allocation against tcmalloc's 402 to 459.
 
 - **The retained count is two tallies that only grow, on lines of their own.** As one word its line
   went to the other thread twice per large object, and every heartbeat took it to see if a pass
   could start: 0.7 of the 0.9 lines an allocation saved. A heartbeat now reads the clock first and
   the tallies only when a pass is due.
 - **The floor across threads is the leaf word.** A slot freed on one thread and claimed on another
-  moves the leaf's line twice, about 100 cycles a move. Going lower parks memory: magazines of 8
-  slots for the 12 to 32 KiB classes take 530 cycles for up to 584 KiB more a CPU, and tcmalloc's
-  figure needs large objects batched per CPU. Not built.
+  moves the leaf's line twice, about 100 cycles a move. Taking the line exclusive first cost 16
+  cycles alone and gained nothing; separate lines for a large class's leaf bitmap, and tallies 128
+  bytes apart, changed nothing. Going lower parks memory: magazines of 8 slots for the 12 to 32 KiB
+  classes take 530 cycles for up to 584 KiB more a CPU, and tcmalloc's figure needs large objects
+  batched per CPU. Not built.
 
 ## A doubling's tail is the purge that falls on it
 
@@ -404,3 +419,4 @@ glibc remaps large chunks and unmaps them at free.
   cost of advising it. Nor was a region-level mark for dense large classes below a huge page, such
   as the order service's 1.25 MiB table shards.
 - **The median of a doubling**, 2 to 4% over jemalloc, inside the run-to-run spread.
+- **Meilisearch while indexing** peaks over jemalloc ([memory.md](memory.md)), not attributed.
