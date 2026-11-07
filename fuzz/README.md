@@ -20,35 +20,42 @@ these targets at it too: cralloc's process heap. Setting `CRALLOC_FUZZ_MUTANT` t
 name (`overlapping`, `misaligned`, `short`, `no_zero_fill`, `loses_contents`, `double_handout`,
 `scribbler`, `premature_reuse`) wraps the allocator in that bug, which shows the fuzzer finds it.
 
-cargo-fuzz builds with AddressSanitizer by default. That checks the testkit's own accesses
-(it found the model writing into a zero-size block), but it also replaces the C library's
-allocation functions with ASan's. ASan's `aligned_alloc` enforces C11's size rule, so under
-ASan `model_c` rounds `aligned_alloc` sizes up (see `src/lib.rs`). A custom allocator that
-exports its own `malloc` does not mix with ASan; build those with `-s none`.
+cargo-fuzz builds with AddressSanitizer by default, and all three targets run on cralloc under
+it. The targets call cralloc by its Rust paths, `model_c` included, so ASan's `malloc` serves
+only the kit's own bookkeeping. ASan knows nothing of cralloc's blocks: it checks the bookkeeping
+and the stacks and globals of the instrumented code, and a stray write into a block is the
+model's to catch, not ASan's.
 
 ## Running
 
-Pin to idle cores, bound the time and memory, and run from the repository root:
+Run from the repository root, through `scripts/heavy` and `scripts/memlimit`, and always with a
+time limit:
 
 ```sh
-cargo +nightly fuzz build
-taskset -c 8,9,24,25 fuzz/target/x86_64-unknown-linux-gnu/release/model \
-    -max_total_time=60 -rss_limit_mb=2048 fuzz/corpus/model
-CRALLOC_FUZZ_MUTANT=scribbler taskset -c 8,9,24,25 \
-    fuzz/target/x86_64-unknown-linux-gnu/release/model_c -max_total_time=60 -rss_limit_mb=2048
+scripts/heavy cargo +nightly fuzz build
+scripts/heavy scripts/memlimit -m 4G -t 5m -- \
+    cargo +nightly fuzz run model -- -max_total_time=60 -rss_limit_mb=2048 -len_control=0
+CRALLOC_FUZZ_MUTANT=scribbler scripts/heavy scripts/memlimit -m 4G -t 5m -- \
+    cargo +nightly fuzz run model_c -- -max_total_time=60 -rss_limit_mb=2048 -len_control=0
 ```
 
-`cargo +nightly fuzz run <target> -- -max_total_time=60` works too. Never leave a fuzzer
-running without a time limit on a shared machine.
+Keep `-len_control=0`. A run ends when its input does, and libFuzzer otherwise starts with short
+inputs and lengthens them slowly, so a bug that takes many operations to show goes unreached:
+without the flag a minute can miss `overlapping` or `scribbler`. With it, a fresh fuzzer finds
+most mutants within a few seconds; `double_handout`, which needs the stream to move to another
+thread, can take more than a minute.
 
 A failing input panics with the model's report: the violated property, the operation, and,
 for a short stream, the whole script. Crashing inputs land in `fuzz/artifacts/<target>/`.
 Reproduce and shrink with:
 
 ```sh
-cargo +nightly fuzz run model fuzz/artifacts/model/crash-<hash>
-cargo +nightly fuzz tmin model fuzz/artifacts/model/crash-<hash>
+scripts/heavy scripts/memlimit -m 4G -t 5m -- \
+    cargo +nightly fuzz run model fuzz/artifacts/model/crash-<hash>
+scripts/heavy scripts/memlimit -m 4G -t 5m -- \
+    cargo +nightly fuzz tmin model fuzz/artifacts/model/crash-<hash>
 ```
 
-The corpus is not checked in; the input decoding is dense, so a fresh fuzzer finds the
-interesting paths within seconds. About 5 000 runs a second per core with ASan (2026-10-16).
+An input that found a mutant reproduces only with the same `CRALLOC_FUZZ_MUTANT` set.
+
+The corpus (`fuzz/corpus/<target>/`) is not checked in; later runs start from it.
