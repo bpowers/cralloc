@@ -42,7 +42,7 @@ magazine lies apart from the slabs, the
 thread's rseq area, `__rseq_offset` and the stack the calling convention
 reserves (`Ctx.Apart`). That nothing else refers to the magazine, and that
 the pointers are distinct free objects, are properties of the whole
-allocator (docs/design.md, "The invariant"), kept by the slow paths and the
+allocator (docs/design.md, "Front end: magazines under rseq"), kept by the slow paths and the
 drainer, which the routines do not rely on: they only move the boundary
 between the free slots and the cached pointers. The abstraction is of one
 word at a time (`Mag.ofWord`), so a slow path's compare-and-store of a whole

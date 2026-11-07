@@ -64,10 +64,10 @@ LD_PRELOAD=$PWD/target/release/libcralloc_preload.so some-program
 
 Limits worth knowing:
 
-- x86-64 Linux, with glibc (dynamically or statically linked) or musl. glibc has registered
-  restartable sequences for its threads since 2.35; cralloc is developed and tested on
-  Linux 7.2 and glibc 2.43. On musl the allocator registers its own, in executables only: a
-  musl shared library or preload library is not supported. A thread without a registration,
+- x86-64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older versions are
+  untested. It needs glibc 2.35 or later (the first that registers restartable sequences for its
+  threads), dynamically or statically linked, or musl. On musl the allocator registers its own, in
+  executables only: a musl shared library or preload library is not supported. A thread without a registration,
   as under valgrind, is served correctly but slowly.
 - A shared object that contains the allocator must be linked `-z nodelete`, as the preload
   library is: unloading it kills the process.

@@ -5,7 +5,8 @@ description = "A memory allocator for multithreaded Rust programs on Linux"
 edition.workspace = true
 license.workspace = true
 publish = false
-# The crate must also build on the nightly that Kani pins (1.93.0-nightly as of Kani 0.67). A
+# Lower than the 1.99 we develop and test on (README.md, "Limits worth knowing"), because the
+# crate must also build on the nightly that Kani pins (1.93.0-nightly as of Kani 0.67). A
 # pre-release compares below its release, so this says 1.92, which also keeps clippy from
 # suggesting newer APIs.
 rust-version = "1.92"
