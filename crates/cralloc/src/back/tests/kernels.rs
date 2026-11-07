@@ -9,7 +9,7 @@ use super::super::tree::Host as _;
 use super::super::word::Word as _;
 use super::*;
 use crate::back::Move;
-use crate::os::sim::{Kernel4k, Kernel16k, Kernel64k};
+use crate::os::sim::{Kernel4k, Kernel16k, Kernel64k, room_for};
 use crate::space::Geometry;
 
 const KIB: usize = 1 << 10;
@@ -53,6 +53,9 @@ fn place_of<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>) -> (usize
 /// Free three caps' worth of one class, then grow another: over the cap each step of growth pays,
 /// and retained memory comes down to 64 MiB and stays there, on every kernel.
 fn the_cap_acts_at_its_bytes<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = floored_state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -92,6 +95,9 @@ on_every_kernel!(the_retained_cap, the_cap_acts_at_its_bytes);
 
 /// A quiet heap's clocked pass stops at the floor, 32 MiB on every kernel, and takes nothing more.
 fn the_floor_holds_at_its_bytes<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = floored_state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -135,6 +141,9 @@ fn carve_to<O: Os>(back: &Back<'_, O>, class: SmallClass, bytes: usize) -> Vec<*
 /// them, however large they are: 16 MiB of 2 MiB pages, 256 MiB of 32 MiB. A class over 1 KiB is
 /// not, whatever the page.
 fn a_dense_class_gets_huge_pages_past_eight_of_them<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -199,6 +208,9 @@ fn a_class_past_a_region<S: Shape>(state: &State<Sim<S>>, usable: bool) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_huge_page_over_the_cap_is_never_asked_for() {
+    if !room_for::<Kernel64k>() {
+        return;
+    }
     let state = floored_state::<Kernel64k>();
     a_class_past_a_region(&state, false);
 }
@@ -219,6 +231,9 @@ fn small_regions() -> Box<State<Sim<Kernel16k>>> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_huge_page_larger_than_a_region_is_never_asked_for() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let state = small_regions();
     {
         let back = state.get_or_reserve().unwrap();
@@ -230,6 +245,9 @@ fn a_huge_page_larger_than_a_region_is_never_asked_for() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_class_past_a_region_keeps_its_huge_pages_where_they_fit() {
+    if !room_for::<Kernel4k>() {
+        return;
+    }
     let state = floored_state::<Kernel4k>();
     a_class_past_a_region(&state, true);
 }
@@ -239,6 +257,9 @@ fn a_class_past_a_region_keeps_its_huge_pages_where_they_fit() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_grown_where_huge_pages_are_not_used_is_never_advised() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let state = small_regions();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -259,6 +280,9 @@ fn a_block_grown_where_huge_pages_are_not_used_is_never_advised() {
 /// Blocks of a class whose slots hold sixteen pages or more start at both terms of the rule, and
 /// everything that maps a pointer back to its slot agrees, wherever the block starts.
 fn blocks_stagger_by_lines_and_pages<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let geometry = back.space().plan().geometry();
@@ -314,6 +338,9 @@ on_every_kernel!(a_large_block, blocks_stagger_by_lines_and_pages);
 /// They stay clean from the carve on, through a claim and a free, until a tenant at the slot's
 /// start can write them, and then they are charged until they go back.
 fn the_pages_a_stagger_passes_over_stay_clean<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let page = S::GEOMETRY.page_size();
@@ -383,6 +410,9 @@ on_every_kernel!(
 /// so that the slot can say it reads as zero: an earlier tenant at the slot's start may have
 /// written the pages the block's stagger passed over.
 fn a_moved_block_returns_what_lay_below_it<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     spend_kept_budget(&back);
@@ -451,6 +481,9 @@ fn an_advised_block<S: Shape>(back: &Back<'_, Sim<S>>, class: Class) -> NonNull<
 /// In a slot advised for huge pages a fault makes the pages below a block resident, so they are
 /// charged: where the purge at its free is refused, the free counts them.
 fn an_advised_slot_is_charged_from_its_start<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -481,6 +514,9 @@ fn an_advised_slot_is_charged_from_its_start_at_32_mib() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_advised_block_moves_in_whole_huge_pages() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let state = state::<Kernel16k>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -517,6 +553,9 @@ fn an_advised_block_moves_in_whole_huge_pages() {
 /// A zeroed block its tenant left unwritten goes back whole at its free, staggered or not, and one
 /// its tenant wrote does not.
 fn the_unwritten_look_finds_what_a_staggered_block_wrote<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let geometry = back.space().plan().geometry();
@@ -554,6 +593,9 @@ on_every_kernel!(
 /// A heartbeat's look at the hold returns the pages of a huge unit at most, 512 on every kernel, in
 /// a class of a kernel's huge page or more too: the bound is on time.
 fn a_look_returns_a_bounded_number_of_pages<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = floored_state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -600,6 +642,9 @@ on_every_kernel!(the_holds_look, a_look_returns_a_bounded_number_of_pages);
 /// A class's commits run ahead by 64 KiB, or a page if that is more, at the least, and by what the
 /// region has committed up to 64 MiB, in pages of any size.
 fn a_commit_runs_ahead_by_bytes<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
     let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -665,6 +710,9 @@ fn stranded<S: Shape>(back: &Back<'_, Sim<S>>) -> Vec<*mut u8> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_request_never_splits_a_huge_page_over_two_mebibytes() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let state = state::<Kernel16k>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -705,6 +753,9 @@ fn a_request_never_splits_a_huge_page_over_two_mebibytes() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heartbeat_splits_a_huge_page_of_two_mebibytes() {
+    if !room_for::<Kernel4k>() {
+        return;
+    }
     let state = state::<Kernel4k>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();

@@ -186,6 +186,15 @@ pub const fn capacity_for<S: Shape>() -> usize {
     plan.size().next_multiple_of(plan.region_size())
 }
 
+/// Whether this process may have the address space a heap of `S` takes. A limit on address space,
+/// as `scripts/memlimit`'s fallback sets, refuses the kernels' shapes, and tests on them pass over.
+pub fn room_for<S: Shape>() -> bool {
+    memory::room_for(
+        capacity_for::<S>(),
+        S::GEOMETRY.largest_plan().region_size(),
+    )
+}
+
 /// The random generator's step (splitmix64's increment: the odd number nearest `2^64 / phi`).
 const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 

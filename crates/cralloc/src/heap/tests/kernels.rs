@@ -3,7 +3,7 @@
 //! and a heap whose count of retained memory ends where it can return all it counted.
 
 use super::*;
-use crate::os::sim::{Kernel4k, Kernel16k, Kernel64k, Shape};
+use crate::os::sim::{Kernel4k, Kernel16k, Kernel64k, Shape, room_for};
 
 const KIB: usize = 1 << 10;
 const MIB: usize = 1 << 20;
@@ -173,36 +173,54 @@ const FULLY: u32 = 4000;
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heap_serves_every_size_with_4_kib_pages_quickly() {
+    if !room_for::<Kernel4k>() {
+        return;
+    }
     serve(SimHeap::<Kernel4k>::new(), 0x1357_9bdf_0246_8ace, QUICKLY);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_heap_serves_every_size_with_4_kib_pages_fully() {
+    if !room_for::<Kernel4k>() {
+        return;
+    }
     serve(SimHeap::<Kernel4k>::new(), 0x1357_9bdf_0246_8ace, FULLY);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heap_serves_every_size_with_16_kib_pages_quickly() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     serve(SimHeap::<Kernel16k>::new(), 0x2468_ace0_1357_9bdf, QUICKLY);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_heap_serves_every_size_with_16_kib_pages_fully() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     serve(SimHeap::<Kernel16k>::new(), 0x2468_ace0_1357_9bdf, FULLY);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heap_serves_every_size_with_64_kib_pages_quickly() {
+    if !room_for::<Kernel64k>() {
+        return;
+    }
     serve(SimHeap::<Kernel64k>::new(), 0x0f1e_2d3c_4b5a_6978, QUICKLY);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_heap_serves_every_size_with_64_kib_pages_fully() {
+    if !room_for::<Kernel64k>() {
+        return;
+    }
     serve(SimHeap::<Kernel64k>::new(), 0x0f1e_2d3c_4b5a_6978, FULLY);
 }
 
@@ -211,6 +229,9 @@ fn a_heap_serves_every_size_with_64_kib_pages_fully() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heap_serves_every_size_on_regions_under_a_huge_page() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let os = SimOs::<Kernel16k>::new();
     // Regions of 1 GiB down to 16 MiB are refused.
     let faults = Faults {
@@ -228,6 +249,9 @@ fn a_heap_serves_every_size_on_regions_under_a_huge_page() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_grown_block_on_a_large_page_is_charged_what_it_wrote() {
+    if !room_for::<Kernel16k>() {
+        return;
+    }
     let heap = SimHeap::<Kernel16k>::new();
     let page = Kernel16k::GEOMETRY.page_size();
     let small = layout(MIB, 64);
