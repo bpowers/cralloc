@@ -392,8 +392,11 @@ costs a cycle: a miss's branch is not taken, and the 13.0 above includes the zer
 | `rust-lld`, PIE or not | Yes |
 
 Since the `executable` form links only with `rust-lld` or without PIE, and buys nothing in a pair
-(13.05 against 12.96) and 4 cycles a pair of lone calls, the default form should serve everywhere on
-aarch64.
+(13.05 against 12.96) and 4 cycles a pair of lone calls, the default form serves everywhere on
+aarch64. Jobs do not ask for it either. Over five placements, two rounds each, both forms linked with
+`rust-lld`, the default form against `executable`, mean over placements: `churn live=100k` +1.0%, the
+Box tree -1.1%, `rpc log c64` +0.5%, `rpc echo c64` +0.5%. Each pair of ranges overlaps. `rpc log` was
+the only real server in the set (2026-11-07 at `4ed7804`).
 
 ## The C entry points
 

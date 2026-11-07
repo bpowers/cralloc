@@ -1,5 +1,4 @@
-# Every benchmark binary links with rustc's own lld, as it does by default on x86-64. On aarch64 the
-# default is GNU ld, which makes no copy relocation in a position-independent executable, and
-# cralloc's `executable` form reads its copy of glibc's __rseq_offset directly.
+# Every benchmark binary links with rustc's own lld, as it does by default on x86-64, so one linker
+# places every allocator's code, and the layout variants can shuffle sections, which GNU ld cannot.
 [target.aarch64-unknown-linux-gnu]
 linker = "tools/cc-lld"
