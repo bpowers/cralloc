@@ -22,6 +22,12 @@
 //! both name the same magazine, which then is on the current CPU, so the install displaces
 //! exactly what the slow path decided to displace.
 //!
+//! That first read is only a name for the install to compare with, and may be stale: the thread
+//! may have moved, and a routine's store releases nothing. Nothing is read through it until the
+//! install has committed, on the CPU whose earlier threads wrote the magazine, and a context
+//! switch is a full barrier (`front::routines`); after a commit the thread sees all that CPU's
+//! stores to it. Its acquire is for the check of the name (`magazine`, "The committed mark").
+//!
 //! **Half full on a reversal.** A swap installs a magazine at one of its ends: full for an
 //! allocation, empty for a free. Work that swings both ways across a magazine's end, a few
 //! allocations and then as many frees, then crosses the far end of the new magazine too, and

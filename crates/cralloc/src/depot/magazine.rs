@@ -274,6 +274,13 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// The magazine of `size` at `offset`, if one can be there: past the first unit,
     /// aligned to its size, and inside the committed part.
+    ///
+    /// **The committed mark.** A slab word can name a magazine with no happens-before edge to this
+    /// thread: a thread that has moved reads another CPU's word, which a routine wrote with a
+    /// plain store. Whoever installed that magazine read a mark that admits it, with acquire, before
+    /// its store, so a reader that loads the word with acquire and then this mark finds one at
+    /// least as high and does not abort. Rust's model does not cover a routine's store; Arm's rules
+    /// and x86-64's total store order both give this (`docs/research/memory-ordering.md`).
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.growth.committed.load(Acquire);
         let fits = admits(offset, size, Self::start(), committed);

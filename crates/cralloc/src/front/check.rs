@@ -10,8 +10,9 @@
 //! simulated CPUs use for migration and aborts.
 //!
 //! The checker explores sequentially consistent interleavings at the granularity of atomic
-//! operations. It does not explore weaker memory orders; those are argued from the orderings
-//! the code uses (and x86-64 is TSO), and Miri checks the code for data races.
+//! operations. It does not explore weaker memory orders: those are argued in
+//! `docs/research/memory-ordering.md`, and checked by Miri's weak memory emulation and by the tests
+//! on real threads (`crate::stress`).
 //!
 //! A run can also simulate `fork`: at a switch point every thread but the running one stops
 //! for good (it is "killed" and later unwound out of its body), and a callback wipes what the

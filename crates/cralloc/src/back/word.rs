@@ -16,17 +16,19 @@ pub(crate) const BITS: u32 = u64::BITS;
 /// Every operation but `store` is sequentially consistent. The summary protocol needs that: a
 /// free ORs a word and then reads the summary bit above it, while a search clears the summary bit
 /// and then reads the word. That is the store-buffering pattern, and only sequential consistency
-/// (or fences) rules out both reads missing the other's write. On x86-64 a sequentially
-/// consistent read-modify-write is the same locked instruction as any other and a sequentially
-/// consistent load is a plain load, so it costs nothing.
+/// (or fences) rules out both reads missing the other's write, with every operation in the pattern
+/// taking part: a failed compare-and-swap is a read too. It also means that an execution of these
+/// operations alone is an interleaving, so the TLA+ models and the explorer apply to them as they
+/// stand. And an OR's release and a claim's acquire, through whatever else came between them on
+/// the word, are all that carries a block's bytes from its last owner to its next
+/// (`docs/research/memory-ordering.md`).
 ///
-/// `store` is a release store, a plain `mov`, where a sequentially consistent one is an `xchg`.
-/// It writes only words no protocol races on: a large slot's size word, which only the slot's
-/// holder reads or writes, and a slot changes holder only through a sequentially consistent
-/// operation on its leaf word (the free's OR, the next claim's compare-and-swap), which orders
-/// the old holder's accesses before the new one's; and a region's `Grow` word when `assign`
-/// takes or gives back the region, which the table's and the carving word's compare-and-swaps
-/// that follow publish to any thread that later reads it.
+/// `store` is a release store. It writes only words no protocol races on: a large slot's size
+/// word, which only the slot's holder reads or writes, and a slot changes holder only through a
+/// sequentially consistent operation on its leaf word (the free's OR, the next claim's
+/// compare-and-swap), which orders the old holder's accesses before the new one's; and a region's
+/// `Grow` word when `assign` takes or gives back the region, which the table's and the carving
+/// word's compare-and-swaps that follow publish to any thread that later reads it.
 pub(crate) trait Word: Sync {
     /// Reads the word.
     fn load(&self) -> u64;
