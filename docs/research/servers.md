@@ -133,7 +133,7 @@ plus 3.2%, Qdrant under glibc 1.8 to 2.5%.
   5% on the RPC jobs, so they cannot place the rest. The program's misses on heap memory are level
   ([program-effects.md](program-effects.md)).
 - **A pair costs 14 cycles on a server** (geometric mean over the seven jobs, x1.20; 11 to 18),
-  against about 4 inlined in a bench ([roofline.md](roofline.md)) and 18 for jemalloc (x1.23). The
+  against about 5 inlined in a bench ([roofline.md](roofline.md)) and 18 for jemalloc (x1.23). The
   alloc and free split moves with skid; the sum is firmer. On calls whose layout is not a constant,
   most of the store's and Meilisearch's, the class, slab word and mask took about 10 instructions
   beside the routine's 11.
