@@ -16,7 +16,7 @@
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
 //! this and wraps the calls, so most code never calls them directly.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
+#[cfg(cralloc_os)]
 pub mod linux;
 pub mod machine;
 #[cfg(any(test, kani, feature = "sim"))]

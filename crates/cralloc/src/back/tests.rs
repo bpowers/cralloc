@@ -4258,7 +4258,7 @@ mod region_headers {
     use crate::stats::{Region, Visitor};
 
     /// On the real OS, in the design's geometry, where the pages a block costs are real.
-    #[cfg(not(miri))]
+    #[cfg(cralloc_real)]
     mod resident {
         use super::*;
         use crate::os::linux::LinuxOs;
@@ -4902,7 +4902,7 @@ mod direct_launder {
 
     /// In the design's geometry on the real OS, where a small class's tree has three or four
     /// levels of its own, which no simulated shape has.
-    #[cfg(not(miri))]
+    #[cfg(cralloc_real)]
     mod design {
         use super::*;
         use crate::os::linux::LinuxOs;

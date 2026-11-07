@@ -7,9 +7,9 @@
 //! catches it. Under Miri and Kani, which cannot change page protections, the memory is an
 //! ordinary zeroed allocation, and the simulator checks contents instead.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 use crate::os::Os;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 use crate::os::linux::{LinuxOs, protect_none};
 use alloc::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use core::ptr::NonNull;
@@ -38,7 +38,7 @@ impl Memory {
     pub(super) fn new(len: usize, align: usize, guard: bool) -> Memory {
         assert!(len > 0, "simulated memory must not be empty");
         let layout = Layout::from_size_align(len, align).expect("simulated memory layout");
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if guard {
             let base = LinuxOs
                 .reserve(len.next_multiple_of(4096), align.max(4096))
@@ -89,7 +89,7 @@ impl Memory {
     ///
     /// `offset + len <= self.len()`.
     pub(super) unsafe fn open(&self, offset: usize, len: usize) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded && len != 0 {
             // SAFETY: the range is inside this value's own `LinuxOs` reservation (caller), and
             // whole host pages (the simulator's page size is a multiple of 4 KiB when guarded).
@@ -106,7 +106,7 @@ impl Memory {
     /// `offset + len <= self.len()`, and nothing reads or writes the range until it is opened
     /// again.
     pub(super) unsafe fn close(&self, offset: usize, len: usize) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded && len != 0 {
             // SAFETY: as in `open`; the caller promises nothing touches the range meanwhile.
             let closed = unsafe { protect_none(self.at(offset), len) };
@@ -123,7 +123,7 @@ impl Memory {
     /// call.
     pub(super) unsafe fn zero(&self, offset: usize, len: usize) {
         debug_assert!(offset <= self.len() && len <= self.len() - offset);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded {
             if len != 0 {
                 // SAFETY: the range is inside this value's own reservation and whole host pages;
@@ -165,7 +165,7 @@ impl Memory {
 
 impl Drop for Memory {
     fn drop(&mut self) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded {
             let len = self.layout.size().next_multiple_of(4096);
             // SAFETY: the whole reservation `new` made, released only here; nothing uses it

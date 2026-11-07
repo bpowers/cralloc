@@ -614,7 +614,7 @@ fn freeing_the_region_base_in_a_batch_aborts() {
 }
 
 /// On the real OS, in the design's geometry, where origins are up to a megabyte.
-#[cfg(not(miri))]
+#[cfg(cralloc_real)]
 mod design {
     use super::*;
     use crate::os::linux::LinuxOs;

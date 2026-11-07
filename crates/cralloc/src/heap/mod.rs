@@ -42,28 +42,22 @@ mod source;
 #[cfg(feature = "allocator-api")]
 mod allocator;
 // Also in the crate's own tests, so that the gate builds, lints and runs it.
-#[cfg(all(
-    any(test, feature = "background"),
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(any(test, feature = "background"), cralloc_real))]
 pub(crate) mod background;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 mod global;
 #[cfg(any(test, feature = "sim"))]
 mod sim;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub use global::Cralloc;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use global::{c_alloc_small, c_free_small};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimCralloc, SimHeap};
 
 pub(crate) use address::Found;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use address::process;
 
 use crate::back::{Back, State};

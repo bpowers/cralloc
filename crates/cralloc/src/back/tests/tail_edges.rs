@@ -514,6 +514,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
 /// The kernel's part, on the host itself: nothing else runs `LinuxOs::split_huge`, so a wrong
 /// advice number there (`MADV_FREE` or `MADV_DONTNEED` would destroy a run that a fill may
 /// claim between the split and the purge's own claim) passes every other test.
+#[cfg(cralloc_os)]
 mod kernel {
     use crate::os::linux::LinuxOs;
     use crate::os::{HugePages, Os};

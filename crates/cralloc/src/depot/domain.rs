@@ -362,6 +362,7 @@ mod tests {
         assert_eq!(Domain::folded(MAX_DOMAINS + 3).index(), 3);
     }
 
+    #[cfg(cralloc_os)]
     #[test]
     #[cfg_attr(miri, ignore)]
     fn this_machine_has_a_topology_the_discovery_reads() {

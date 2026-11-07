@@ -1273,13 +1273,13 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     const GUARD_CHILD: &str = "CRALLOC_GUARD_CHILD";
 
     /// Run on its own by `touching_uncommitted_guarded_memory_faults`; does nothing otherwise.
     /// Writes a page it reserved but never committed, and a page it committed, purged and
     /// unmapped, which must fault like the first.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn guard_child() {
         let Some(mode) = std::env::var_os(GUARD_CHILD) else {
@@ -1304,7 +1304,7 @@ mod tests {
         std::eprintln!("the write did not fault");
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn touching_uncommitted_guarded_memory_faults() {
         use std::os::unix::process::ExitStatusExt;
