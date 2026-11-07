@@ -370,19 +370,17 @@ def unwindLines {M : ISA} (p : Printer M) (lines : List Line) : List Line :=
     | .call _ => false
     | l =>
       let t := lineText p.call l
-      !((t.splitOn "rsp").length > 1 || (t.splitOn "esp").length > 1 ||
-        (t.splitOn "push ").length > 1 || (t.splitOn "pop ").length > 1 ||
-        (t.splitOn "call").length > 1)
+      p.stackText.all fun x => (t.splitOn x).length ≤ 1
   if leaf then p.unwindStart.map .text ++ lines ++ p.unwindEnd.map .text else lines
 
 /-- One artifact as a Rust naked function; `moduleOf` gives the module of
 each function it calls. The printer's `funcAlign` comes last, after the
 return (`Printer.function`) and any directives that follow it. -/
 def function (a : Artifact) (moduleOf : String → String) : String :=
-  functionOf a (a.target.printer.function a.code) moduleOf
+  functionOf a (a.target.printer.routine a.setup a.code) moduleOf
 where
   /-- `function a`, given `a`'s printed code `lines`
-  (`a.target.printer.function a.code`). -/
+  (`a.target.printer.routine a.setup a.code`). -/
   functionOf (a : Artifact) (lines : List Line) (moduleOf : String → String) : String :=
   let body := unwindLines a.target.printer lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
@@ -404,6 +402,7 @@ def exitNames {I C : Type} : Code I C → List String
   | .rseq _ body => dedup (body.filterMap fun | .exit _ _ (some t) => some t | _ => none)
   | .seq (.rseq _ body) (.jump _ t) =>
     dedup (body.filterMap (fun | .exit _ _ (some t) => some t | _ => none) ++ [t])
+  | .seq (.rseq _ body) _ => dedup (body.filterMap fun | .exit _ _ (some t) => some t | _ => none)
   | _ => []
 
 /-- The Rust names of the machine-level arguments of `sig`, in order: each
@@ -413,12 +412,13 @@ def argNames (sig : Sig) : List String :=
     | .slice _ _ len => [n, len]
     | _ => [n]
 
-/-- The lines of an inline artifact's `asm!` block: its code, without a
-return, and the code of its cold branches in a section of their own. -/
+/-- The lines of an inline artifact's `asm!` block: its setup and its code,
+without a return, and the code of its cold branches out of line
+(`Printer.coldOpen`). -/
 def inlineLines (a : Artifact) : List Line :=
-  let (l, k, _) := a.target.printer.lower a.code 0
-  l ++ (if k.isEmpty then [] else
-    [.text ".pushsection .text.unlikely, \"ax\""] ++ k ++ [.text ".popsection"])
+  let P := a.target.printer
+  let (l, k, _) := P.lowerRoutine a.setup a.code
+  l ++ (if k.isEmpty then [] else P.coldOpen.map .text ++ k ++ P.coldClose.map .text)
 
 /-- One artifact as an inline Rust function whose body is one `asm!` block:
 
@@ -507,6 +507,8 @@ def checkInline (a : Artifact) : Except String Unit := do
     unless (argNames a.sig).length ≤ T.argRegs.length do throw s!"{n} has too many arguments"
     unless (exitNames a.code).isEmpty || a.sig.ret.isNone do
       throw s!"{n} has exits and returns a value, which `asm!` cannot combine"
+    if T.printer.coldFar && !(T.printer.lowerRoutine a.setup a.code).2.1.isEmpty then
+      throw s!"{n} is inline, where a conditional branch may not reach code out of line"
   else
     unless a.clobbers.isEmpty && a.generics.isEmpty do
       throw s!"{n} is a naked function but declares clobbers or generic parameters"
@@ -569,7 +571,7 @@ def badCall {M : ISA} (P : Printer M) (printed : String → Option (List Line))
   return none
 
 /-- An artifact with what the checks read of it more than once, each computed
-once: its printed code (`Printer.function`, which a call of it is checked
+once: its printed code (`Printer.routine`, which a call of it is checked
 against in every function that calls it, `checkCalls`) and its tables of
 constants (`tablesOf`, which every artifact of the target is checked
 against, `checkConsts`). -/
@@ -577,24 +579,24 @@ structure Prepared where
   art : Artifact
   lines : List Line
   tables : List (String × List (BitVec 64))
-  lines_eq : lines = art.target.printer.function art.code
+  lines_eq : lines = art.target.printer.routine art.setup art.code
   tables_eq : tables = tablesOf art
 
 def Prepared.of (a : Artifact) : Prepared := ⟨a, _, _, rfl, rfl⟩
 
-/-- `p`'s artifact declares exactly the CPU features its code requires
+/-- `p`'s artifact declares exactly the CPU features its setup and code require
 (`featureCheck`). -/
 def checkFeatures (p : Prepared) : Except String Unit :=
   let a := p.art
-  featureCheck s!"{a.target.name}: {a.name}" a.doc (requiresDedup a.target.isa.requires a.code)
-    a.features
+  featureCheck s!"{a.target.name}: {a.name}" a.doc
+    (requiresDedup a.target.isa.requires (.seq (.block a.setup) a.code)) a.features
 
-/-- The target's printer can encode every instruction of the code of `p`'s
-artifact, and of the functions it calls, as the model describes it
+/-- The target's printer can encode every instruction of the setup and the code
+of `p`'s artifact, and of the functions it calls, as the model describes it
 (`Printer.unencodable`). -/
 def checkEncodable (p : Prepared) : Except String Unit :=
   let a := p.art
-  match firstSome? a.target.printer.unencodable a.code with
+  match firstSome? a.target.printer.unencodable (.seq (.block a.setup) a.code) with
   | none => pure ()
   | some e => throw s!"{a.target.name}: {a.name}: {e}"
 
@@ -760,13 +762,24 @@ def hasJump {I C : Type} : Code I C → Bool
   | .frame _ b _ => hasJump b
   | .jump .. => true
 
+/-- The external targets of the jumps in `c`. -/
+def jumpNames {I C : Type} : Code I C → List String
+  | .block _ | .rseq .. => []
+  | .seq a b => jumpNames a ++ jumpNames b
+  | .ite _ t e => jumpNames t ++ jumpNames e
+  | .loop b _ => jumpNames b
+  | .call _ b => jumpNames b
+  | .frame _ b _ => jumpNames b
+  | .jump _ t => [t]
+
 /-- The code of `p`'s artifact has a restartable sequence only as the whole
-of its code (`Code.rseq arm body`), or followed by a `jump` (`.seq (.rseq arm
-body) (.jump is t)`), the only place a `jump` may be, to a function it
-declares, and not inline: the printer gives every sequence the
+of its code (`Code.rseq arm body`), or followed by code with no sequence
+(`.seq (.rseq arm body) tail`), the only place a `jump` may be, to a function
+it declares, and not inline: the printer gives every sequence the
 same labels and its abort handler restarts it at its arm
-(`Printer.rseqLines`), which is then the function's first instruction, as
-`Code.abortStates` assumes. Then the target can print a sequence
+(`Printer.rseqLines`), which is then the first instruction of the code, after
+the routine's setup (`Artifact.setup`), as `Code.abortStates` assumes. Then the
+target can print a sequence
 (`Printer.rseqSig`), the arm is not empty (`Verified` checks that its last
 instruction arms the sequence), the body ends with its commit, a plain
 store (`Printer.plainStore`): a store of a value the code computed, never a
@@ -777,15 +790,18 @@ operand), which it tail-calls with its arguments as they arrived
 def checkRseq (p : Prepared) : Except String Unit := do
   let a := p.art
   let P := a.target.printer
-  let (seqCode, tail) : Prog a.target.isa × Option String := match a.code with
-    | .seq (.rseq arm body) (.jump _ t) => (.rseq arm body, some t)
+  let (seqCode, tail) : Prog a.target.isa × Option (Prog a.target.isa) := match a.code with
+    | .seq (.rseq arm body) t => (.rseq arm body, some t)
     | c => (c, none)
-  if let some t := tail then
-    if a.target.inline then
-      throw s!"{a.target.name}: {a.name} is inline but ends with a jump"
-    unless a.operands.lookup t matches some (.sym _) do
-      throw s!"{a.target.name}: {a.name} jumps to `{t}`, which is not a function it declares \
-        (`Operand.sym`)"
+  if let some c := tail then
+    if hasRseq c then
+      throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
+    for t in jumpNames c do
+      if a.target.inline then
+        throw s!"{a.target.name}: {a.name} is inline but ends with a jump"
+      unless a.operands.lookup t matches some (.sym _) do
+        throw s!"{a.target.name}: {a.name} jumps to `{t}`, which is not a function it declares \
+          (`Operand.sym`)"
   else if hasJump a.code then
     throw s!"{a.target.name}: {a.name} has a jump that does not follow a restartable sequence"
   match seqCode with
@@ -800,6 +816,10 @@ def checkRseq (p : Prepared) : Except String Unit := do
         throw s!"{a.target.name}: {a.name}'s restartable sequence does not commit with a plain store"
     | _ => throw s!"{a.target.name}: {a.name}'s restartable sequence does not end with its commit"
     for st in body do
+      if let .exit _ cold ext := st then
+        if a.target.inline && P.coldFar && (!cold.isEmpty || ext.isSome) then
+          throw s!"{a.target.name}: {a.name} is inline, where a conditional branch may not reach \
+            an exit with code of its own or an external target"
       if let .exit _ _ (some t) := st then
         if a.target.inline then
           if (a.operands.lookup t).isSome then
@@ -810,6 +830,20 @@ def checkRseq (p : Prepared) : Except String Unit := do
   | c =>
     if hasRseq c then
       throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
+
+/-- A word read after `a`'s descriptor (`Printer.descWord`) is what its
+descriptor holds there: only `a`'s setup reads one, of one symbol, as the printer
+places one word (`Printer.descLines`), and `a` has a descriptor, a restartable
+sequence. -/
+def checkDescWord (a : Artifact) : Except String Unit := do
+  let P := a.target.printer
+  let n := s!"{a.target.name}: {a.name}"
+  let names := dedup (a.setup.filterMap P.descWord)
+  unless names.length ≤ 1 do throw s!"{n} reads two symbols' addresses after its descriptor"
+  if (ownFirstSome? P.descWord a.code).isSome then
+    throw s!"{n} reads the word after its descriptor outside its setup"
+  unless names.isEmpty || hasRseq a.code do
+    throw s!"{n} reads the word after its descriptor, but has no descriptor"
 
 /-- No two artifacts of a target have the same name, but a pair selected by
 a `cfg` predicate, one compiled where it holds and one where it does not, of
@@ -1097,7 +1131,8 @@ identifier (`checkNames`), two artifacts of a target have the
 same name (`checkUnique`), a call is not of the code it runs (`checkCalls`),
 its tables of constants are not as `checkConsts` requires, its code names
 an operand it does not declare (`checkOperands`), a restartable sequence is
-not as `checkRseq` requires, an artifact's
+not as `checkRseq` requires, a word it reads after its descriptor is not as
+`checkDescWord` requires, an artifact's
 features are not those its code requires (`checkFeatures`), its code has an
 instruction its target's printer cannot encode (`checkEncodable`), or its
 doc has no `# Safety` section at its end for what `fullDoc` adds to it
@@ -1119,6 +1154,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar ps (checkConsts ps)
   forMPar ps checkOperands
   forMPar ps checkRseq
+  forMPar as checkDescWord
   forMPar ps checkFeatures
   forMPar ps checkEncodable
   forMPar as checkLayout

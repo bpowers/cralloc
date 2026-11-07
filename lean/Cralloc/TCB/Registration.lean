@@ -49,11 +49,15 @@ structure Registration (api : Api) (target : Target) where
   consts : List (String × List (BitVec 64)) := []
   /-- `Artifact.stack`. -/
   stack : Nat := 0
+  /-- `Artifact.setup`. -/
+  setup : List target.isa.Instr := []
   code : Prog target.isa
   /-- The contract `verified` proves, which is `api`'s on `target` for
   `consts` and `stack` (`ofApi`); unification finds it in `verified`'s type. -/
   contract : Contract target.isa := api.contract (target.abi.withConsts consts) stack
-  verified : Verified target code contract
+  /-- `Artifact.attempt`. -/
+  attempt : Contract target.isa := contract
+  verified : Verified target code attempt
   ofApi : contract = api.contract (target.abi.withConsts consts) stack := by exact rfl
   /-- `Artifact.ofSig`. -/
   ofSig : ∃ ext pre post x,
@@ -69,22 +73,25 @@ structure Registration (api : Api) (target : Target) where
   /-- `Artifact.clobbers`. -/
   clobbers : List String := []
   /-- `Artifact.clobbersOk`. -/
-  clobbersOk : target.inline = true → ∀ s, contract.pre s →
+  clobbersOk : target.inline = true → ∀ s, attempt.pre s →
       (∀ s', Exec target.isa code s s' →
         target.preservedExcept (clobbers ++ (if api.sig.ret.isSome then [target.retReg] else [])) s s') ∧
       (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
       (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
   /-- `Artifact.restartsOk`. -/
-  restartsOk : ∀ s s', contract.pre s → Restarts target code contract s s' →
+  restartsOk : ∀ s s', attempt.pre s → Restarts target code attempt s s' →
       target.abiPreserved s s' ∧ ArgsKept target.abi api.sig s s' ∧
       (target.inline = true → target.preservedExcept clobbers s s') := by
     restarts_ok
+  /-- `Artifact.setupOk`. -/
+  setupOk : SetupOk target contract attempt api.sig clobbers setup := by
+    exact .inl ⟨rfl, rfl⟩
   /-- `Artifact.witnesses`. -/
   witnesses : List target.isa.State
   /-- `Artifact.witnessOk`. -/
-  witnessOk : (∃ w ∈ witnesses, contract.pre w) ∧
-    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, contract.pre w ∧ Visits target.isa code w o.1 o.2
+  witnessOk : (∃ w ∈ witnesses, attempt.pre w) ∧
+    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, attempt.pre w ∧ Visits target.isa code w o.1 o.2
 
 /-- The artifact of the implementation `r` of `api` on `target`: its module,
 signature and `writeArgs` are `api`'s, its name `api`'s followed by
@@ -101,8 +108,10 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   generics := api.generics
   rustConsts := api.rustConsts
   exports := api.exports
+  setup := r.setup
   code := r.code
   contract := r.contract
+  attempt := r.attempt
   verified := r.verified
   writeArgs := api.writeArgs
   stack := r.stack
@@ -120,5 +129,6 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   clobbers := r.clobbers
   clobbersOk := r.clobbersOk
   restartsOk := r.restartsOk
+  setupOk := r.setupOk
 
 end VG
