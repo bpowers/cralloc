@@ -82,8 +82,9 @@ runs the jobs under each, interleaved, as `run` interleaves allocators, and prin
 layout's median against the default, the spread (largest median over smallest), the noise
 (the largest half-IQR of one layout's runs) and the spread of the process's instructions. It
 takes the shared measurement lock (`/tmp/cralloc-measure.lock`) itself, for the
-measurement only, so do not wrap it in `flock`. `--no-build` reuses the variants built last
-time. A spread of more than about 3% beyond the noise, with instructions level, means the
+measurement only, so do not wrap it in `flock`; on a machine where heavy work shares the jobs'
+CPUs it does that through `scripts/measure --both-l3`, which pauses that work. `--no-build`
+reuses the variants built last time. A spread of more than about 3% beyond the noise, with instructions level, means the
 job's time depends on code placement; `perf annotate` of plain cycles samples
 (`perf record -e cycles:u`, not an event group) names the loop. `loops64` executes a little
 padding, so its instructions are up to 1 to 3% higher in loop-heavy jobs; the shuffles retire
@@ -94,7 +95,8 @@ sensitive in either; the profile says which. They are for this check only: the s
 the normal build, which is what ships.
 
 **Comparing allocators on a placement-sensitive job.** `--layouts pads` builds five variants,
-`pad00` to `pad64`, in which a padding function of N bytes in bench-alloc moves all the code
+`pad00` to `pad64` (on aarch64, where a line can be 128 bytes, `pad000` to `pad128`), in which a
+padding function of N bytes in bench-alloc moves all the code
 the linker places after it, the allocator's and the program's, by exactly N bytes and changes
 nothing else (`padN` takes any multiple of 16, written with two digits or more). With several
 allocators the summary also prints each one's mean and range over the layouts, and each

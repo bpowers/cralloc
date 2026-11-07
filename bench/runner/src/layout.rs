@@ -70,7 +70,7 @@ pub struct Layout {
 /// - `padN`: N bytes of code ahead of the allocator and the program, N a multiple of 16 (the
 ///   functions' alignment) written with at least two digits, so that the variants' binaries
 ///   have paths of one length; `pad00` is the normal build in a directory of its own.
-/// - `pads`: `pad00,pad16,pad32,pad48,pad64`.
+/// - `pads`: [`PADS`].
 pub fn parse(list: &str) -> Result<Vec<Layout>, String> {
     let mut v: Vec<Layout> = Vec::new();
     let expanded = list.replace("pads", PADS);

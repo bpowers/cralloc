@@ -25,3 +25,8 @@ lto = "fat"
 codegen-units = 1
 debug = 1
 panic = "abort"
+
+# snmalloc-sys reads `debug` in its profile as asking for snmalloc's Debug configuration: no
+# optimization, and its assertions. The default release profile, which sets no `debug`, gets Release.
+[profile.release.package.snmalloc-sys]
+debug = false

@@ -31,6 +31,7 @@ mod suite;
 mod sys;
 
 use paths::Paths;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -152,8 +153,10 @@ fn build_cpus() -> String {
 /// build gets any, whatever the environment says.
 fn build_workloads(p: &Paths, name: &str, feature: &str, rustflags: Option<&str>, pad: Option<usize>) {
     eprintln!("== building workloads for {name}");
-    let mut c = Command::new("nice");
-    c.args(["taskset", "-c", &build_cpus(), "cargo", "build", "--release", "-p", "bench-workloads", "-p", "bench-rpc"]);
+    // `layout` measures after it builds, so it cannot itself run under scripts/heavy.
+    let mut c = Command::new(p.bench.join("../scripts/heavy"));
+    c.env("CRALLOC_HEAVY_CPUS", build_cpus());
+    c.args(["cargo", "build", "--release", "-p", "bench-workloads", "-p", "bench-rpc"]);
     c.arg("--target-dir").arg(p.bench.join("target").join(name));
     if !feature.is_empty() {
         c.args(["--features", &format!("bench-alloc/{feature}")]);
@@ -357,6 +360,9 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
     }
 }
 
+/// Set in a `layout` that started itself under `scripts/measure`, which holds the lock.
+const MEASURED: &str = "BENCH_MEASURED";
+
 /// `benchrun layout`: the chosen jobs under builds of the workloads that put the same code at
 /// other addresses, interleaved as allocators are in `run`, then each job's spread across the
 /// builds. It builds first (unless `--no-build`), then takes the shared measurement lock for
@@ -405,9 +411,24 @@ fn layout(f: &Flags, p: &Paths) {
             }
         }
     }
+    // Where heavy work shares CPUs with the jobs, as on a machine with no cores to spare, the
+    // quiet gate would wait for it, and only `scripts/measure --both-l3` can pause it.
+    let through_script = std::env::var_os(MEASURED).is_some();
+    let heavy = &suite::cpu_sets().heavy;
+    if !through_script && suite::measurement_cpus().iter().any(|c| heavy.contains(c)) {
+        let exe = std::env::current_exe().unwrap_or_else(|e| die(&format!("the runner's executable: {e}")));
+        let err = Command::new(p.bench.join("../scripts/measure"))
+            .arg("--both-l3")
+            .arg(exe)
+            .args(std::env::args_os().skip(1))
+            .arg("--no-build")
+            .env(MEASURED, "1")
+            .exec();
+        die(&format!("scripts/measure: {err}"));
+    }
     let o = run_options(f, p, format!("layout-{suite}"), 5);
     let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
-    let _measuring = layout::measurement_lock().unwrap_or_else(|e| die(&e));
+    let _measuring = (!through_script).then(|| layout::measurement_lock().unwrap_or_else(|e| die(&e)));
     eprintln!("results: {}", o.out.display());
     run::session(&o, &variants, &js).unwrap_or_else(|e| die(&format!("{e}")));
     layout::summarize(&o.out, &bases, &layouts);

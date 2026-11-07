@@ -13,7 +13,8 @@ them:
 - **Do not multiplex counters or group sampled events.** Take data addresses from IBS.
 
 The runner enforces most of this. [`bench/README.md`](../../bench/README.md) documents it; this note
-says why. Everything was measured on one machine (below).
+says why. Everything was measured on the Ryzen below; "On the M1 Max" says what differs on the other
+machine we have.
 
 ## The traps
 
@@ -201,7 +202,11 @@ moves under about 2%.
   indexing; through 70% load it reaches at most 710 to 739. Both found rereading the raw data,
   2026-11-06. Sozu's summed resident set once counted the 180 MB executable in each process, 53 to
   97 MiB, until shared pages were counted once.
-- **An incumbent may not be what you think.** A thread whose first jemalloc call is a free gets no
+- **An incumbent may not be what you think.** `snmalloc-sys` reads `debug` in the profile that builds
+it as asking for snmalloc's Debug configuration, and the suite's release profile has `debug = 1`, so
+snmalloc ran unoptimized with its assertions on: 158 ns a pipeline allocation and 502 cycles a
+`churn live=1k` operation on the M1 Max, against 13.8 and 21.0 in Release, now the build
+(2026-11-07 at `dff7993`). Every snmalloc figure on the Ryzen is that build. A thread whose first jemalloc call is a free gets no
   thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's on jobs with free-only
   threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and `free-only` forms. tcmalloc's
   shared library through TLS descriptors understated it by 14 to 26%. A program that compiles in its
@@ -262,6 +267,32 @@ build-and-drop jobs: mimalloc asks for huge pages for its whole heap, cralloc fo
 16 MiB and grown blocks. A server's heap is its anonymous memory, from `smaps_rollup` once a second,
 so it can be a second stale. Peaks of a few MiB move by up to 1.5 MiB between runs, so differences
 under 1 MiB mean nothing.
+
+## On the M1 Max
+
+Asahi Linux 7.2.12 with 16 KiB pages: two Icestorm cores, then two clusters of four Firestorm cores
+at 3036 MHz, each sharing 12 MiB of L2, no L3 in sysfs, no SMT. `scripts/cpusets` gives jobs one
+cluster and the other, and builds the rest of the machine with the second cluster, so a session
+across clusters always runs with heavy work paused. It is a desktop with a browser open. Figures are
+one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
+
+- **The clock has no ramp to wait for.** The governor is `performance`, with boost off. All but 34 of
+  399 warm-ups held the clock in their first three windows (15.5 ms; the longest took 208), and every
+  run's measured clock lay within 2.98 to 3.04 GHz. The warm-up stays because it costs only that, and it would catch a clock
+  that did move.
+- **Which PMU.** One PMU a kind of core, each with a type of its own, and a generic hardware event
+  opened for no CPU goes to Firestorm's. On an Icestorm core such an event counts nothing: its
+  running time stops while its enabled time goes on, as it does for a task that leaves its PMU's
+  CPUs, so the run reads as multiplexed and is invalid.
+- **Ten counters, not interchangeable.** Nine can count cycles and two can count instructions: a third
+  `instructions` event ran 67% of the time. A workload's three and the runner's two fit. There is
+  no NMI watchdog to hold one.
+- **Nothing holds a core out of deep idle without root.** There is no SMT sibling for a spinner, so
+  `CPU PD` (10 us to leave, 10 ms residency) stays in a server's tails until `scripts/deep-idle off`
+  disables it. Runs say `idle_states: free`. A tail the report flags cannot be read as the allocator's.
+- **Other work is low enough for the same limits.** A run's other work had a median of -0.01 CPUs. Of
+  402 valid runs the highest was 0.15, and three runs went over the limit of 0.25 and were left out.
+  The gate waited at most 6 s.
 
 ## Reusable techniques
 
