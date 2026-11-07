@@ -291,7 +291,7 @@ struct Walk {
     top: AtomicU32,
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
+#[cfg(cralloc_os)]
 const _: () = {
     use crate::lined::lines;
     use core::mem::size_of;

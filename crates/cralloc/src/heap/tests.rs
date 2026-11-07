@@ -1814,7 +1814,7 @@ mod hold {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+#[cfg(cralloc_real)]
 mod process {
     use super::*;
     use crate::{Cralloc, SimCralloc};
@@ -2238,7 +2238,7 @@ mod lean_realloc {
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     mod process {
         use super::*;
         use crate::Cralloc;
@@ -2343,7 +2343,7 @@ mod lean_realloc {
         });
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn the_process_heap_moves_a_block_down_a_class_within_the_block_it_lands_in() {
         use crate::Cralloc;
@@ -2607,7 +2607,7 @@ mod lean_realloc {
             pairs(&SimHeap::<Shape>::new());
         }
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         #[test]
         fn the_process_heap_zeroes_what_a_grow_adds_and_keeps_what_a_shrink_leaves() {
             pairs(&crate::Cralloc);
