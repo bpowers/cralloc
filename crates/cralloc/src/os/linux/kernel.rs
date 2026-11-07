@@ -10,9 +10,9 @@ use crate::space::Geometry;
 use core::ffi::CStr;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering::Acquire;
-use core::sync::atomic::{AtomicU64, fence};
 #[cfg(target_arch = "aarch64")]
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64, fence};
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;

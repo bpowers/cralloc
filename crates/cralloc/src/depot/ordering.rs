@@ -291,6 +291,8 @@ mod kernel_fence {
         assert_eq!(done, 0, "a fence the kernel refused");
     }
 
+    use crate::stress::spread_still;
+
     /// Two words far enough apart that their stores can pass.
     #[repr(C, align(256))]
     struct Apart(AtomicU64);
@@ -307,7 +309,7 @@ mod kernel_fence {
         let rounds = Rounds::of(time, 0);
         let both_missed = core::sync::atomic::AtomicU64::new(0);
         let seen = (AtomicU64::new(0), AtomicU64::new(0));
-        spread(2, |me| {
+        spread_still(2, |me| {
             if me == 0 {
                 // SAFETY: a plain query.
                 target.store(unsafe { sched_getcpu() }, SeqCst);
@@ -353,7 +355,7 @@ mod kernel_fence {
         let target = core::sync::atomic::AtomicI32::new(-1);
         let rounds = Rounds::of(time, 0);
         let stop = AtomicU64::new(0);
-        let results = spread(2, |me| {
+        let results = spread_still(2, |me| {
             let mut ahead = 0;
             // The writer on the higher CPU: a performance core, on a machine that numbers its
             // efficiency cores first, and on the M1 those are the ones whose stores pass.

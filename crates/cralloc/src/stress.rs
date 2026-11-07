@@ -3,10 +3,10 @@
 //!
 //! The interleaving checkers run one thread at a time, so no store is ever late, and a passing run
 //! on x86-64 says nothing about a store and a load that swap. These tests run a protocol's
-//! production code on threads pinned as far apart as the process may go, a different cluster where
-//! there is one, and check what must hold whatever the hardware does. A pass on one CPU does not
-//! show that an order is right, since another CPU may reorder what this one does not: the argument
-//! is `docs/research/memory-ordering.md`, and these are what catches a mistake in it.
+//! production code on threads that go round the CPUs the process may use, and check what must hold
+//! whatever the hardware does. A pass on one CPU does not show that an order is right, since
+//! another CPU may reorder what this one does not: the argument is
+//! `docs/research/memory-ordering.md`, and these are what catches a mistake in it.
 //!
 //! Two shapes of test:
 //!
@@ -61,11 +61,54 @@ fn pin(cpu: usize) {
     let _ = unsafe { sched_setaffinity(0, size_of_val(&mask), mask.as_ptr()) };
 }
 
-/// Runs `body` on `threads` threads, the `i`-th with `i` as its argument, spread evenly over the
-/// CPUs the process may use: two threads on the first and the middle one, which on a machine
-/// numbered by cluster are in different clusters. Under Miri, or with fewer CPUs than threads, they
-/// run where they fall. Returns each thread's result, in order.
-pub(crate) fn spread<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) -> Vec<R> {
+/// How long a thread of [`spread`] stays on a CPU. Short enough that a test in the gate visits
+/// every pair of CPUs on a small machine.
+#[cfg(all(target_os = "linux", not(miri)))]
+const STAY: Duration = Duration::from_millis(40);
+
+/// Which CPUs a thread goes round, for [`Rounds::go_on`] to move it. Only the hardware says which
+/// pairs of CPUs show a reordering: on an M1 Max, none whose writer is an efficiency core, and many
+/// more between two performance cores of a cluster than across clusters
+/// (`docs/research/memory-ordering.md`). So every test visits all of them.
+#[cfg(all(target_os = "linux", not(miri)))]
+struct Tour {
+    cpus: Vec<usize>,
+    /// Where the thread's CPU is in `cpus`.
+    at: core::cell::Cell<usize>,
+    moved: core::cell::Cell<Instant>,
+}
+
+#[cfg(all(target_os = "linux", not(miri)))]
+std::thread_local! {
+    static TOUR: core::cell::RefCell<Option<Tour>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Moves the calling thread on to its tour's next CPU if it has stayed long enough.
+#[cfg(all(target_os = "linux", not(miri)))]
+fn move_on(now: Instant) {
+    TOUR.with_borrow(|tour| {
+        if let Some(tour) = tour
+            && now.duration_since(tour.moved.get()) >= STAY
+        {
+            let at = (tour.at.get() + 1) % tour.cpus.len();
+            pin(tour.cpus[at]);
+            tour.at.set(at);
+            tour.moved.set(now);
+        }
+    });
+}
+
+/// Starts `threads` threads, the `i`-th running `body(i)`, at `first(i, cpus)` in the CPUs the
+/// process may use, and returns their results in order. `tour` says whether they go round the CPUs
+/// from there. With fewer CPUs than threads, or under Miri, they run where they fall.
+fn run<R: Send>(
+    threads: usize,
+    first: impl Fn(usize, usize) -> usize,
+    tour: bool,
+    body: impl Fn(usize) -> R + Sync,
+) -> Vec<R> {
+    #[cfg(any(not(target_os = "linux"), miri))]
+    let _ = (first, tour);
     #[cfg(all(target_os = "linux", not(miri)))]
     let cpus = allowed_cpus();
     let body = &body;
@@ -73,11 +116,20 @@ pub(crate) fn spread<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) 
         let handles: Vec<_> = (0..threads)
             .map(|i| {
                 #[cfg(all(target_os = "linux", not(miri)))]
-                let cpu = (cpus.len() >= threads).then(|| cpus[i * cpus.len() / threads]);
+                let start = (cpus.len() >= threads).then(|| first(i, cpus.len()) % cpus.len());
+                #[cfg(all(target_os = "linux", not(miri)))]
+                let cpus = cpus.clone();
                 scope.spawn(move || {
                     #[cfg(all(target_os = "linux", not(miri)))]
-                    if let Some(cpu) = cpu {
-                        pin(cpu);
+                    if let Some(start) = start {
+                        pin(cpus[start]);
+                        if tour {
+                            TOUR.set(Some(Tour {
+                                cpus,
+                                at: start.into(),
+                                moved: Instant::now().into(),
+                            }));
+                        }
                     }
                     body(i)
                 })
@@ -85,6 +137,34 @@ pub(crate) fn spread<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) 
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
+}
+
+/// Which CPU of the list the next run of threads starts from, so that a test that runs threads many
+/// times visits them all too.
+fn next_start() -> usize {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    RUNS.fetch_add(1, Relaxed)
+}
+
+/// Runs `body` on `threads` threads, spread evenly over the CPUs the process may use, each moving
+/// on to the next CPU as it runs [`Rounds::go_on`]. Returns each thread's result, in order.
+pub(crate) fn spread<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let start = next_start();
+    run(threads, |i, cpus| start + i * cpus / threads, true, body)
+}
+
+/// As [`spread`], with the threads staying where they start: for two threads on the first and
+/// the middle of the CPUs, which a fence can name.
+#[cfg(all(target_os = "linux", not(miri)))]
+pub(crate) fn spread_still<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    run(threads, |i, cpus| i * cpus / threads, false, body)
+}
+
+/// As [`spread`], with the threads on one CPU and moving together, near enough: what passes
+/// between them passes through context switches.
+pub(crate) fn together<R: Send>(threads: usize, body: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let start = next_start();
+    run(threads, |_, _| start, true, body)
 }
 
 /// When a test's threads stop: the time, or under Miri a few rounds.
@@ -111,13 +191,22 @@ impl Rounds {
         }
     }
 
-    /// Whether round `round` of a thread, counted from zero, is to be run.
+    /// Whether round `round` of a thread, counted from zero, is to be run. Moves a thread of
+    /// [`spread`] on to its next CPU when it is time.
     pub(crate) fn go_on(&self, round: u64) -> bool {
         #[cfg(miri)]
         return round < self.most;
         #[cfg(not(miri))]
-        // The clock once in a while: it is a system call on some machines.
-        return !round.is_multiple_of(64) || Instant::now() < self.until;
+        {
+            // The clock once in a while: it is a system call on some machines.
+            if !round.is_multiple_of(64) {
+                return true;
+            }
+            let now = Instant::now();
+            #[cfg(target_os = "linux")]
+            move_on(now);
+            now < self.until
+        }
     }
 }
 
