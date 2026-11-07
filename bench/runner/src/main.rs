@@ -142,7 +142,7 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
 }
 
 fn build_cpus() -> String {
-    std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| "12-15,28-31".into())
+    std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| bench_harness::Cpus(suite::cpu_sets().heavy.clone()).to_list())
 }
 
 /// Builds the workloads (`bench-workloads`, `bench-rpc`) with bench-alloc's `feature` ("" for
@@ -166,6 +166,7 @@ fn build_workloads(p: &Paths, name: &str, feature: &str, rustflags: Option<&str>
         c.env("BENCH_LAYOUT_PAD", bytes.to_string());
     }
     c.env("BENCH_BASELINES", &p.baselines);
+    apps::c_flags(&mut c);
     c.current_dir(&p.bench);
     let st = c.status().unwrap_or_else(|e| die(&format!("cargo: {e}")));
     if !st.success() {
@@ -331,7 +332,7 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
     let runner_cpus = f
         .get("runner-cpus")
         .map(|s| bench_harness::Cpus::parse(s).unwrap_or_else(|| die("--runner-cpus: not a CPU list")).0)
-        .unwrap_or_else(|| vec![15]);
+        .unwrap_or_else(|| suite::cpu_sets().runner.clone());
     run::Options {
         bench_dir: p.bench.clone(),
         baselines: p.baselines.clone(),

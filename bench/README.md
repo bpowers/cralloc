@@ -8,9 +8,30 @@ Rust programs are the `servers` suite (connect-rust, axum and actix-web services
 open load) and the `apps` suite (ruff, DataFusion, boa), with their own build step and
 inputs: see `apps/README.md`.
 
-Everything here is x86-64 Linux only and needs `perf_event_open` for hardware counters
-(`/proc/sys/kernel/perf_event_paranoid` of 2 or lower for user-space counts; the runner also
-counts kernel cycles, which needs 1 or lower).
+Everything here runs on Linux on x86-64 and aarch64 and needs `perf_event_open` for hardware
+counters (`/proc/sys/kernel/perf_event_paranoid` of 2 or lower for user-space counts; the runner
+also counts kernel cycles, which needs 1 or lower). On aarch64 the Rust is built for the host's
+CPU by `.cargo/config.toml`, and the C libraries, the baselines' and those in allocator crates,
+for the host's CPU and page size by `baselines/build.sh` and `benchrun build`, so that every
+allocator has inline LSE atomics.
+
+## Which CPUs
+
+`scripts/cpusets` derives every CPU set from sysfs, and says how. `benchrun`, `baselines/build.sh`,
+`scripts/heavy` and `scripts/deep-idle` all read it, and `CRALLOC_CPUS_<NAME>` overrides a set.
+
+| Set | Use | Ryzen 9950X | M1 Max | Graviton 4 (96 cores, one L3) |
+|---|---|---:|---:|---:|
+| `a` | multi-threaded jobs, servers | 0-3 | 6-9 | 0-3 |
+| `b` | jobs across domains, load generators | 8-11 | 2-5 | 48-51 |
+| `single` | single-threaded jobs | 2 | 8 | 2 |
+| `heavy` | builds, tests, proofs | 12-15, 28-31 | 0-5 | 52-95 |
+| `runner` | the runner itself | 15 | 1 | 95 |
+| `upstream` | a proxy's upstream | 12-14 | half of `b`, the generator on the other half | 52-54 |
+
+Only the Ryzen and the M1 have been run. "L3" below means a cache domain: on the M1 a cluster's
+shared L2, its last level in sysfs. A job that uses `b` as well as `a` shares a cache with heavy work
+on every machine here, so `scripts/measure --both-l3` pauses that work.
 
 ## Running
 
@@ -31,7 +52,7 @@ incumbents, on every change to the back end. `benchrun list --suite full` prints
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
 (below), `--no-warm` (skip the clock warm-up below, only to measure what it changes), and
-the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `12-15,28-31`, the cores `scripts/heavy` uses).
+the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default the set `heavy`).
 `report` takes `--steady-only` to leave out runs whose clock was off.
 
 `run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
@@ -140,11 +161,13 @@ cannot be rebuilt under a session.
 - **One process per measurement.** Each run is a fresh process; a round runs every job
   under every allocator, with the allocators in a new random order for every job. A full
   session is ten rounds.
-- **Pinning.** Jobs use CPUs 0-3 (one L3 domain) and 8-11 (the other), one thread per
-  physical core, with the SMT siblings 16-19 and 24-27 left idle. Each process is confined to
-  its CPU list before `execve`, and workloads pin thread `i` to the `i`-th CPU of
-  `BENCH_CPUS`. Single-threaded jobs run on CPU 2. The runner itself runs on CPU 15.
-- **Counters.** A workload counts cycles (user and kernel), user cycles, instructions,
+- **Pinning.** Jobs use the sets `a` and `b`, one thread per physical core, with any SMT
+  siblings left idle. Each process is confined to its CPU list before `execve`, and workloads
+  pin thread `i` to the `i`-th CPU of `BENCH_CPUS`. Single-threaded jobs run on the set `single`,
+  and the runner itself on the set `runner`.
+- **Counters.** Hardware events go to the PMU of the CPUs the process may run on, found in
+  sysfs by CPU, so that on a machine with two kinds of core they count on the kind the job is
+  pinned to. A workload counts cycles (user and kernel), user cycles, instructions,
   page faults and CPU time over its measured phase only, summed over all its threads
   (`perf_event_open` with `inherit`). The runner also counts the whole process from its
   first instruction (counters attached between `fork` and `execve`, as `perf stat` does),
@@ -250,11 +273,11 @@ Choices that can favour one allocator, not yet tested either way; read the numbe
 - The sampler reads `smaps_rollup` once a second, which holds the process's `mmap_lock`
   during a page-table walk and slightly delays allocators that `munmap` or `mremap` often
   (`--rollup-ms` changes the interval).
-- Builds run on CPUs 12-15 and their siblings 28-31 (`scripts/heavy`), which share an L3 with
-  measurement CPUs 8-11 and not with 0-3. A session under `scripts/measure --both-l3` freezes
-  them, so it has no heavy work beside it; a job on CPUs 0-3 alone, under plain
-  `scripts/measure`, runs beside them and shares only memory. When builds shared the job's L3,
-  memory-bound jobs drifted by up to three times with no load on their own CPU.
+- Builds run on the set `heavy` (`scripts/heavy`), which shares a cache with `b` and not with
+  `a`. A session under `scripts/measure --both-l3` freezes them, so it has no heavy work beside
+  it; a job on `a` alone, under plain `scripts/measure`, runs beside them and shares only memory.
+  When builds shared the job's L3, memory-bound jobs drifted by up to three times with no load on
+  their own CPU.
 
 Output is JSON lines: a `session` record (machine, settings, allocators, the baseline
 manifests) followed by one `run` record per process.
