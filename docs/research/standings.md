@@ -174,8 +174,10 @@ cargo.
 
 **The kernel suite** is a regression check, not a target (`c7f5c21`, 2026-10-22 to 23, ten rounds of
 native jobs, seven of preloaded, medians). Against the best incumbent on each job cralloc is ahead
-on 38, level on 2 and behind on 15, and the geomean of its time over the best's is 0.803. The others
-against cralloc, by group (the RPC jobs are above):
+on 38, level on 2 and behind on 15, and the geomean of its time over the best's is 0.803. snmalloc was
+among the incumbents only in its Debug configuration ([measuring.md](measuring.md), "An incumbent may
+not be what you think"), so a Release build may lower some of those bests. The others against
+cralloc, by group (the RPC jobs are above):
 
 | Group (jobs) | jemalloc | tcmalloc | mimalloc | glibc |
 |---|---:|---:|---:|---:|

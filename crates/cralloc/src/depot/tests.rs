@@ -13,6 +13,7 @@ use super::{Drained, IDLE_TICKS, Source, Tuning};
 use crate::classes::{Class, SmallClass};
 use crate::front::check::interrupt_at;
 use crate::front::{Cpu, Routines, Spare};
+use crate::lined::LINE;
 use crate::os::Os;
 use crate::os::sim::{Call, Faults, SimOs};
 use core::cell::RefCell;
@@ -75,10 +76,10 @@ fn workload(rig: &TestRig, machine: &SimCpu, user: &RefCell<Vec<NonNull<u8>>>) {
 }
 
 /// A magazine filled from the source hands its objects out lowest address first, whether the
-/// source filled it whole or, running out, only partly.
+/// source filled it whole or, running out, only partly. A class of a line, which keeps no stride.
 #[test]
 fn a_filled_magazine_hands_out_ascending_addresses() {
-    let class = Class::of_size(64).unwrap().small().unwrap();
+    let class = Class::of_size(LINE).unwrap().small().unwrap();
     let capacity = class.magazine().capacity();
     for count in [capacity, capacity + capacity / 2] {
         let rig: TestRig = Rig::new(&[class], count, Tuning::DEFAULT);
@@ -95,7 +96,7 @@ fn a_filled_magazine_hands_out_ascending_addresses() {
 /// Whether objects of `size` bytes at `a` and `b` share a cache line.
 fn share_a_line(a: usize, b: usize, size: usize) -> bool {
     let (low, high) = (a.min(b), a.max(b));
-    (low + size - 1) / 64 == high / 64
+    (low + size - 1) / LINE == high / LINE
 }
 
 /// A class smaller than a line hands out the first objects of a fill that opens a run a stride
@@ -105,12 +106,13 @@ fn share_a_line(a: usize, b: usize, size: usize) -> bool {
 /// adjacent addresses; the first fill after an interval with none opens a run again.
 #[test]
 fn a_fill_that_opens_a_run_hands_out_siblings_on_lines_of_their_own() {
-    let classes: Vec<SmallClass> = SmallClass::all().filter(|c| c.size() < 64).collect();
-    assert_eq!(classes.len(), 7);
+    let classes: Vec<SmallClass> = SmallClass::all().filter(|c| c.size() < LINE).collect();
+    assert_eq!(classes.len(), if LINE == 64 { 7 } else { 11 });
     for class in classes {
         let size = class.size();
         let capacity = class.magazine().capacity();
-        let siblings = SIBLINGS * stride(size).unwrap();
+        // On long lines the smallest class's siblings may be all its magazine holds.
+        let siblings = (SIBLINGS * stride(size).unwrap()).min(capacity - 1);
         let rig: TestRig = Rig::new(&[class], 3 * capacity, Tuning::DEFAULT);
         let machine = SimCpu::new(0);
         let cache = rig.cache(&machine);
@@ -152,7 +154,7 @@ fn a_fill_that_opens_a_run_hands_out_siblings_on_lines_of_their_own() {
 /// move down leaves above the level.
 #[test]
 fn a_short_fill_that_opens_a_run_hands_out_every_object_once() {
-    for class in SmallClass::all().filter(|c| c.size() < 64) {
+    for class in SmallClass::all().filter(|c| c.size() < LINE) {
         let size = class.size();
         let capacity = class.magazine().capacity();
         let s = stride(size).unwrap();
@@ -163,7 +165,7 @@ fn a_short_fill_that_opens_a_run_hands_out_every_object_once() {
             2 * s,
             2 * s + 1,
             100,
-            capacity - SIBLINGS * s + 1,
+            capacity.saturating_sub(SIBLINGS * s) + 1,
             capacity - 5,
             capacity - 1,
         ] {

@@ -13,9 +13,9 @@
 //! free slots, lowest address first, as fillers of one class do.
 //!
 //! The free slots outnumber what all threads can hold at once, so no fill carves. Each thread
-//! counts its own user-mode cycles and instructions over its whole loop; the time-stamp counter
-//! splits the cycles between fill and launder, since enabling and reading counters around each
-//! call would cost more than the call. A line reports the sums over all threads divided by the
+//! counts its own user-mode cycles and instructions over its whole loop; the CPU's timer (the
+//! time-stamp counter, or on aarch64 the generic timer) splits the cycles between fill and launder,
+//! since enabling and reading counters around each call would cost more than the call. A line reports the sums over all threads divided by the
 //! objects moved: the cost per object to each thread, comparable with the one-thread figure.
 //! The wall time per object per thread is there too. Run it under `scripts/memlimit`.
 
@@ -40,9 +40,18 @@ struct Tally {
     wall_ns: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 fn ticks() -> u64 {
     // SAFETY: rdtsc has no preconditions on x86-64.
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn ticks() -> u64 {
+    let t: u64;
+    // SAFETY: Linux lets user mode read the virtual counter, which touches nothing else.
+    unsafe { core::arch::asm!("mrs {t}, cntvct_el0", t = out(reg) t, options(nomem, nostack)) };
+    t
 }
 
 fn main() {

@@ -2,12 +2,13 @@
 
 Small, dependency-free programs that measure what an allocator fast path can cost on the
 host, and what the kernel and the Rust toolchain add around it. The results and what they
-mean are written up in `docs/research/roofline.md`.
+mean are written up in `docs/research/roofline.md`, and for aarch64 in
+`docs/research/firestorm.md`.
 
-Each directory is a stand-alone cargo project (none belongs to a workspace). Everything is
-x86-64 Linux only and needs `perf_event_open` for user-space counters
-(`/proc/sys/kernel/perf_event_paranoid` of 2 or lower), except `machine/`, which is any aarch64
-Linux, and `oscost`'s `faults`, which runs on both.
+Each directory is a stand-alone cargo project (none belongs to a workspace). `aarch64/` and
+`machine/` are any aarch64 Linux, `oscost`'s `faults` runs on both, and everything else is x86-64
+Linux only. Everything needs `perf_event_open` for user-space counters
+(`/proc/sys/kernel/perf_event_paranoid` of 2 or lower).
 
 Run measurements on a quiet machine. Programs pin themselves; builds should be kept off the
 measurement CPUs (`taskset -c 4-7 cargo build ...`). Defaults assume the reference machine,
@@ -24,6 +25,50 @@ L3; override with the environment variables below.
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `chain/` | The slab word's store-to-load chain against code placement: the generated inline free and allocation, the tree job's drop, and `c_free`/`c_malloc`, each placed at every offset in a 64-byte line and across 4 KiB, read from the generated files; and mimalloc's free and malloc moved the same way. | `cargo run --release -- FORMS [PLACES]`; see below |
 | `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
+| `aarch64/` | The same questions on any aarch64 Linux: widths, latencies, forwarding and renaming, atomics, the front end, page-offset holds, the floors, candidates for the routines and the C entry shapes. `reach/` builds a fast path every way a conditional branch or a relocation could fail; `stale/` measures how long a scratch register survives in real programs. | `./run.sh [pattern,...]`; see below |
+
+## aarch64
+
+Built for an Apple M1 Max under Asahi Linux, and portable: the same commands run on a Graviton or a
+Grace. The core's PMU is the one whose `cpus` file in `/sys/bus/event_source/devices` names the CPU
+(`apple_firestorm_pmu`, `armv8_pmuv3_0`), cycles and instructions come from its `events` directory,
+and raw events are per PMU and optional. Kernels use the base instruction set, with LSE and RCpc in
+the atomics family only.
+
+```
+cd aarch64
+../../../scripts/heavy cargo build --release
+./run.sh w_,l_,z_                   # widths, latencies, which pairs fuse
+./run.sh f_,r_,h_,rk_               # forwarding, renaming and its rules, hops that cannot rename
+./run.sh a_                         # atomics and barriers, alone and beside other work
+./run.sh fe_                        # front end: length, position, taken branches, calls
+./run.sh p_,c_,b_                   # the floors and candidates: pair, two calls, batch of 32
+./run.sh cl_,cm_,cs_,cc_,sl_        # C entry shapes and the slow path's routines
+./run.sh m_,mb_,pw_,pwn_,ps_,pc_    # mixed classes, a caller's work, placement sweeps
+./run.sh offsets                    # does a load wait on a store with its low address bits?
+./run.sh clock                      # is a cycle a fixed time, from cold and warm?
+./run.sh list f_                    # the kernels and what each runs
+```
+
+`run.sh` runs through `scripts/measure`. A pattern ending in `$` must match a whole name. The
+program pins itself: `RF_CPU` (by default the last CPU but one), `RF_ITERS` (4,000,000), `RF_REPS`
+(4, the first a warm-up), `RF_ROUNDS` (3, every kernel once a round, interleaved). A cell is the
+fastest repetition over all rounds, and `+x` how far the slowest round's fastest sits above it.
+
+`RF_EVENTS` names up to a few more counters: `name=0xCODE`, a name in the PMU's sysfs directory, or
+for Firestorm a name in the table in `src/main.rs` (`docs/research/firestorm.md` has the ones
+validated). Firestorm's events are tied to subsets of its counters, so more than two or three can
+multiplex even with counters free; a multiplexed repetition is dropped and the program says so.
+
+The kernels' sources are Python modules in `kernels/`, one per family, run at build time; each
+module's docstring names its options. The program links without PIE, since `adrp` to
+`__rseq_offset` needs a copy relocation that GNU ld refuses in a PIE (`reach/`).
+
+```
+cd aarch64/reach && ../../../../scripts/heavy ./check.sh      # about a minute
+cd aarch64/stale && cc -O2 -fPIC -shared -ffixed-x18 probe.c -o probe.so -ldl
+LD_PRELOAD=$PWD/probe.so PROGRAM ...                          # the summary goes to stderr
+```
 
 ## kernels
 

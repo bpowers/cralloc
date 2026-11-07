@@ -58,7 +58,6 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-const PAGE: usize = 4096;
 /// A cache slot packs a block's address (8-aligned, below 2^47) and its size in units.
 const ADDR_BITS: u32 = 44;
 const SIZE_BITS: u32 = 64 - ADDR_BITS;
@@ -127,7 +126,8 @@ unsafe impl Sync for Mapped {}
 
 impl Mapped {
     fn new(len: usize) -> Mapped {
-        let len = len.max(PAGE).next_multiple_of(PAGE);
+        let page = page_size();
+        let len = len.max(page).next_multiple_of(page);
         // SAFETY: a fresh private anonymous mapping.
         let p = unsafe {
             libc::mmap(
@@ -157,13 +157,18 @@ impl Drop for Mapped {
 
 /// The resident bytes of a mapping of the program's own, from `mincore`.
 fn resident(base: usize, len: usize) -> u64 {
-    let mut pages = vec![0u8; len.div_ceil(PAGE)];
+    let page = page_size();
+    let mut pages = vec![0u8; len.div_ceil(page)];
     // SAFETY: mincore only reads the page tables; `pages` has a byte per page of the range.
     let rc = unsafe { libc::mincore(block(base).cast(), len, pages.as_mut_ptr()) };
     if rc != 0 {
         return 0;
     }
-    pages.iter().filter(|&&b| b & 1 != 0).count() as u64 * PAGE as u64
+    pages.iter().filter(|&&b| b & 1 != 0).count() as u64 * page as u64
+}
+
+fn page_size() -> usize {
+    bench_harness::mem::page_size() as usize
 }
 
 /// A count that one thread writes and another reads, on a line of its own.

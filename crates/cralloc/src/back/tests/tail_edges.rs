@@ -520,8 +520,15 @@ mod kernel {
     use crate::os::{HugePages, Os};
     use std::string::String;
 
-    const PAGE: usize = 4096;
-    const HUGE: usize = 2 << 20;
+    /// The kernel's page size.
+    fn page() -> usize {
+        LinuxOs::geometry().page_size()
+    }
+
+    /// The kernel's huge page size.
+    fn huge() -> usize {
+        LinuxOs::geometry().huge_page_size()
+    }
 
     /// `AnonHugePages` of the mapping that holds `addr`, in KiB.
     fn anon_huge_kb(addr: usize) -> usize {
@@ -550,32 +557,32 @@ mod kernel {
     #[cfg_attr(miri, ignore)]
     fn split_huge_keeps_contents_and_splits_the_huge_page() {
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let base = os.reserve(2 * huge(), huge()).unwrap();
         let p = base.as_ptr();
-        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        let run = base.map_addr(|a| a.saturating_add(page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
-            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
-            for i in 0..HUGE / PAGE {
-                p.add(i * PAGE + 7).write(i as u8 | 1);
+            os.commit(base, 2 * huge()).unwrap();
+            os.advise_huge(base, 2 * huge(), HugePages::Prefer).unwrap();
+            for i in 0..huge() / page() {
+                p.add(i * page() + 7).write(i as u8 | 1);
             }
             let before = anon_huge_kb(base.addr().get());
-            os.split_huge(run, 4 * PAGE).unwrap();
+            os.split_huge(run, 4 * page()).unwrap();
             let after = anon_huge_kb(base.addr().get());
             std::eprintln!("AnonHugePages {before} kB before the split, {after} after");
-            for i in 0..HUGE / PAGE {
-                assert_eq!(p.add(i * PAGE + 7).read(), i as u8 | 1, "page {i}");
+            for i in 0..huge() / page() {
+                assert_eq!(p.add(i * page() + 7).read(), i as u8 | 1, "page {i}");
             }
-            if before >= HUGE / 1024 {
+            if before >= huge() / 1024 {
                 assert!(after < before, "{before} kB huge before, {after} after");
             }
-            os.purge(run, 4 * PAGE).unwrap();
-            for i in 0..HUGE / PAGE {
+            os.purge(run, 4 * page()).unwrap();
+            for i in 0..huge() / page() {
                 let want = if (1..5).contains(&i) { 0 } else { i as u8 | 1 };
-                assert_eq!(p.add(i * PAGE + 7).read(), want, "page {i}");
+                assert_eq!(p.add(i * page() + 7).read(), want, "page {i}");
             }
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 
@@ -595,42 +602,42 @@ mod kernel {
     fn mincore_follows_a_return_a_rebuild_and_a_split() {
         const MADV_COLLAPSE: i32 = 25;
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let base = os.reserve(2 * huge(), huge()).unwrap();
         let p = base.as_ptr();
-        let at = |page: usize| base.map_addr(|a| a.saturating_add(page * PAGE));
+        let at = |n: usize| base.map_addr(|a| a.saturating_add(n * page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
-            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
-            for i in 0..HUGE / PAGE {
-                p.add(i * PAGE + 7).write(i as u8 | 1);
+            os.commit(base, 2 * huge()).unwrap();
+            os.advise_huge(base, 2 * huge(), HugePages::Prefer).unwrap();
+            for i in 0..huge() / page() {
+                p.add(i * page() + 7).write(i as u8 | 1);
             }
             // The walk returns pages 8..72 of the huge page.
-            os.split_huge(at(8), 64 * PAGE).unwrap();
-            os.purge(at(8), 64 * PAGE).unwrap();
-            assert_eq!(os.resident(at(8), 64 * PAGE), Ok(0), "returned pages");
-            assert_eq!(os.resident(at(72), 8 * PAGE), Ok(8), "kept pages");
-            if madvise(p.cast(), HUGE, MADV_COLLAPSE) != 0 {
+            os.split_huge(at(8), 64 * page()).unwrap();
+            os.purge(at(8), 64 * page()).unwrap();
+            assert_eq!(os.resident(at(8), 64 * page()), Ok(0), "returned pages");
+            assert_eq!(os.resident(at(72), 8 * page()), Ok(8), "kept pages");
+            if madvise(p.cast(), huge(), MADV_COLLAPSE) != 0 {
                 std::eprintln!("no MADV_COLLAPSE here: the rebuild is not shown");
-                os.unmap(base, 2 * HUGE).unwrap();
+                os.unmap(base, 2 * huge()).unwrap();
                 return;
             }
-            let rebuilt = os.resident(at(8), 64 * PAGE);
+            let rebuilt = os.resident(at(8), 64 * page());
             std::eprintln!("after the rebuild: {rebuilt:?} of 64 returned pages resident");
             assert_eq!(rebuilt, Ok(64), "rebuilt pages");
             // The walk asks, splits over its first run of 32 and returns it; then asks about
             // the next run.
-            os.split_huge(at(8), 32 * PAGE).unwrap();
-            os.purge(at(8), 32 * PAGE).unwrap();
-            let rest = os.resident(at(40), 32 * PAGE);
+            os.split_huge(at(8), 32 * page()).unwrap();
+            os.purge(at(8), 32 * page()).unwrap();
+            let rest = os.resident(at(40), 32 * page());
             std::eprintln!("after the split: {rest:?} of the next 32 clean pages resident");
-            assert_eq!(os.resident(at(8), 32 * PAGE), Ok(0));
+            assert_eq!(os.resident(at(8), 32 * page()), Ok(0));
             assert_eq!(
                 rest,
                 Ok(32),
                 "the rest of a rebuilt huge page after its split"
             );
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 
@@ -641,22 +648,22 @@ mod kernel {
     #[cfg_attr(miri, ignore)]
     fn a_locked_mapping_refuses_the_split() {
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
-        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        let base = os.reserve(2 * huge(), huge()).unwrap();
+        let run = base.map_addr(|a| a.saturating_add(page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
+            os.commit(base, 2 * huge()).unwrap();
             base.as_ptr().write(1);
-            if mlock(base.as_ptr().cast(), HUGE) != 0 {
+            if mlock(base.as_ptr().cast(), huge()) != 0 {
                 // No allowance to lock memory here: nothing to show.
                 std::eprintln!("mlock refused: nothing shown");
-                os.unmap(base, 2 * HUGE).unwrap();
+                os.unmap(base, 2 * huge()).unwrap();
                 return;
             }
-            let split = os.split_huge(run, 4 * PAGE);
+            let split = os.split_huge(run, 4 * page());
             std::eprintln!("split of a locked mapping: {split:?}");
             assert!(split.is_err());
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 }

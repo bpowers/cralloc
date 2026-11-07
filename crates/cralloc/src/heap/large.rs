@@ -148,19 +148,28 @@ enum Place {
 /// A layout that may be staggered (`policy::STAGGER_STEP`) gets a slot with
 /// `policy::STAGGER_ROOM` to spare, so that its stagger always fits, unless only a slot
 /// without the room fits a region.
+///
+/// A large slot is whole pages: the back end purges, charges and reports a large block's room by
+/// the pages from its slot's start. So the size is rounded up to a page before the class is
+/// found, and a size that is a multiple of a power of two has a class that is too. With 4 KiB
+/// pages that changes nothing, every large class being a multiple of them; with larger pages the
+/// classes that are not (56 KiB on 16 KiB pages, 160 KiB on 64 KiB) are not used, which costs no
+/// memory, since a block's last page is resident whole either way.
 fn place(layout: Layout, plan: Plan) -> Place {
     let slot = |class: Option<Class>| class.filter(|&c| plan.fits_region(c));
-    // An alignment that may be staggered is at most a cache line, so the size with the room,
-    // rounded up to it, cannot overflow: a layout's size is at most `isize::MAX`.
+    let align = layout.align().max(plan.geometry().page_size());
+    // An alignment that may be staggered is at most a cache line, and a page's size is small, so
+    // the size with the room, rounded up to them, cannot overflow: a layout's size is at most
+    // `isize::MAX`.
     let roomy = if layout.align() <= STAGGER_STEP {
-        let mask = layout.align() - 1;
+        let mask = align - 1;
         slot(Class::of_size(
             (layout.size().max(1) + STAGGER_ROOM + mask) & !mask,
         ))
     } else {
         None
     };
-    match roomy.or_else(|| slot(Class::of_layout(layout))) {
+    match roomy.or_else(|| slot(Class::of_aligned(layout.size(), align))) {
         Some(class) => Place::Slot(class),
         // The size asked for, which the run records: the alignment is met by where the run
         // starts, so rounding the size up to it would only report, and commit, room nobody
@@ -418,6 +427,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classes::MAX_SMALL_SIZE;
     use crate::space::Geometry;
 
     fn layout(size: usize, align: usize) -> Layout {
@@ -454,6 +464,48 @@ mod tests {
                 align: 1 << 33
             }
         );
+    }
+
+    /// A large slot is whole pages on every kernel, and alignment is still met: the back end
+    /// counts a block's room in pages from its slot's start, and a class that was not whole pages
+    /// made the block's usable size run into the next slot.
+    #[test]
+    fn a_large_block_gets_a_slot_of_whole_pages_on_every_kernel() {
+        for page_shift in [12, 14, 16] {
+            let g = Geometry::of_kernel(page_shift);
+            let plan = g.largest_plan();
+            let mut size = MAX_SMALL_SIZE + 1;
+            while size <= 16 << 20 {
+                for align in [1, 8, 64, 128, 4096, 1 << 17] {
+                    let Place::Slot(class) = place(layout(size, align), plan) else {
+                        panic!("{page_shift} {size} {align}: a run");
+                    };
+                    assert!(class.size() >= size, "{page_shift} {size} {align}");
+                    assert!(
+                        class.size().is_multiple_of(g.page_size()),
+                        "{page_shift} {size} {align}: {}",
+                        class.size()
+                    );
+                    assert!(class.size().is_multiple_of(align), "{size} {align}");
+                }
+                size += size / 7;
+            }
+        }
+    }
+
+    /// With 4 KiB pages the rounding changes no class.
+    #[test]
+    fn four_kibibyte_pages_use_every_large_class() {
+        let plan = Geometry::DESIGN.largest_plan();
+        for class in Class::all().filter(|class| !class.is_small()) {
+            if !plan.fits_region(class) {
+                continue;
+            }
+            assert_eq!(
+                place(layout(class.size(), 1 << 13), plan),
+                Place::Slot(class)
+            );
+        }
     }
 
     /// Plans of the design's geometry: its full reservation, and ones a limit on address space

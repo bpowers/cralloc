@@ -28,10 +28,12 @@
 
 use super::sync::{AtomicPtr, AtomicU64};
 use crate::classes::{SMALL_COUNT, SmallClass, WORD_START, WORD_STRIDE};
+use crate::lined::LINE;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-/// The number of slabs: one for every CPU number the kernel can produce on x86-64.
+/// The number of slabs: one for every CPU number the kernel can produce on x86-64. An aarch64
+/// kernel may be built for more; a CPU number with no slab is served by the slow path.
 pub const SLAB_COUNT: usize = crate::spec::SLAB_COUNT;
 /// `log2` of [`SLAB_BYTES`].
 pub const SLAB_SHIFT: u32 = crate::spec::SLAB_SHIFT;
@@ -42,7 +44,7 @@ const _: () = assert!(SLAB_BYTES == 1 << SLAB_SHIFT);
 /// One 32-byte chunk per class index `0..=SMALL_COUNT` (chunk 0 unused, and one more if needed
 /// for the cold fields to start on a cache line): its full head, its empty head, its stock word,
 /// and its hot word at bytes 24 to 31.
-const CHUNKS: usize = (SMALL_COUNT + 1).next_multiple_of(2);
+const CHUNKS: usize = (SMALL_COUNT + 1).next_multiple_of(LINE / 32);
 /// All the pointer fields: four to a chunk.
 const FIELDS: usize = 4 * CHUNKS;
 
@@ -66,10 +68,10 @@ const _: () = {
 };
 const _: () = assert!(size_of::<Slab>() == SLAB_BYTES && align_of::<Slab>() == SLAB_BYTES);
 // The fast path loads only the hot words; the cold words are on lines of their own.
-const _: () = assert!(core::mem::offset_of!(Slab, activity) % 64 == 0);
-const _: () = assert!(core::mem::offset_of!(Slab, seen) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, activity) % LINE == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, seen) % LINE == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, seen) >= core::mem::offset_of!(Slab, claim) + 8);
-const _: () = assert!(core::mem::offset_of!(Slab, stamps) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) % LINE == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, stamps) >= FIELDS * 8);
 
 /// Which spare stack of a class.
@@ -141,23 +143,30 @@ pub struct Slab {
 /// loaded (`depot::age`). On lines of their own, away from the hot words the fast path loads
 /// and from the sighting other CPUs write. Only the class indexes in use have one, so that the
 /// slab's fields stay below the masks' page offset.
-#[repr(C, align(64))]
+#[cfg_attr(target_arch = "aarch64", repr(C, align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]
 struct Stamps([AtomicU64; STAMPS]);
 
 /// Stamps per slab: one for each class index up to the largest small class's.
 const STAMPS: usize = SMALL_COUNT + 1;
 
 /// A word alone on its cache line.
-#[repr(C, align(64))]
+#[cfg_attr(target_arch = "aarch64", repr(C, align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]
 struct OwnLine(AtomicU64);
+
+const _: () = assert!(align_of::<Stamps>() == LINE && align_of::<OwnLine>() == LINE);
 
 impl Slab {
     /// The bytes at the start of a slab that hold its hot words, which the fast paths write,
     /// and the spare heads beside them.
     pub(crate) const HOT_BYTES: usize = 8 * FIELDS;
 
-    /// The bytes at the start of a slab that hold its fields; the rest of its page is unused.
-    pub(crate) const USED_BYTES: usize = core::mem::offset_of!(Slab, seen) + size_of::<OwnLine>();
+    /// The bytes at the start of a slab that hold every field but the idle check's sighting,
+    /// which other CPUs store to once an interval, far too rarely for a load at its page offset
+    /// to meet the store. On lines of 128 bytes the sighting's line lies past what the C routines'
+    /// tables keep clear; the rest of the slab is unused.
+    pub(crate) const STORED_BYTES: usize = core::mem::offset_of!(Slab, seen);
 
     /// A slab with nothing in it.
     #[allow(clippy::new_without_default)]

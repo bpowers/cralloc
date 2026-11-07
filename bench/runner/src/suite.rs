@@ -1,16 +1,85 @@
 //! The jobs: what to run, where, and which number ranks the allocators.
 //!
-//! Measurement CPUs on the reference machine are 0-3 (one L3 domain) and 8-11 (the other),
-//! one thread per physical core; their SMT siblings (16-19, 24-27) are left idle.
+//! The CPUs come from `scripts/cpusets`, which derives them from sysfs: four cores of each of two
+//! cache domains, one thread per physical core, with their SMT siblings left idle. A job uses them
+//! by position, so the same job is the same shape on every machine.
+use bench_harness::Cpus;
+use std::sync::OnceLock;
 
-/// The two L3 domains' measurement cores.
-pub const L3A: [usize; 4] = [0, 1, 2, 3];
-pub const L3B: [usize; 4] = [8, 9, 10, 11];
+/// The machine's CPU sets, as `scripts/cpusets` prints them. It says what each is for.
+pub struct CpuSets {
+    pub a: Vec<usize>,
+    pub b: Vec<usize>,
+    pub single: usize,
+    pub heavy: Vec<usize>,
+    pub runner: Vec<usize>,
+    pub upstream: Vec<usize>,
+}
+
+pub fn cpu_sets() -> &'static CpuSets {
+    static SETS: OnceLock<CpuSets> = OnceLock::new();
+    SETS.get_or_init(|| {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/cpusets");
+        let out = std::process::Command::new(script).output().unwrap_or_else(|e| crate::die(&format!("{script}: {e}")));
+        if !out.status.success() {
+            crate::die(&format!("{script}: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        parse_sets(&String::from_utf8_lossy(&out.stdout))
+            .unwrap_or_else(|| crate::die(&format!("{script} printed something else than its sets")))
+    })
+}
+
+fn parse_sets(text: &str) -> Option<CpuSets> {
+    let set = |name: &str| -> Option<Vec<usize>> {
+        let list = text.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(' '))?;
+        if list.trim().is_empty() { Some(Vec::new()) } else { Cpus::parse(list).map(|c| c.0) }
+    };
+    Some(CpuSets {
+        a: set("a")?,
+        b: set("b")?,
+        single: *set("single")?.first()?,
+        heavy: set("heavy")?,
+        runner: set("runner")?,
+        upstream: set("upstream")?,
+    })
+}
+
+fn four(set: &[usize], name: &str) -> Vec<usize> {
+    if set.len() < 4 {
+        crate::die(&format!(
+            "the suite needs four CPUs in set {name}, and this machine gives {set:?}; set CRALLOC_CPUS_{}",
+            name.to_uppercase()
+        ));
+    }
+    set[..4].to_vec()
+}
+
+/// The cores of one cache domain that jobs use, and that every server job runs on.
+pub fn a() -> Vec<usize> {
+    four(&cpu_sets().a, "a")
+}
+
+/// Those of another: where jobs go across domains, and where a server's load generator runs.
+pub fn b() -> Vec<usize> {
+    four(&cpu_sets().b, "b")
+}
+
 /// The core single-threaded jobs use.
-pub const SINGLE: usize = 2;
-/// The CPUs every server job runs on, its load generator on the other domain.
-/// `scripts/deep-idle` reads this line, and the constant it names, for its default CPUs.
-pub const SERVER_CPUS: [usize; 4] = L3A;
+fn single() -> Vec<usize> {
+    vec![cpu_sets().single]
+}
+
+/// Where a proxy's load generator and its upstream run: all of `b` and spare cores of its domain,
+/// or where its domain has none, half of `b` each.
+fn proxy_cpus() -> (Vec<usize>, Vec<usize>) {
+    let upstream = cpu_sets().upstream.clone();
+    if upstream.is_empty() {
+        let b = b();
+        (b[..2].to_vec(), b[2..].to_vec())
+    } else {
+        (b(), upstream)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -167,17 +236,17 @@ impl Job {
 }
 
 fn local(n: usize) -> Vec<usize> {
-    L3A[..n].to_vec()
+    a()[..n].to_vec()
 }
 
 /// Alternating between the two L3 domains, so that every neighbour is across domains.
 fn split(n: usize) -> Vec<usize> {
-    L3A.iter().zip(L3B.iter()).flat_map(|(&a, &b)| [a, b]).take(n).collect()
+    a().into_iter().zip(b()).flat_map(|(a, b)| [a, b]).take(n).collect()
 }
 
 /// Both domains, one after the other.
 fn both() -> Vec<usize> {
-    L3A.iter().chain(L3B.iter()).copied().collect()
+    a().into_iter().chain(b()).collect()
 }
 
 fn args(s: &str) -> Vec<String> {
@@ -221,11 +290,11 @@ fn rpc(service: &str, label: &str, client_args: &str) -> Job {
         mode: Mode::Native,
         program: Program::Rust("rpc-server"),
         args: vec![service.to_string()],
-        cpus: L3A.to_vec(),
+        cpus: a(),
         driver: Some(Driver {
             bin: "rpc-client",
             args: [service.to_string(), "addr={addr}".to_string()].into_iter().chain(args(client_args)).collect(),
-            cpus: L3B.to_vec(),
+            cpus: b(),
         }),
         load: None,
         metric: Metric::ServerCycles,
@@ -263,10 +332,15 @@ impl Consumers {
     }
 }
 
-/// CPUs for `chains` two-thread pipelines, each on two adjacent cores of one L3 domain,
-/// filling domain A before B: 0,1 then 2,3 then 8,9 then 10,11.
+/// CPUs for `chains` two-thread pipelines, each on two adjacent cores of one cache domain,
+/// filling domain `a` before `b`.
 fn pairs(chains: usize) -> Vec<usize> {
     both()[..2 * chains].to_vec()
+}
+
+/// CPUs for two two-thread pipelines, one in each cache domain.
+fn pair_in_each() -> Vec<usize> {
+    a()[..2].iter().chain(&b()[..2]).copied().collect()
 }
 
 /// A pipeline or mpmc job; `id` and `args` get the consumer choice added.
@@ -311,7 +385,7 @@ pub fn full() -> Vec<Job> {
     // Independent two-thread pipelines side by side: two in one L3 domain, two with one in
     // each, three, and four. Per chain, they should cost what one does alone.
     for (chains, cpus, place) in
-        [(2, local(4), "local"), (2, vec![0, 1, 8, 9], "split"), (3, pairs(3), "both"), (4, pairs(4), "both")]
+        [(2, local(4), "local"), (2, pair_in_each(), "split"), (3, pairs(3), "both"), (4, pairs(4), "both")]
     {
         let a = format!("pipeline threads=2 chains={chains} sizes=small");
         v.push(xjob(format!("pipeline t2 x{chains} sizes=small {place}"), &a, cpus, AllAlloc, 300));
@@ -343,7 +417,7 @@ pub fn full() -> Vec<Job> {
     v.push(rpc("echo", "c64", "concurrency=64 warmup_ms=2000 measure_ms=5000"));
     v.push(rpc("log", "c64", "concurrency=64 conns=8 warmup_ms=2000 measure_ms=5000"));
     v.push(rpc("log", "c256", "concurrency=256 conns=8 warmup_ms=2000 measure_ms=5000"));
-    let one = || vec![SINGLE];
+    let one = single;
     for live in ["100", "1k", "10k", "100k", "1M", "10M"] {
         let a = format!("churn live={live} ops=20M sizes=small");
         v.push(rust("single-thread", format!("churn live={live} small"), Native, &a, one(), 300));
@@ -391,7 +465,7 @@ pub fn full() -> Vec<Job> {
 pub fn quick() -> Vec<Job> {
     use Consumers::*;
     use Mode::*;
-    let one = || vec![SINGLE];
+    let one = single;
     let pipe =
         |c| xjob("pipeline t2 sizes=small local".into(), "pipeline threads=2 sizes=small objects=2M", local(2), c, 60);
     vec![
@@ -450,7 +524,7 @@ pub fn quick() -> Vec<Job> {
 pub fn backend() -> Vec<Job> {
     use Consumers::*;
     use Mode::*;
-    let one = || vec![SINGLE];
+    let one = single;
     vec![
         xjob(
             "pipeline t2 sizes=large local".into(),
@@ -462,7 +536,7 @@ pub fn backend() -> Vec<Job> {
         xjob(
             "pipeline t2 x2 sizes=small split".into(),
             "pipeline threads=2 chains=2 sizes=small objects=2M",
-            vec![0, 1, 8, 9],
+            pair_in_each(),
             AllAlloc,
             60,
         ),
@@ -527,7 +601,7 @@ pub fn apps() -> Vec<Job> {
             local(4),
             120,
         ),
-        app("boa v8", "boa", &format!("v8 dir={{inputs}}/v8 counts={V8_COUNTS}"), vec![SINGLE], 120),
+        app("boa v8", "boa", &format!("v8 dir={{inputs}}/v8 counts={V8_COUNTS}"), single(), 120),
     ]
 }
 
@@ -575,7 +649,7 @@ fn served() -> Vec<Served> {
         body: "{app}/order.json",
         conns: 64,
         threads: 4,
-        cpus: L3B.to_vec(),
+        cpus: b(),
         plan: String::new(),
         rank: "s70",
         inputs: None,
@@ -596,16 +670,19 @@ fn served() -> Vec<Served> {
         inputs: Some("connect"),
         ..order("")
     };
+    let (generator, upstream) = proxy_cpus();
     let router = |id, rates| Served {
         id,
         program: Program::App("router"),
         args: "serve subgraphs={upstream} schema={app}/supergraph.graphql check={inputs}/requests.http",
         load: OpenLoad {
             requests: Some("{inputs}/requests.http"),
+            threads: generator.len(),
+            cpus: generator.clone(),
             upstream: Some(Upstream {
                 bin: "subgraphs",
                 args: vec![],
-                cpus: vec![12, 13, 14],
+                cpus: upstream.clone(),
                 workspace: Some("apps/router/subgraphs"),
             }),
             ..order("/")
@@ -620,8 +697,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin"),
-            // The slowest is snmalloc at 122k req/s (closed loop, 2026-10-20), half the others'
-            // 216k to 256k; glibc is next slowest.
+            // The slowest is snmalloc's Debug configuration at 122k req/s (closed loop, 2026-10-20),
+            // half the others' 216k to 256k; glibc is next slowest.
             rates: (36_000, 85_000),
         },
         // The same service over HTTP/2: gRPC, as connect-rust's own log_bench drives it, and
@@ -631,7 +708,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: h2(connect("application/grpc", vec!["te: trailers"], "{inputs}/log50.grpc")),
-            // Slowest snmalloc 89k req/s, then glibc 146k; the others 174k to 192k (2026-10-20).
+            // Slowest snmalloc's Debug configuration 89k req/s, then glibc 146k; the others 174k to
+            // 192k (2026-10-20).
             rates: (27_000, 63_000),
         },
         Served {
@@ -639,7 +717,8 @@ fn served() -> Vec<Served> {
             program: Program::Rust("rpc-server"),
             args: "log",
             load: h2(connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin")),
-            // Slowest snmalloc 91k req/s, then glibc 148k; the others 172k to 194k.
+            // Slowest snmalloc's Debug configuration 91k req/s, then glibc 148k; the others 172k to
+            // 194k.
             rates: (27_000, 63_000),
         },
         Served {
@@ -674,15 +753,18 @@ fn served() -> Vec<Served> {
             args: "proxy upstream={upstream}",
             load: OpenLoad {
                 body: "{app}/../orders/order.json",
+                threads: generator.len(),
+                cpus: generator.clone(),
                 upstream: Some(Upstream {
                     bin: "upstream",
                     args: vec!["--body", "4096"],
-                    cpus: vec![12, 13, 14],
+                    cpus: upstream.clone(),
                     workspace: None,
                 }),
                 ..order("/orders")
             },
-            // Every allocator saturates at 265k to 276k req/s, snmalloc slowest (2026-10-21).
+            // Every allocator saturates at 265k to 276k req/s, snmalloc's Debug configuration slowest
+            // (2026-10-21).
             rates: (80_000, 186_000),
         },
         // The Apollo Router, federating the four subgraphs of Apollo's demo (bench/apps/router):
@@ -720,7 +802,7 @@ fn server_job(s: Served, plan: String, rank: &'static str, suffix: &str) -> Job 
         mode: Mode::Native,
         program: s.program,
         args: args(s.args),
-        cpus: SERVER_CPUS.to_vec(),
+        cpus: a(),
         driver: None,
         load: Some(OpenLoad { plan, rank, ..s.load }),
         metric: Metric::Served,
@@ -786,7 +868,7 @@ fn large() -> Vec<Large> {
         body: "{app}/order.json",
         conns: 64,
         threads: 4,
-        cpus: L3B.to_vec(),
+        cpus: b(),
         plan: String::new(),
         rank: "s70",
         inputs: None,
@@ -914,7 +996,7 @@ fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
         mode: Mode::Native,
         program: l.program,
         args: args(&l.args),
-        cpus: SERVER_CPUS.to_vec(),
+        cpus: a(),
         driver: None,
         load: Some(OpenLoad { plan, rank, ..l.load }),
         metric: Metric::Served,
@@ -1070,16 +1152,155 @@ mod tests {
         (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
     }
 
-    /// The script's default CPUs and cut-off are the runner's, read from this source.
+    /// The script's default CPUs are every server job's, and its cut-off the runner's.
     #[test]
     fn deep_idle_script_takes_the_runners_cpus() {
         for j in servers().into_iter().chain(servers_large()).chain(servers_thread()) {
-            assert_eq!(j.cpus, SERVER_CPUS, "{}", j.id);
+            assert_eq!(j.cpus, a(), "{}", j.id);
         }
         let (ok, out, err) = deep_idle(&["defaults"], None);
         assert!(ok, "{err}");
-        let cpus: Vec<String> = SERVER_CPUS.iter().map(|c| c.to_string()).collect();
-        assert_eq!(out, format!("cpus {}\ndeep-latency-us {}\n", cpus.join(","), crate::cpuidle::DEEP_LATENCY_US));
+        let list = out.lines().next().and_then(|l| l.strip_prefix("cpus ")).unwrap_or_else(|| panic!("{out}"));
+        assert_eq!(Cpus::parse(list).unwrap().0, a());
+        assert!(out.ends_with(&format!("\ndeep-latency-us {}\n", crate::cpuidle::DEEP_LATENCY_US)), "{out}");
+    }
+
+    /// A tree shaped like /sys/devices/system/cpu: per CPU, its SMT siblings, what shares its last
+    /// cache, and its capacity if the machine reports one. The caches below the last are private,
+    /// so the highest index present has to be the one that decides.
+    fn cpu_tree(
+        name: &str,
+        n: usize,
+        siblings: impl Fn(usize) -> String,
+        last: &str,
+        shared: impl Fn(usize) -> String,
+        capacity: Option<fn(usize) -> u32>,
+    ) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("benchrun-cpusets-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("online"), format!("0-{}\n", n - 1)).unwrap();
+        for c in 0..n {
+            let d = root.join(format!("cpu{c}"));
+            std::fs::create_dir_all(d.join("topology")).unwrap();
+            std::fs::write(d.join("topology/thread_siblings_list"), siblings(c) + "\n").unwrap();
+            for (index, cpus) in [("index0", c.to_string()), (last, shared(c))] {
+                std::fs::create_dir_all(d.join("cache").join(index)).unwrap();
+                std::fs::write(d.join("cache").join(index).join("shared_cpu_list"), cpus + "\n").unwrap();
+            }
+            if let Some(capacity) = capacity {
+                std::fs::write(d.join("cpu_capacity"), format!("{}\n", capacity(c))).unwrap();
+            }
+        }
+        root
+    }
+
+    fn cpusets_of(root: &Path, env: &[(&str, &str)]) -> String {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/cpusets");
+        let out = Command::new(script).env("CRALLOC_SYSFS_CPU", root).envs(env.iter().copied()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let _ = std::fs::remove_dir_all(root);
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn lines(sets: &[(&str, &str)]) -> String {
+        sets.iter().map(|(n, c)| format!("{n} {c}\n")).collect()
+    }
+
+    #[test]
+    fn cpu_sets_of_the_machines_we_know() {
+        // Ryzen 9950X: two L3s, SMT, no capacities. Its sets are the ones its numbers were taken on.
+        let zen5 = cpu_tree(
+            "zen5",
+            32,
+            |c| format!("{},{}", c % 16, c % 16 + 16),
+            "index3",
+            |c| if c % 16 < 8 { "0-7,16-23".into() } else { "8-15,24-31".into() },
+            None,
+        );
+        assert_eq!(
+            cpusets_of(&zen5, &[]),
+            lines(&[
+                ("a", "0-3"),
+                ("b", "8-11"),
+                ("single", "2"),
+                ("heavy", "12-15,28-31"),
+                ("runner", "15"),
+                ("upstream", "12-14")
+            ])
+        );
+        // M1 Max: two efficiency cores, then two clusters of four, with no L3.
+        let m1 = cpu_tree(
+            "m1",
+            10,
+            |c| c.to_string(),
+            "index2",
+            |c| match c {
+                0 | 1 => "0-1".into(),
+                2..=5 => "2-5".into(),
+                _ => "6-9".into(),
+            },
+            Some(|c| if c < 2 { 485 } else { 1024 }),
+        );
+        assert_eq!(
+            cpusets_of(&m1, &[]),
+            lines(&[("a", "6-9"), ("b", "2-5"), ("single", "8"), ("heavy", "0-5"), ("runner", "1"), ("upstream", "")])
+        );
+        // Graviton 4: one L3 over 96 cores, so its halves stand in for two domains.
+        let graviton = cpu_tree("graviton", 96, |c| c.to_string(), "index3", |_| "0-95".into(), Some(|_| 1024));
+        assert_eq!(
+            cpusets_of(&graviton, &[]),
+            lines(&[
+                ("a", "0-3"),
+                ("b", "48-51"),
+                ("single", "2"),
+                ("heavy", "52-95"),
+                ("runner", "95"),
+                ("upstream", "52-54")
+            ])
+        );
+        // Two Grace chips: an L3 each.
+        let grace = cpu_tree(
+            "grace",
+            144,
+            |c| c.to_string(),
+            "index3",
+            |c| if c < 72 { "0-71".into() } else { "72-143".into() },
+            Some(|_| 1024),
+        );
+        let sets = cpusets_of(&grace, &[]);
+        assert!(sets.starts_with("a 0-3\nb 72-75\nsingle 2\nheavy 76-143\nrunner 143\n"), "{sets}");
+        // A set given by hand moves what is derived from it.
+        let m1 = cpu_tree(
+            "m1-override",
+            10,
+            |c| c.to_string(),
+            "index2",
+            |c| match c {
+                0 | 1 => "0-1".into(),
+                2..=5 => "2-5".into(),
+                _ => "6-9".into(),
+            },
+            Some(|c| if c < 2 { 485 } else { 1024 }),
+        );
+        let sets = cpusets_of(&m1, &[("CRALLOC_CPUS_A", "2-5"), ("CRALLOC_CPUS_B", "6-9")]);
+        assert!(sets.starts_with("a 2-5\nb 6-9\nsingle 4\nheavy 0-1,6-9\nrunner 1\n"), "{sets}");
+        // A machine too small for the suite still gives every set an answer.
+        let small = cpu_tree("small", 4, |c| c.to_string(), "index2", |_| "0-3".into(), None);
+        let sets = cpusets_of(&small, &[]);
+        assert!(sets.starts_with("a 0-1\nb 2-3\nsingle 1\n"), "{sets}");
+        assert!(parse_sets(&sets).is_some(), "{sets}");
+    }
+
+    #[test]
+    fn parses_the_sets() {
+        let s = parse_sets("a 6-9\nb 2-5\nsingle 8\nheavy 0-5\nrunner 1\nupstream \n").unwrap();
+        assert_eq!(
+            (s.a, s.b, s.single, s.heavy, s.runner),
+            (vec![6, 7, 8, 9], vec![2, 3, 4, 5], 8, vec![0, 1, 2, 3, 4, 5], vec![1])
+        );
+        assert!(s.upstream.is_empty());
+        assert!(parse_sets("a 6-9\n").is_none());
     }
 
     #[test]
