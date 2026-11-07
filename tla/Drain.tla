@@ -9,10 +9,12 @@
    level, so a drainer that takes a stale word is caught.
 
    Protocol:
-     "v1"     the first design: one word at a time, one marker value, no claim.
-     "claim"  the current design: claim the slab's drain flag, exchange the
-              slab word and the spare head, one fence, re-read each, release.
-     "gen"    proposed: as "claim", but the flag and the marker carry the
+     "v1"     the first design, rejected: one word at a time, one marker value,
+              no claim.
+     "claim"  claim the slab's drain flag, exchange the slab word and the spare
+              head, one fence, re-read each, release. With no fork this is the
+              design's drain; after a fork the child sweeps, which it rejected.
+     "gen"    the design: as "claim", but the flag and the marker carry the
               process's fork generation, older generations count as absent,
               and nothing is swept after a fork.
 
@@ -24,10 +26,9 @@
    After a fork only the forking thread keeps its state. The others become
    fresh threads, which stands for threads the child creates later.
 
-   With "claim" the child repairs by sweeping, as the design says: the first
-   slow path to see the wiped page clears every marker and drain flag.
-   HoldDrains = TRUE is a proposed restriction: no drain starts until the
-   sweep has finished. *)
+   With "claim" the child repairs by sweeping: the first slow path to see the
+   wiped page clears every marker and drain flag. HoldDrains = TRUE restricts
+   that sweep: no drain starts until it has finished. *)
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS

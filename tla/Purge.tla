@@ -6,8 +6,7 @@
    bitmap records which free objects are known to be zero.
 
    Objects and pages need not line up: Cover[o] is the set of pages object o
-   touches. The design says "the bits of a fully free range" and leaves three
-   things open, each a constant here:
+   touches. Three choices are constants here:
 
      ClaimRule  which objects a purge of pages P claims:
                 "overlap" every object that touches P; "inside" only those
@@ -17,9 +16,9 @@
      ZeroOrder  whether zero bits are set "before" or "after" the free bits
                 are released.
 
-   The readings that work are overlap, inside, before. The rule behind all
-   three: a zero bit is written only by whoever holds the object's claim, and
-   only memory that is entirely the claimant's is discarded.
+   The design is overlap, inside, before. The rule behind all three: a zero
+   bit is written only by whoever holds the object's claim, and only memory
+   that is entirely the claimant's is discarded.
 
    A claim of several bits in one word is one compare-and-swap, modelled as
    one step that happens only if the bits are free. A failed compare-and-swap
