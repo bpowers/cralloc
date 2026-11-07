@@ -163,6 +163,21 @@ nothing touches the pages below the block. **Computed** over request sizes from 
 three kernels, 26% land one class higher than with the lines' 4 KiB and none land two higher. A request
 of 1 MiB stays in the 1.25 MiB class. Being wrong about a TLB costs only that address space.
 
+**Through the allocator it does what the probe said.** 64 large buffers from `alloc`, a word of
+each in turn, the first 1 MiB of each, nanoseconds an element, the median of three interleaved
+rounds. Across rounds the before column moved by up to 21%, and the rule's lay in 0.43 to 0.59:
+
+| Request | 64 buffers, lines by 128 / the rule | 16 buffers, the same |
+|---:|---:|---:|
+| 256 KiB | 0.59 / 0.53 | 0.37 / 0.37 |
+| 1 MiB | 0.98 / 0.45 | 0.37 / 0.37 |
+| 4 MiB | 2.79 / 0.43 | 0.60 / 0.37 |
+| 16 MiB | 7.74 / 0.43 | 0.64 / 0.37 |
+| 32 MiB | 9.19 / 0.43 | 0.64 / 0.37 |
+
+*2026-11-07, `09c0e19` against `335f834`, CPU 8, `bench/roofline/rules`, `rules stagger`.* The
+before column is the stagger the first port had: lines of 128 bytes and no page term.
+
 ### Order: pops ascend
 
 | Walk, 512 MiB, huge pages, cycles an object | Ascending | Descending | Sawtooth, worst reversal |
@@ -251,9 +266,27 @@ take 911 to 913 ns against 632 to 641 alone.
 
 ## Huge pages: worth having at 2 and 32 MiB, off at 512 MiB
 
-**`MADV_HUGEPAGE` gets one** under `defrag=madvise` on this machine, in every run: 1,103 free 32 MiB
-blocks at the start, and 6 fallbacks in 2,317 faults since boot. Nothing here measured a shortage of
-free blocks, where the fault stalls in direct compaction.
+**While free blocks last a huge page costs what the table below says. Past them its fault stalls in
+direct compaction, about 4 ms, and then costs more per byte than small pages do.** Under
+`defrag=madvise` a fault under the advice compacts until it has a block or gives up, on whichever
+request first writes the page. First touch of a byte of each huge page, in a mapping of its own:
+
+| Free 32 MiB blocks at the start | Huge pages touched | Median | 90th percentile | Largest | Stalls, of them failed | Fell back to small pages |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 32 | 379 us | 387 us | 446 us | 0 | 0 |
+| 63 | 96 | 378 us | 5.3 ms | 21 ms | 27, 17 | 20 |
+| 0 | 64 | 4.3 ms | 5.8 ms | 50 ms | 70, 6 | 0 |
+
+*2026-11-07 at `09c0e19`, CPU 8, one run of each with builds running, `rules fault`, with the
+kernel's `compact_stall`, `compact_fail` and `thp_fault_fallback`.* This is the machine in ordinary
+use: 62 GiB, 47 of it page cache and 5 free, and no free block that large until the first run's
+`munmap` left 64. At 4.3 ms for 32 MiB the fault costs 131 ns a KiB, against 39 on small pages, so a
+shortage turns the saving of 3.3 times below into a loss of about as much, and a stall lands on one
+request. Where the heap can meet it: the first write to each huge page of a class past 256 MiB, the
+copy into a grown block under advice, and the copy back in `unspill`, each on a request's path. The
+same is possible at 2 MiB, where it takes far more fragmentation to run out and has not been seen.
+A background thread that faulted the next huge page ahead of the watermark would move the stall off
+requests; that is not built.
 
 **What 32 MiB is worth against 16 KiB.** Objects of 64 bytes, median of three rounds:
 
@@ -439,7 +472,9 @@ Sources: [Chips and Cheese, Hot Chips 2023](https://chipsandcheese.com/p/hot-chi
   outside a virtual machine.
 - **A huge page's worth on real jobs,** and the page stagger's. Written in turn is the stagger's best
   case, and fewer buffers than a TLB set's ways gain nothing.
-- **Huge pages under fragmentation:** no run has met a shortage of free 32 MiB blocks.
+- **Huge pages under fragmentation on real jobs:** what the stall above does to a server's tail, how
+  often a long-running one meets it, and whether a fault ahead on the background thread is worth its
+  memory.
 - **Fragmentation on 16 KiB pages:** a live object pins four times the memory it does on a 4 KiB page, so
   `memory.md`'s numbers need the port.
 - **What weakens the pointer prefetcher under load** at 2 GiB and not at 512 MiB. Its worth in a real

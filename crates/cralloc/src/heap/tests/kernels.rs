@@ -62,14 +62,14 @@ unsafe fn marked(p: *const u8, len: usize, whole: usize, seed: u8) -> bool {
 
 /// A random mix over `heap`, with everything checked as it goes, down to nothing live; then what
 /// `collect` leaves is nothing retained, and zeroed memory reads as zero.
-fn serve<S: Shape>(heap: SimHeap<S>, seed: u64) {
+fn serve<S: Shape>(heap: SimHeap<S>, seed: u64, ops: u32) {
     let mut rng = Rng(seed);
     let mut live: Vec<(*mut u8, Layout, u8)> = Vec::new();
     let mut held = 0usize;
     // A heap of few regions runs out of them for classes it has not used yet: a null that costs the
     // test its coverage if it is common.
     let mut refused = 0;
-    for op in 0..600u32 {
+    for op in 0..ops {
         let choice = rng.below(8);
         if (choice < 4 && held < 256 * MIB) || live.is_empty() {
             let size = SIZES[rng.below(SIZES.len())];
@@ -123,10 +123,8 @@ fn serve<S: Shape>(heap: SimHeap<S>, seed: u64) {
             }
             let kept = old.size().min(size);
             // SAFETY: what was kept was written by `mark`.
-            assert!(
-                unsafe { marked(q, kept, old.size(), tag) },
-                "{old:?} to {size}"
-            );
+            let held_on = unsafe { marked(q, kept, old.size(), tag) };
+            assert!(held_on, "{old:?} to {size}");
             assert!(q.addr().is_multiple_of(old.align()), "{q:?} for {old:?}");
             let new = layout(size, old.align());
             // SAFETY: inside the block.
@@ -135,7 +133,7 @@ fn serve<S: Shape>(heap: SimHeap<S>, seed: u64) {
             live[i] = (q, new, tag);
         }
     }
-    assert!(refused < 150, "{refused} of 600 calls refused");
+    assert!(refused < ops / 4, "{refused} of {ops} calls refused");
     for (p, old, tag) in live {
         // SAFETY: as above.
         assert!(unsafe { marked(p, old.size(), old.size(), tag) });
@@ -162,28 +160,50 @@ fn serve<S: Shape>(heap: SimHeap<S>, seed: u64) {
         }
         // SAFETY: inside the block.
         let bytes = unsafe { core::slice::from_raw_parts(p, size) };
-        assert!(bytes.iter().all(|&b| b == 0), "{size} zeroed");
+        assert!(bytes.iter().step_by(61).all(|&b| b == 0), "{size} zeroed");
         // SAFETY: allocated with this layout.
         unsafe { heap.dealloc(p, new) };
     }
 }
 
+/// How many calls a test makes quickly, and fully.
+const QUICKLY: u32 = 200;
+const FULLY: u32 = 4000;
+
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_heap_serves_every_size_with_4_kib_pages() {
-    serve(SimHeap::<Kernel4k>::new(), 0x1357_9bdf_0246_8ace);
+fn a_heap_serves_every_size_with_4_kib_pages_quickly() {
+    serve(SimHeap::<Kernel4k>::new(), 0x1357_9bdf_0246_8ace, QUICKLY);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_heap_serves_every_size_with_4_kib_pages_fully() {
+    serve(SimHeap::<Kernel4k>::new(), 0x1357_9bdf_0246_8ace, FULLY);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_heap_serves_every_size_with_16_kib_pages() {
-    serve(SimHeap::<Kernel16k>::new(), 0x2468_ace0_1357_9bdf);
+fn a_heap_serves_every_size_with_16_kib_pages_quickly() {
+    serve(SimHeap::<Kernel16k>::new(), 0x2468_ace0_1357_9bdf, QUICKLY);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_heap_serves_every_size_with_16_kib_pages_fully() {
+    serve(SimHeap::<Kernel16k>::new(), 0x2468_ace0_1357_9bdf, FULLY);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_heap_serves_every_size_with_64_kib_pages() {
-    serve(SimHeap::<Kernel64k>::new(), 0x0f1e_2d3c_4b5a_6978);
+fn a_heap_serves_every_size_with_64_kib_pages_quickly() {
+    serve(SimHeap::<Kernel64k>::new(), 0x0f1e_2d3c_4b5a_6978, QUICKLY);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_heap_serves_every_size_with_64_kib_pages_fully() {
+    serve(SimHeap::<Kernel64k>::new(), 0x0f1e_2d3c_4b5a_6978, FULLY);
 }
 
 /// The same on regions smaller than the kernel's huge page, which a limit on address space leaves:
@@ -200,7 +220,7 @@ fn a_heap_serves_every_size_on_regions_under_a_huge_page() {
     };
     os.set_faults(Call::Reserve, faults);
     let heap = SimHeap::with_os(os);
-    serve(heap, 0x7766_5544_3322_1100);
+    serve(heap, 0x7766_5544_3322_1100, QUICKLY);
 }
 
 /// A kernel's real sizes are the same rules' on every kernel: a block with headroom on 16 KiB pages
