@@ -16,7 +16,10 @@
 //! interleaved, in a new order each round, and each figure is the median over rounds. Cycles
 //! (user and kernel) and page faults come from per-thread counters. `RF_CPUS` lists the CPUs
 //! to pin threads to (default 13); the first is the single-thread CPU.
-use std::sync::{Arc, Barrier};
+//!
+//! The page and huge-page sizes come from the kernel, and on aarch64 the counters from the PMU of
+//! the pinned CPU, so the same commands run on a kernel of any page size.
+use std::sync::{Arc, Barrier, OnceLock};
 use std::time::Instant;
 
 extern "C" {
@@ -35,12 +38,37 @@ extern "C" {
 const RW: i32 = 3;
 const ANON: i32 = 0x22;
 const NORESERVE: i32 = 0x4000;
-const PAGE: usize = 4096;
-const HUGE: usize = 2 << 20;
 const DONTNEED: i32 = 4;
 const HUGEPAGE: i32 = 14;
 const NOHUGEPAGE: i32 = 15;
 const POPULATE_WRITE: i32 = 23;
+
+#[cfg(target_arch = "x86_64")]
+const SYS_PERF_EVENT_OPEN: i64 = 298;
+#[cfg(target_arch = "aarch64")]
+const SYS_PERF_EVENT_OPEN: i64 = 241;
+
+extern "C" {
+    fn sysconf(name: i32) -> i64;
+}
+
+/// Bytes in a page.
+fn page() -> usize {
+    static PAGE: OnceLock<usize> = OnceLock::new();
+    const SC_PAGESIZE: i32 = 30;
+    *PAGE.get_or_init(|| unsafe { sysconf(SC_PAGESIZE) } as usize)
+}
+
+/// Bytes in a transparent huge page.
+fn huge() -> usize {
+    static HUGE: OnceLock<usize> = OnceLock::new();
+    *HUGE.get_or_init(|| {
+        std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(2 << 20)
+    })
+}
 
 fn errno() -> i32 {
     unsafe { *__errno_location() }
@@ -67,10 +95,10 @@ unsafe impl Send for Map {}
 
 impl Map {
     fn new(len: usize) -> Map {
-        let raw_len = len + HUGE;
+        let raw_len = len + huge();
         let raw = unsafe { mmap(std::ptr::null_mut(), raw_len, RW, ANON | NORESERVE, -1, 0) };
         assert!(raw as isize != -1, "mmap: {}", errno());
-        let p = ((raw as usize + HUGE - 1) & !(HUGE - 1)) as *mut u8;
+        let p = ((raw as usize + huge() - 1) & !(huge() - 1)) as *mut u8;
         Map { raw, raw_len, p, len }
     }
 }
@@ -96,6 +124,41 @@ fn cpus() -> Vec<usize> {
         .collect()
 }
 
+/// The PMU and cycle event of the CPU this thread is pinned to: on a machine with more than one
+/// kind of core the generic hardware type names neither. The kernel's generic event elsewhere.
+#[cfg(target_arch = "aarch64")]
+fn cycle_event() -> (u64, u64) {
+    let cpu = cpus()[0];
+    let find = || -> Option<(u64, u64)> {
+        for entry in std::fs::read_dir("/sys/bus/event_source/devices").ok()?.flatten() {
+            let path = entry.path();
+            let Ok(list) = std::fs::read_to_string(path.join("cpus")) else {
+                continue;
+            };
+            let mut has = false;
+            for part in list.trim().split(',') {
+                let (a, b) = part.split_once('-').unwrap_or((part, part));
+                let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+                has |= (a..=b).contains(&cpu);
+            }
+            let code = ["cycles", "cpu_cycles"].iter().find_map(|name| {
+                let text = std::fs::read_to_string(path.join("events").join(name)).ok()?;
+                u64::from_str_radix(text.trim().strip_prefix("event=0x")?, 16).ok()
+            });
+            if let (true, Some(code)) = (has, code) {
+                return Some((std::fs::read_to_string(path.join("type")).ok()?.trim().parse().ok()?, code));
+            }
+        }
+        None
+    };
+    find().unwrap_or((0, 0))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn cycle_event() -> (u64, u64) {
+    (0, 0)
+}
+
 /// Counters on the calling thread: cycles in both modes, cycles in user mode, page faults.
 struct Counters([i32; 3]);
 
@@ -109,20 +172,27 @@ impl Counters {
             let disabled = 1u64;
             let exclude_kernel = 1u64 << 5;
             let exclude_hv = 1u64 << 6;
-            attr[5] = disabled | exclude_hv | if user_only { exclude_kernel } else { 0 };
-            const PERF_EVENT_OPEN: i64 = 298;
-            let fd = unsafe { syscall(PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 8u64) };
-            assert!(fd >= 0, "perf_event_open: {}", errno());
+            // Apple's PMU refuses an event that does not exclude the guest.
+            let exclude_guest = 1u64 << 20;
+            attr[5] = disabled | exclude_hv | exclude_guest | if user_only { exclude_kernel } else { 0 };
+            let fd = unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i32, -1i32, -1i32, 8u64) };
+            // A virtual machine may have no counters: the nanoseconds still hold, and cycles read 0.
+            if fd < 0 {
+                eprintln!("no counter: errno {}", errno());
+            }
             fd as i32
         };
-        Counters([open(0, 0, false), open(0, 0, true), open(1, 2, false)])
+        let (ty, cycles) = cycle_event();
+        Counters([open(ty, cycles, false), open(ty, cycles, true), open(1, 2, false)])
     }
 
     fn start(&self) {
         for &fd in &self.0 {
-            unsafe {
-                ioctl(fd, 0x2403, 0);
-                ioctl(fd, 0x2400, 0);
+            if fd >= 0 {
+                unsafe {
+                    ioctl(fd, 0x2403, 0);
+                    ioctl(fd, 0x2400, 0);
+                }
             }
         }
     }
@@ -131,6 +201,9 @@ impl Counters {
     fn stop(&self) -> [u64; 3] {
         let mut out = [0u64; 3];
         for (i, &fd) in self.0.iter().enumerate() {
+            if fd < 0 {
+                continue;
+            }
             unsafe { ioctl(fd, 0x2401, 0) };
             let mut b = [0u8; 8];
             let n = unsafe { read(fd, b.as_mut_ptr().cast(), 8) };
@@ -156,7 +229,7 @@ enum How {
     Demand,
     /// `MADV_POPULATE_WRITE` this many pages at a time, then write them.
     Populate(usize),
-    /// `MADV_HUGEPAGE`, then write each page; one fault per 2 MiB.
+    /// `MADV_HUGEPAGE`, then write each page; one fault per huge page.
     Huge,
     /// Write each page of memory that is already resident: the floor under all of the above.
     Present,
@@ -177,7 +250,9 @@ impl How {
 fn run_one(how: How, len: usize, counters: &Counters, barrier: Option<&Barrier>) -> [f64; 4] {
     let m = Map::new(len);
     let advice = if how == How::Huge { HUGEPAGE } else { NOHUGEPAGE };
-    assert_eq!(adv(m.p, m.len, advice), 0);
+    // A kernel without transparent huge pages refuses either advice; it maps small pages anyway.
+    let refused = adv(m.p, m.len, advice);
+    assert!(refused == 0 || refused == 22, "madvise: {refused}");
     if how == How::Present {
         assert_eq!(adv(m.p, m.len, POPULATE_WRITE), 0);
     }
@@ -187,7 +262,7 @@ fn run_one(how: How, len: usize, counters: &Counters, barrier: Option<&Barrier>)
     let t = Instant::now();
     counters.start();
     let step = match how {
-        How::Populate(n) => n * PAGE,
+        How::Populate(n) => n * page(),
         _ => len,
     };
     let mut at = 0;
@@ -201,7 +276,7 @@ fn run_one(how: How, len: usize, counters: &Counters, barrier: Option<&Barrier>)
         let mut o = 0;
         while o < chunk {
             unsafe { q.add(o).write_volatile(1) };
-            o += PAGE;
+            o += page();
         }
         at += chunk;
     }
@@ -269,7 +344,7 @@ fn single(mib: usize, rounds: usize) {
     let cpu = cpus()[0];
     pin(cpu);
     let len = mib << 20;
-    let pages = (len / PAGE) as f64;
+    let pages = (len / page()) as f64;
     let counters = Counters::open();
     let mut results: Vec<Vec<[f64; 4]>> = vec![Vec::new(); VARIANTS.len()];
     // RF_ONLY=text keeps the variants whose name contains it, for profiling one.
@@ -297,7 +372,7 @@ fn single(mib: usize, rounds: usize) {
 fn threads(mib: usize, rounds: usize) {
     let cpus = cpus();
     let len = mib << 20;
-    let pages = (len / PAGE) as f64;
+    let pages = (len / page()) as f64;
     let variants = [How::Demand, How::Populate(16), How::Populate(64), How::Populate(512), How::Huge];
     for &n in &[1usize, 2, 4] {
         if n > cpus.len() {
@@ -345,17 +420,17 @@ fn maps_lines() -> usize {
 
 /// Huge-page advice around a slot, as a block that grew would get it: advise, fill, purge,
 /// take the advice back. Over many cycles and slot positions, with neighbours resident in
-/// 4 KiB pages, does the mapping count come back, and what does each call cost?
+/// small pages, does the mapping count come back, and what does each call cost?
 fn advice(cycles: usize) {
     pin(cpus()[0]);
     // A region as the heap has one: committed, advised against huge pages, its slots of
-    // 16 MiB, with 4 KiB pages resident in every other slot so that the VMA has an anon_vma
+    // 8 huge pages, with small pages resident in every other slot so that the VMA has an anon_vma
     // and the neighbours of an advised slot are in use.
-    let slot = 16usize << 20;
+    let slot = 8 * huge();
     let slots = 32;
-    let reserve = Map::new(slots * slot + (64 << 20));
+    let reserve = Map::new(slots * slot + 32 * huge());
     let region = reserve.p;
-    assert_eq!(unsafe { mprotect(region, slots * slot + (64 << 20), 0) }, 0);
+    assert_eq!(unsafe { mprotect(region, slots * slot + 32 * huge(), 0) }, 0);
     assert_eq!(unsafe { mprotect(region, slots * slot, RW) }, 0);
     assert_eq!(adv(region, slots * slot, NOHUGEPAGE), 0);
     for s in (0..slots).step_by(2) {
@@ -365,8 +440,8 @@ fn advice(cycles: usize) {
     let mut seed = 0x1234_5678u64;
     let (mut t_adv, mut t_fill, mut t_purge, mut t_unadv) = (0f64, 0f64, 0f64, 0f64);
     let (mut most, mut live): (usize, Vec<usize>) = (base, Vec::new());
-    // Slots of a large class are at region + index * size; a 2.5 MiB class shows a slot whose
-    // interior is advised and whose edges are not. Both sizes, interleaved.
+    // Slots of a large class are at region + index * size; a class of 2.5 huge pages shows a slot
+    // whose interior is advised and whose edges are not. Both sizes, interleaved.
     for c in 0..cycles {
         seed ^= seed << 13;
         seed ^= seed >> 7;
@@ -378,10 +453,10 @@ fn advice(cycles: usize) {
         let (start, len) = if c % 2 == 0 {
             (index * slot, slot)
         } else {
-            // A 5 MiB slot that starts 1.25 MiB in: advise its whole huge pages only.
-            let s = region as usize + index * slot + 5 * HUGE / 8;
-            let lo = (s + HUGE - 1) & !(HUGE - 1);
-            let hi = (s + 5 * HUGE / 2) & !(HUGE - 1);
+            // A slot of 2.5 huge pages that starts 0.625 in: advise its whole huge pages only.
+            let s = region as usize + index * slot + 5 * huge() / 8;
+            let lo = (s + huge() - 1) & !(huge() - 1);
+            let hi = (s + 5 * huge() / 2) & !(huge() - 1);
             (lo - region as usize, hi - lo)
         };
         let p = unsafe { region.add(start) };
@@ -392,9 +467,9 @@ fn advice(cycles: usize) {
         let mut o = 0;
         while o < len {
             unsafe { p.add(o).write_volatile(2) };
-            o += PAGE;
+            o += page();
         }
-        t_fill += t.elapsed().as_nanos() as f64 / (len / HUGE) as f64;
+        t_fill += t.elapsed().as_nanos() as f64 / (len / huge()) as f64;
         live.push(index);
         most = most.max(maps_lines());
         // Free a random earlier slot, so up to four are advised at once.
@@ -423,7 +498,7 @@ fn advice(cycles: usize) {
     println!("advice around a slot, {cycles} cycles, up to 5 slots advised at once");
     println!("  maps lines: before {base}, most {most}, after {}", maps_lines());
     println!(
-        "  MADV_HUGEPAGE {:.2} us, fill {:.1} us per 2 MiB, DONTNEED {:.2} us per slot, MADV_NOHUGEPAGE {:.2} us",
+        "  MADV_HUGEPAGE {:.2} us, fill {:.1} us per huge page, DONTNEED {:.2} us per slot, MADV_NOHUGEPAGE {:.2} us",
         t_adv / n / 1e3,
         t_fill / n / 1e3,
         t_purge / n / 1e3,
@@ -459,7 +534,7 @@ fn vmstat(key: &str) -> u64 {
 /// splits the page later?
 fn split() {
     pin(cpus()[0]);
-    let len = 256usize << 20;
+    let len = 128 * huge();
     let show = |what: &str| {
         println!(
             "  {:<44} rss {:>4} MiB  huge {:>4} MiB  cgroup {:>5} MiB  deferred_split {} split {}",
@@ -478,23 +553,23 @@ fn split() {
     let mut o = 0;
     while o < len {
         unsafe { m.p.add(o).write_volatile(1) };
-        o += PAGE;
+        o += page();
     }
     show("filled in huge pages");
     let t = Instant::now();
     let mut o = 0;
     while o < len {
-        assert_eq!(adv(unsafe { m.p.add(o) }, HUGE / 2, DONTNEED), 0);
-        o += HUGE;
+        assert_eq!(adv(unsafe { m.p.add(o) }, huge() / 2, DONTNEED), 0);
+        o += huge();
     }
-    let d = t.elapsed().as_nanos() as f64 / (len / HUGE) as f64;
+    let d = t.elapsed().as_nanos() as f64 / (len / huge()) as f64;
     show(&format!("first half of each purged ({:.1} us/call)", d / 1e3));
     std::thread::sleep(std::time::Duration::from_secs(2));
     show("2 s later");
     let mut o = 0;
     while o < len {
-        assert_eq!(adv(unsafe { m.p.add(o + HUGE / 2) }, HUGE / 2, DONTNEED), 0);
-        o += HUGE;
+        assert_eq!(adv(unsafe { m.p.add(o + huge() / 2) }, huge() / 2, DONTNEED), 0);
+        o += huge();
     }
     show("second half purged too");
     drop(m);
@@ -503,29 +578,29 @@ fn split() {
     let mut o = 0;
     while o < len {
         unsafe { m.p.add(o).write_volatile(1) };
-        o += PAGE;
+        o += page();
     }
     show("filled again");
     let t = Instant::now();
     assert_eq!(adv(m.p, len, DONTNEED), 0);
-    let d = t.elapsed().as_nanos() as f64 / (len / HUGE) as f64;
-    show(&format!("purged in whole huge pages ({:.1} us per 2 MiB)", d / 1e3));
+    let d = t.elapsed().as_nanos() as f64 / (len / huge()) as f64;
+    show(&format!("purged in whole huge pages ({:.1} us per huge page)", d / 1e3));
 }
 
-/// Memory touched sparsely in 4 KiB pages, then advised for huge pages: does khugepaged
+/// Memory touched sparsely in small pages, then advised for huge pages: does khugepaged
 /// collapse it, and so make all of it resident?
 fn khuge(seconds: u64) {
-    let len = 64usize << 20;
+    let len = 32 * huge();
     let m = Map::new(len);
     assert_eq!(adv(m.p, len, NOHUGEPAGE), 0);
     let mut o = 0;
     while o < len {
         unsafe { m.p.add(o).write_volatile(1) };
-        o += HUGE;
+        o += huge();
     }
     assert_eq!(adv(m.p, len, HUGEPAGE), 0);
     println!(
-        "one page written per 2 MiB of {} MiB, then MADV_HUGEPAGE; max_ptes_none {}",
+        "one page written per huge page of {} MiB, then MADV_HUGEPAGE; max_ptes_none {}",
         len >> 20,
         std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_none")
             .unwrap_or_default()
