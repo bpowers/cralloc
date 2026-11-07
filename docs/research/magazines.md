@@ -73,9 +73,9 @@ at 1868dd0 and d56e3bf.
 | Scattered, 64M live slots (8 MiB) | 102 | 267 |
 
 A batch of 1,022, what the smallest classes launder today, is cheaper per object where the bitmap
-fits the caches. Scattered, 254 against 1,022 objects a batch: 27 and 23.5 on a small heap, 112 and
-74 with 64M live slots, 199 and 197 with 256M. The bench stops there, since 2^29 slots of 8 bytes no
-longer fit a region.
+fits the caches. Scattered, 254 against 1,022 objects a batch, in a later session than the table: 27
+and 23.5 on a small heap, 112 and 74 with 64M live slots, 199 and 197 with 256M. The bench stops
+there, since 2^29 slots of 8 bytes no longer fit a region.
 
 A 4 KiB class moves 14 objects a call, so its per-call costs dominate: fill 21 cycles, dense launder
 29, scattered 52. On Meilisearch fill and launder together average about 20 cycles an object
@@ -219,7 +219,6 @@ control moved five points between sessions.
 | Pipeline, small objects | -9.8% | -8.6% |
 | Three pipelines across L3s | -18.1% | -16.2% |
 | Box tree, depth 20 | -7.5% | -7.4% |
-
 | sh8bench | -25.6% | -18.7% |
 
 The tree enters the slow path 165,000 times at 254 slots and 41,000 at 1,024. The 124,000 extra
@@ -230,14 +229,14 @@ magazines saved is the exchange's work, not the entry.
 
 - A checkpoint costs 62 to 67 cycles and one branch miss. Every 256 slots on 1,024 that is 1 to 3%
   on cross-thread pipelines against plain 1,024. Only 1,024 on 4,096 is free, adding 0.5 to 1.7 MiB
-  on the same heaps for 3% on the tree and JSON and 11% on sh8bench.
+  on the same heaps for 3% on the tree and 11% on sh8bench.
 - The first design, which wrote the slot and then committed the word outside a sequence, can hand
   one object out twice: store-if-equal never guarded a slot's contents. A sound one moves the word
   between the two names of one level. The Lean statements hold as they are; the work is on the Rust
   side.
 - The signal does not fire. A contended round trip never occurs on the one-way pipelines or the
-  tree, JSON and BTreeMap, where the size pays. A pipeline's magazine is a transfer batch as well as
-  a buffer, and round trips size a buffer.
+  tree, where the size pays, nor on BTreeMap or JSON, whose gain is not resolved. A pipeline's
+  magazine is a transfer batch as well as a buffer, and round trips size a buffer.
 
 ## What a slow path costs
 
@@ -520,18 +519,18 @@ CPUs, and where parked objects were counted, on four to eight CPUs, they came to
    a magazine whatever the fill size. So the count must split loaded magazines' objects by how they
    got there.
 3. It costs no cycles where the size pays. The gain of 1,024 slots is depot traffic, so a rule must
-   reach full size quickly on pipelines, the tree and JSON. At about 640 cycles a real swap, that
-   bounds how many extra exchanges a ramp may take.
+   reach full size quickly on pipelines and the tree, and on JSON if its gain is real. At about 640
+   cycles a real swap, that bounds how many extra exchanges a ramp may take.
 4. It does not make the first requests after a silence worse. Those already refill every class on
    every CPU once, and a ramp makes that several times.
 
 **Why one exchange rate does not work.** A 4 KiB page kept about 1.5 s to save a refault of about
-2,400 cycles reads as about 400 cycles per KiB-second. By the economic order quantity, `Q = sqrt(2DK/h)`, an
-8-byte class priced by the page it can pin gets 1,400 objects, which looks like 1,022. A review
-found the input wrong: it assumed a million objects a second, and real jobs run a hundred times that
-(14,000), so the match is an accident, and the page was held nearer 5 s than 1.5, which puts the
-price near 120. At 400 cycles, 1 MiB costs a hundredth of a percent of a core, yet 1 MiB for 10% was
-rejected: the memory bar was a ratio to jemalloc, not a price.
+2,400 cycles reads as about 400 cycles per KiB-second. By the economic order quantity, `Q =
+sqrt(2DK/h)`, an 8-byte class priced by the page it can pin gets 1,400 objects, which looks like
+1,022. A review found the input wrong: it assumed a million objects a second, and real jobs run a
+hundred times that (14,000), so the match is an accident, and the page was held nearer 5 s than 1.5,
+which puts the price near 120. At 400 cycles, 1 MiB costs a hundredth of a percent of a core, yet 1
+MiB for 10% was rejected: the memory bar was a ratio to jemalloc, not a price.
 
 **Where the hypothesis breaks.** A parked object's cost is the page it pins, known only when it is
 laundered or purged. Tiers are in series: moving to 1,024 slots cut the spares and depot stacks of

@@ -30,8 +30,9 @@ rate.
   | glibc | 1.197 (x1.13) | 1.137 | 1.053 | 1.16 |
 
   The eight jobs that allocate much run at 0.44 to 0.66 cycles an instruction, so jemalloc's and
-  tcmalloc's difference works out at the server's own rate or better. mimalloc adds stalls, and
-  glibc's gap on the order service is mostly stalls (1.14 times the cycles per instruction).
+  tcmalloc's difference works out at about the server's own rate or under it, except tcmalloc on
+  Connect (0.55 to 0.67 against 0.44). mimalloc adds stalls, and glibc's gap on the order service is
+  mostly stalls (1.14 times the cycles per instruction).
 - **Tails come in layers.** With deep idle states on, the tail at a fixed rate ranks the CPU's idle
   states, and a faster allocator gets the worse tail: it idles longer and sleeps deeper. With them
   off, jemalloc and tcmalloc are 2 to 4% over cralloc at p50, p99 and p99.9 as a geometric mean over
@@ -452,13 +453,13 @@ asleep (1,273 deep-idle entries a thousand requests against under 1), which sugg
 blocks built on one worker and dropped on another; not profiled. Not placement-sensitive: 0.3 to
 0.9% a build. It peaks near 100 MiB, so memory ranks nothing.
 
-**SurrealDB** has the widest gap of any program server against tcmalloc and against the allocator it
-ships with: tcmalloc +7.0%, mimalloc +12.6%, jemalloc +13.6% (which it ships with), glibc +27.2%,
-and p99.9 2.7 ms against 3.3 to 3.6, at 750k records (2026-10-25). Many small allocations a request
-over a heap of gigabytes; jemalloc's refills of small bins show as 3.7% of cycles. It holds 4 to 5%
-under jemalloc and tcmalloc, and the heap only grows, so the tail rule has nothing to return.
-jemalloc, mimalloc and glibc are single builds of a fat-LTO program, which a placement could move by
-a few percent.
+**SurrealDB** has the widest gap of the third-party servers against tcmalloc and against the
+allocator it ships with (the log store is our own service): tcmalloc +7.0%, mimalloc +12.6%,
+jemalloc +13.6% (which it ships with), glibc +27.2%, and p99.9 2.7 ms against 3.3 to 3.6, at 750k
+records (2026-10-25). Many small allocations a request over a heap of gigabytes; jemalloc's refills
+of small bins show as 3.7% of cycles. It holds 4 to 5% under jemalloc and tcmalloc, and the heap
+only grows, so the tail rule has nothing to return. jemalloc, mimalloc and glibc are single builds
+of a fat-LTO program, which a placement could move by a few percent.
 
 **Qdrant** is a control on time: malloc is about 2% even with glibc, and dot products and graph
 traversal 60 to 70%. Cycles a request rank the run's state, not the allocator. Qdrant routes
@@ -467,10 +468,10 @@ levels of work (11.9, 12.5, 12.9M cycles) with instructions moving alike. On dis
 the disk's load, in clusters that hit every allocator, and threads waited on page faults in its
 payload store: a first 7% gap against cralloc was one such cluster, so its storage now lives in RAM.
 Memory is its axis, and jemalloc is the smallest: heap peak / a minute after close was jemalloc 449
-/ 131, cralloc 528 / 195, tcmalloc 474 / 417. Means do not compare between these sessions: one build
-read 337 in one and 447 in another, unexplained. Most of our extra was 64 and 128-byte pages
-stranded in partly used 2 MiB units. Within a session the tail rule lowered the mean from 449 to
-414, and the build that ships reads a peak of 505 and 139 after close (`ea0e524`, 2026-10-27, not
+/ 131, cralloc 528 / 195, tcmalloc 474 / 417. Over the 30 s at 70% the mean was jemalloc 357,
+tcmalloc 408, cralloc 438, and 410 with the rule as shipped. Most of our extra was 64 and 128-byte
+pages stranded in partly used 2 MiB units. Within a session the tail rule lowered that mean from 449
+to 414, and the build that ships reads a peak of 505 and 139 after close (`ea0e524`, 2026-10-27, not
 separated from the builds beside it; [memory.md](memory.md)). The rule's advice changes on a live
 server are mostly 5 to 7 us; the longest, 4.8 to 5.2 ms over 4 GiB, waited on the address-space lock
 with 2 to 8 requests in flight, and no request at p99 or above overlapped one.
@@ -500,8 +501,9 @@ server's cycles: cralloc is fastest on the order service with less coverage than
 - **Matched utilisation.** No tail here compares allocators at one fraction of their own capacity,
   which would separate glibc's load from its locks.
 - **The Router, SurrealDB and Qdrant's cycles** were last measured on 2026-10-24 and 25, deep idle
-  on. Their tails are in milliseconds, which these exits move little, and the switch moved no one's
-  cycles by more than 1%. Qdrant's rounds of 2026-10-26 and 27 had it off.
+  on, and the switch moved no one's cycles by more than 1%. SurrealDB's and Qdrant's tails are in
+  milliseconds, which these exits move little. The Router's tails at its ranked rate are confounded
+  by idle states, so none is quoted here. Qdrant's rounds of 2026-10-26 and 27 had it off.
 - **Why Connect over HTTP/2 goes into its idle mode more than gRPC**, whose extra trailers frame
   changes how work splits between the connection and stream tasks. Not looked into.
 - **The Router with many distinct operations.** Three operations here; a production graph would hold
