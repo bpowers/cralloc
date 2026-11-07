@@ -160,6 +160,27 @@ static __attribute__((noinline)) void reallocs(uint64_t n, size_t size) {
     }
 }
 
+/* As rust-alloc's churn: free a random one of 10,000 live blocks, allocate one of another size. */
+static __attribute__((noinline)) void churn(uint64_t n) {
+    enum { LIVE = 10000 };
+    static void *live[LIVE];
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+#define NEXT() (x ^= x << 13, x ^= x >> 7, x ^= x << 17, x)
+#define SIZE(r) (16 + (size_t)(((r) >> 20) % 63) * 8)
+    for (int i = 0; i < LIVE; i++) live[i] = malloc(SIZE(NEXT()));
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t r = NEXT();
+        uint64_t at = r % LIVE;
+        free(live[at]);
+        void *p = malloc(SIZE(r));
+        *(uint64_t *)p = r;
+        live[at] = p;
+    }
+    for (int i = 0; i < LIVE; i++) free(live[i]);
+#undef NEXT
+#undef SIZE
+}
+
 int main(int argc, char **argv) {
     int cpu = (int)env_u("RF_CPU", 13);
     cpu_set_t set;
@@ -193,6 +214,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(form, "mixed")) mixed(iters);
             else if (!strcmp(form, "calloc")) callocs(iters, x);
             else if (!strcmp(form, "realloc")) reallocs(iters, x);
+            else if (!strcmp(form, "churn")) churn(iters);
             else {
                 fprintf(stderr, "unknown form %s\n", argv[a]);
                 return 2;

@@ -16,6 +16,8 @@ mkdir -p "$copy"
 rsync -a --delete --exclude target --exclude .git --exclude '*.orig' --exclude out --exclude results \
   --exclude 'bench/allocators.toml' --exclude third_party "$root/" "$copy/" 2>/dev/null || true
 [ -f "$copy/bench/allocators.toml" ] || cp "$root/bench/allocators.toml" "$copy/bench/allocators.toml"
+# variant.py keeps the routines as they came beside them; they just came again.
+find "$copy/crates/cralloc/src" -name '*.orig' -delete
 common=$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)
 export BENCH_BASELINES=${BENCH_BASELINES:-$(dirname "$common")/bench/baselines/out}
 page=$(getconf PAGESIZE)
@@ -45,6 +47,7 @@ EOF
     cd "$copy/bench"
     "$root/scripts/heavy" env ${envs[@]+"${envs[@]}"} cargo build -q --release -p bench-workloads -p bench-rpc \
       --features bench-alloc/cralloc --target-dir "target/$name"
+    [ -z "$pad" ] || exit 0
     cd roofline/rust-alloc
     "$root/scripts/heavy" env ${envs[@]+"${envs[@]}"} cargo build -q --profile lto --features asm --target-dir "target/$name"
   )
