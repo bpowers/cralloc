@@ -87,6 +87,8 @@ if want streams; then
   run origin 4G "$bin/streams" origin "$BIG"
   run sawtooth 6G "$bin/streams" sawtooth "$BIG" 512
   run pointers 6G "$bin/streams" pointers "$BIG" 2048
+  run magazine 4G "$bin/streams" magazine "$BIG" 512
+  [ -n "$LITTLE" ] && run magazine-little 4G "$bin/streams" magazine "$LITTLE" 512
 fi
 
 if want kernel; then

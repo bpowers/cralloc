@@ -16,10 +16,10 @@ fn sys(cpu: usize, leaf: &str) -> Option<String> {
 fn domain(cpu: usize) -> Vec<usize> {
     let mut best = vec![cpu];
     for index in 0..8 {
-        if let Some(list) = sys(cpu, &format!("cache/index{index}/shared_cpu_list")) {
-            if !list.is_empty() {
-                best = parse_cpus(&list);
-            }
+        if let Some(list) = sys(cpu, &format!("cache/index{index}/shared_cpu_list"))
+            && !list.is_empty()
+        {
+            best = parse_cpus(&list);
         }
     }
     best

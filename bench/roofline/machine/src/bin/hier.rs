@@ -51,14 +51,7 @@ fn latency(cpu: usize, pages: Pages, max_mib: usize) {
         let start = link(&at);
         let loads = lines.clamp(1 << 18, 1 << 24);
         let t = time_chase(start, loads, lines.max(1 << 16), 3, &cycles);
-        println!(
-            "{:9} {:8.2} {:8.2} {:6.3} {:6}",
-            size >> 10,
-            t.cycles,
-            t.ns,
-            t.cycles / t.ns,
-            huge_mib()
-        );
+        println!("{:9} {:8.2} {:8.2} {:6.3} {:6}", size >> 10, t.cycles, t.ns, t.cycles / t.ns, huge_mib());
         // Halves and doubles: enough points to see each step.
         size = if size.is_power_of_two() { size + size / 2 } else { size / 3 * 4 };
     }
@@ -85,8 +78,8 @@ fn tlb(cpu: usize) {
     let cycles = Counter::cycles(cpu);
     let page = page();
     let counts = [
-        16usize, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 320, 384, 512, 768, 1024, 1536, 2048, 2560,
-        3072, 3328, 3584, 4096, 5120, 6144, 8192, 12288, 16384, 32768, 65536,
+        16usize, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 320, 384, 512, 768, 1024, 1536, 2048,
+        2560, 3072, 3328, 3584, 4096, 5120, 6144, 8192, 12288, 16384, 32768, 65536,
     ];
     println!("# one line a page, random order, CPU {cpu}, page {page}: cycles a load");
     println!("# pages  span_MiB  small  huge  extra  small_ns  huge_ns  extra_ns");
@@ -176,7 +169,10 @@ fn index_unit(cpu: usize) {
     pin(cpu);
     let cycles = Counter::cycles(cpu);
     let map = Map::resident(1 << 30, Pages::Huge);
-    println!("# twice the ways at a way's span, every second line moved by a unit, CPU {cpu}, huge pages back {} MiB", huge_mib());
+    println!(
+        "# twice the ways at a way's span, every second line moved by a unit, CPU {cpu}, huge pages back {} MiB",
+        huge_mib()
+    );
     let units: Vec<usize> = std::iter::once(0).chain((3..=19).map(|k| 1usize << k)).collect();
     print!("# way_KiB  lines by unit");
     for u in &units {
@@ -190,8 +186,7 @@ fn index_unit(cpu: usize) {
                 print!(" {:>6}", "-");
                 continue;
             }
-            let mut at: Vec<*mut u8> =
-                (0..n).map(|i| map.p.wrapping_add(i * span + (i % 2) * unit)).collect();
+            let mut at: Vec<*mut u8> = (0..n).map(|i| map.p.wrapping_add(i * span + (i % 2) * unit)).collect();
             Rng(0x3141_5926 + n as u64).shuffle(&mut at);
             let t = time_chase(link(&at), 1 << 17, n * 8, 3, &cycles);
             print!(" {:6.1}", t.cycles);
@@ -238,8 +233,8 @@ fn prefetch(cpu: usize, pages: Pages, mib: usize) {
     println!("random {:8.2} {:8.2} {:6.3}", random.cycles, random.ns, 1.0);
     all.clear();
     for stride in [
-        64isize, -64, 128, -128, 192, -192, 256, -256, 320, -320, 384, -384, 512, -512, 640, -640, 768, -768, 1024, -1024, 1536,
-        -1536, 2048, -2048, 3072, -3072, 4096, -4096, 8192, -8192, 16384, -16384,
+        64isize, -64, 128, -128, 192, -192, 256, -256, 320, -320, 384, -384, 512, -512, 640, -640, 768, -768, 1024,
+        -1024, 1536, -1536, 2048, -2048, 3072, -3072, 4096, -4096, 8192, -8192, 16384, -16384,
     ] {
         // Enough passes for the walk to leave every cache behind at each stride.
         let abs = stride.unsigned_abs();
@@ -263,7 +258,10 @@ fn run_length(cpu: usize, mib: usize) {
     let cycles = Counter::cycles(cpu);
     let len = mib << 20;
     let map = Map::resident(len, Pages::Huge);
-    println!("# a jump to a random 64 KiB block, then k lines; {mib} MiB, huge pages back {} MiB, CPU {cpu}", huge_mib());
+    println!(
+        "# a jump to a random 64 KiB block, then k lines; {mib} MiB, huge pages back {} MiB, CPU {cpu}",
+        huge_mib()
+    );
     println!("# k  up_cycles_a_load  down_cycles_a_load  up_ns  down_ns");
     let block = 64usize << 10;
     let blocks = len / block;
@@ -315,7 +313,19 @@ unsafe fn read_pass(p: *const u8, size: usize) {
 fn bandwidth(cpus: &[usize]) {
     println!("# CPUs {cpus:?} at once; GiB/s for each and all together");
     println!("# size_KiB  read  zero  fill  copy  (per CPU, sum of medians)");
-    let sizes = [32usize << 10, 64 << 10, 96 << 10, 256 << 10, 1 << 20, 4 << 20, 8 << 20, 32 << 20, 64 << 20, 256 << 20, 1 << 30];
+    let sizes = [
+        32usize << 10,
+        64 << 10,
+        96 << 10,
+        256 << 10,
+        1 << 20,
+        4 << 20,
+        8 << 20,
+        32 << 20,
+        64 << 20,
+        256 << 20,
+        1 << 30,
+    ];
     for &size in &sizes {
         let barrier = Barrier::new(cpus.len());
         let results: Vec<[f64; 4]> = std::thread::scope(|s| {
@@ -354,14 +364,7 @@ fn bandwidth(cpus: &[usize]) {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         let sum = |k: usize| results.iter().map(|r| r[k]).sum::<f64>();
-        println!(
-            "{:9} {:7.1} {:7.1} {:7.1} {:7.1}",
-            size >> 10,
-            sum(0),
-            sum(1),
-            sum(2),
-            sum(3)
-        );
+        println!("{:9} {:7.1} {:7.1} {:7.1} {:7.1}", size >> 10, sum(0), sum(1), sum(2), sum(3));
     }
 }
 

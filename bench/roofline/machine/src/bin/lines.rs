@@ -118,6 +118,7 @@ fn granule(a: usize, b: usize, ms: u64, rounds: usize) {
         median(&mut v)
     };
     let (alone_rmw, alone_ldadd) = (alone(Op::Rmw), alone(Op::Ldadd));
+    #[allow(clippy::needless_range_loop)]
     for r in 0..rounds {
         rng.shuffle(&mut order);
         for &i in &order {
@@ -173,7 +174,8 @@ fn neighbour(cpu: usize, mib: usize) {
     };
     let base = run(None);
     println!(" none {:8.1} {:8.1}", base.cycles, base.ns);
-    for d in [8isize, 56, 64, 72, 120, 128, 136, 192, 256, 384, 512, 1024, 2048, -8, -64, -128, -192, -256, -512, -1024] {
+    for d in [8isize, 56, 64, 72, 120, 128, 136, 192, 256, 384, 512, 1024, 2048, -8, -64, -128, -192, -256, -512, -1024]
+    {
         let t = run(Some(d));
         println!("{d:5} {:8.1} {:8.1} {:8.1}", t.cycles, t.ns, t.cycles - base.cycles);
     }

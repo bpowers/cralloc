@@ -7,6 +7,7 @@
 //! streams origin CPU                              classes' first pages in a region of 4 GiB each
 //! streams sawtooth CPU [MiB]                      a walk in the order magazines hand objects out
 //! streams pointers CPU [MiB]                      an array of pointers against one of offsets
+//! streams magazine CPU [MiB]                       the same in pops of magazines of each size
 //! ```
 use roofline_machine::*;
 
@@ -20,9 +21,8 @@ fn parse_pages(s: Option<&String>) -> Pages {
 /// `count` buffers of `each` bytes in slots of `slot` bytes, each moved by `step` times its index
 /// modulo `slots`, written one word at a time in turn, as vectors filled together are.
 fn stagger_pass(map: &Map, count: usize, each: usize, slot: usize, step: usize, slots: usize) -> f64 {
-    let starts: Vec<*mut u64> = (0..count)
-        .map(|i| map.p.wrapping_add(i * slot + step * (i % slots.max(1))).cast())
-        .collect();
+    let starts: Vec<*mut u64> =
+        (0..count).map(|i| map.p.wrapping_add(i * slot + step * (i % slots.max(1))).cast()).collect();
     let words = each / 8;
     let mut best = f64::MAX;
     for _ in 0..3 {
@@ -136,12 +136,17 @@ fn written_in_turn(starts: &[*mut u64], words: usize) -> f64 {
 fn rule(cpu: usize, pages_kind: Pages) {
     pin(cpu);
     let page = page();
-    println!("# stagger(i) = 64 * (i % 64) + page * (i % P), P = page_term(slot); CPU {cpu}, page {page}, {pages_kind:?} pages");
+    println!(
+        "# stagger(i) = 64 * (i % 64) + page * (i % P), P = page_term(slot); CPU {cpu}, page {page}, {pages_kind:?} pages"
+    );
     println!("# slot_pages slot_KiB  P  room_KiB  ns_an_element by streams, each: none, lines, rule");
-    let classes = [8usize, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 1024];
+    let classes = [
+        8usize, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448,
+        512, 640, 768, 1024,
+    ];
     for &c in &classes {
         let slot = c * page;
-        if slot * 64 >> 20 > max_mib(6144) {
+        if (slot * 64) >> 20 > max_mib(6144) {
             break;
         }
         let map = Map::resident(64 * slot + slot, pages_kind);
@@ -175,7 +180,9 @@ fn origin(cpu: usize) {
     let map = Map::new(classes_most * REGION + (1 << 34), Pages::Small);
     // Regions aligned to their size, as a heap's are.
     let base = map.p.map_addr(|a| (a + REGION - 1) & !(REGION - 1));
-    println!("# classes at a region's size apart, CPU {cpu}, page {page}: cycles a load, by span of the origins in pages");
+    println!(
+        "# classes at a region's size apart, CPU {cpu}, page {page}: cycles a load, by span of the origins in pages"
+    );
     let spans = [0usize, 16, 32, 64, 128, 256, 512, 1024];
     print!("# classes pages_each");
     for s in spans {
@@ -184,9 +191,11 @@ fn origin(cpu: usize) {
     println!();
     let step_for = |span: usize| -> usize {
         // The odd number nearest the span over the golden ratio.
-        ((span as f64 / 1.618_033_988) as usize) | 1
+        ((span as f64 / std::f64::consts::GOLDEN_RATIO) as usize) | 1
     };
-    for &(classes, pages_each) in &[(8usize, 1usize), (16, 1), (32, 1), (64, 1), (16, 4), (32, 4), (64, 4), (16, 16), (32, 16), (64, 16)] {
+    for &(classes, pages_each) in
+        &[(8usize, 1usize), (16, 1), (32, 1), (64, 1), (16, 4), (32, 4), (64, 4), (16, 16), (32, 16), (64, 16)]
+    {
         print!("{classes:9} {pages_each:10}");
         for &span in &spans {
             let mut colours = Rng(0xabab_cdcd + span as u64);
@@ -267,7 +276,10 @@ fn pointers(cpu: usize, mib: usize) {
             off_at.add(i).write(o as u32);
         }
     }
-    println!("# {count} random objects of {mib} MiB through one array in order, huge pages back {} MiB, CPU {cpu}", huge_mib());
+    println!(
+        "# {count} random objects of {mib} MiB through one array in order, huge pages back {} MiB, CPU {cpu}",
+        huge_mib()
+    );
     println!("# form  cycles_an_object  ns_an_object");
     let base = map.p as usize;
     let via_pointers = |up: bool| -> Timed {
@@ -310,6 +322,116 @@ fn pointers(cpu: usize, mib: usize) {
     }
 }
 
+/// One pass over magazines of `len` entries, highest entry first, touching each object, with `WORK`
+/// instructions between pops and no branch among them, which would hide the overlap behind its own
+/// prediction. With `CHAIN` each object's value feeds the next pop, so that nothing overlaps.
+#[inline(never)]
+fn pop_pointers<const WORK: usize, const CHAIN: bool>(at: *const usize, mags: usize, len: usize) -> usize {
+    let mut sum = 0usize;
+    for m in 0..mags {
+        for e in (0..len).rev() {
+            let i = m * len + if CHAIN { e + sum } else { e };
+            // SAFETY: `i` is in the array, and `sum` stays zero: the objects read zero.
+            let v = unsafe { (at.add(i).read_volatile() as *const usize).read_volatile() };
+            sum = sum.wrapping_add(v);
+            // SAFETY: no operands but the count; nops touch nothing.
+            unsafe {
+                std::arch::asm!(".rept {n}", "nop", ".endr", n = const WORK, options(nostack, nomem, preserves_flags))
+            };
+        }
+    }
+    sum
+}
+
+/// [`pop_pointers`] through 32-bit offsets, which look like no pointer.
+#[inline(never)]
+fn pop_offsets<const WORK: usize, const CHAIN: bool>(
+    at: *const u32,
+    base: usize,
+    line: usize,
+    mags: usize,
+    len: usize,
+) -> usize {
+    let mut sum = 0usize;
+    for m in 0..mags {
+        for e in (0..len).rev() {
+            let i = m * len + if CHAIN { e + sum } else { e };
+            // SAFETY: as in `pop_pointers`.
+            let v = unsafe { ((base + at.add(i).read_volatile() as usize * line) as *const usize).read_volatile() };
+            sum = sum.wrapping_add(v);
+            // SAFETY: as in `pop_pointers`.
+            unsafe {
+                std::arch::asm!(".rept {n}", "nop", ".endr", n = const WORK, options(nostack, nomem, preserves_flags))
+            };
+        }
+    }
+    sum
+}
+
+/// Popping magazines: each holds `len` pointers to objects scattered over the heap, as magazines do
+/// on a heap that has been running a while, and the program touches each object it is handed. The
+/// other arm holds the same objects as 32-bit offsets. `work` instructions stand between pops, for
+/// what a program does with an object. Chained, each object's value feeds the next pop; free, the
+/// core overlaps what it can, as it would in a program.
+fn magazine(cpu: usize, mib: usize) {
+    pin(cpu);
+    let cycles = Counter::cycles(cpu);
+    let len_bytes = mib << 20;
+    let map = Map::resident(len_bytes, Pages::Huge);
+    let line = line(cpu);
+    let count = (len_bytes / line).min(1 << 21);
+    let mut order: Vec<usize> = (0..len_bytes / line).collect();
+    Rng(0xfeed_face_cafe_1234).shuffle(&mut order);
+    order.truncate(count);
+    let ptrs = Map::resident(count * 8, Pages::Huge);
+    let offs = Map::resident(count * 4, Pages::Huge);
+    let ptr_at = ptrs.p.cast::<usize>();
+    let off_at = offs.p.cast::<u32>();
+    for (i, &o) in order.iter().enumerate() {
+        // SAFETY: both arrays hold `count` elements.
+        unsafe {
+            ptr_at.add(i).write(map.p.wrapping_add(o * line) as usize);
+            off_at.add(i).write(o as u32);
+        }
+    }
+    let base = map.p as usize;
+    println!(
+        "# {count} scattered objects of {mib} MiB, huge pages back {} MiB, CPU {cpu}: cycles an object, highest entry first",
+        huge_mib()
+    );
+    println!("# entries  work  chained_pointers chained_offsets  free_pointers free_offsets");
+    for len in [14usize, 30, 62, 126, 254, 510, 1022] {
+        let mags = count / len;
+        macro_rules! row {
+            ($work:literal) => {{
+                let best = |f: &dyn Fn() -> usize| -> f64 {
+                    let mut best = f64::MAX;
+                    for _ in 0..2 {
+                        let (t0, c0) = (ticks(), cycles.read());
+                        std::hint::black_box(f());
+                        let (c1, t1) = (cycles.read(), ticks());
+                        let c = if c1 > c0 { (c1 - c0) as f64 } else { ns_of(t1 - t0) };
+                        best = best.min(c / (mags * len) as f64);
+                    }
+                    best
+                };
+                println!(
+                    "{len:6} {:6} {:8.1} {:8.1} {:8.1} {:8.1}",
+                    $work,
+                    best(&|| pop_pointers::<$work, true>(ptr_at, mags, len)),
+                    best(&|| pop_offsets::<$work, true>(off_at, base, line, mags, len)),
+                    best(&|| pop_pointers::<$work, false>(ptr_at, mags, len)),
+                    best(&|| pop_offsets::<$work, false>(off_at, base, line, mags, len)),
+                );
+            }};
+        }
+        row!(0);
+        row!(64);
+        row!(256);
+        row!(1024);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -320,6 +442,7 @@ fn main() {
         Some("origin") => origin(cpu),
         Some("sawtooth") => sawtooth(cpu, num(3, 512)),
         Some("pointers") => pointers(cpu, num(3, 2048)),
-        _ => eprintln!("usage: streams stagger|rule|origin|sawtooth|pointers CPU ..."),
+        Some("magazine") => magazine(cpu, num(3, 512)),
+        _ => eprintln!("usage: streams stagger|rule|origin|sawtooth|pointers|magazine CPU ..."),
     }
 }

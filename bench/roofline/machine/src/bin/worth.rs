@@ -13,7 +13,8 @@ fn cgroup_mib() -> i64 {
     let read = || -> Option<i64> {
         let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
         let path = cg.lines().next()?.strip_prefix("0::")?.to_string();
-        let v: i64 = std::fs::read_to_string(format!("/sys/fs/cgroup{path}/memory.current")).ok()?.trim().parse().ok()?;
+        let v: i64 =
+            std::fs::read_to_string(format!("/sys/fs/cgroup{path}/memory.current")).ok()?.trim().parse().ok()?;
         Some(v >> 20)
     };
     read().unwrap_or(-1)
@@ -75,7 +76,11 @@ fn churn_once(cpu: usize, cycles: &Counter, len: usize, size: usize, pages: Page
 fn churn(cpu: usize, rounds: usize) {
     pin(cpu);
     let cycles = Counter::cycles(cpu);
-    println!("# objects of 64 bytes, CPU {cpu}, page {}, huge {}: median of {rounds} interleaved rounds", page(), huge());
+    println!(
+        "# objects of 64 bytes, CPU {cpu}, page {}, huge {}: median of {rounds} interleaved rounds",
+        page(),
+        huge()
+    );
     println!("# MiB  fill_ns_small fill_ns_huge  churn_ns_small churn_ns_huge  churn_cyc_small churn_cyc_huge  gain");
     for mib in [4usize, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
         if mib > max_mib(4096) {
@@ -250,7 +255,7 @@ fn contig(cpu: usize) {
     let small = Map::resident(span, Pages::Small);
     let whole = Map::resident(span, Pages::Huge);
     let split = Map::resident(span, Pages::Huge);
-    println!("# huge pages back {} MiB before the split, of {} MiB", huge_mib(), 2 * span >> 20);
+    println!("# huge pages back {} MiB before the split, of {} MiB", huge_mib(), (2 * span) >> 20);
     let before = vmstat("thp_split_pmd");
     for i in 0..32 {
         let q = split.p.wrapping_add(i * huge);

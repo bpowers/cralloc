@@ -11,7 +11,10 @@
 //! a system call, a small share of a window of a few milliseconds.
 use roofline_machine::*;
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::time::Duration;
 
 fn ramp(cpu: usize, window_ms: u64, windows: usize) {
@@ -67,7 +70,8 @@ fn deep_entries(cpu: usize) -> (String, u64) {
     let Ok(read) = std::fs::read_dir(&dir) else {
         return ("none".into(), 0);
     };
-    let deepest = read.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("state")).map(|e| e.path()).max();
+    let deepest =
+        read.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("state")).map(|e| e.path()).max();
     let Some(state) = deepest else {
         return ("none".into(), 0);
     };
@@ -108,7 +112,9 @@ fn wake(server: usize, client: usize) {
     let done = AtomicU32::new(0);
     let quit = AtomicBool::new(false);
     println!("# server on CPU {server}, client on {client}: a request every gap");
-    println!("# gap_us  wake_ns_p50  wake_ns_p90  waker_call_ns_p50  deep_entries_a_request  first_work_ns_a_load p50: 64KiB 512KiB 4MiB");
+    println!(
+        "# gap_us  wake_ns_p50  wake_ns_p90  waker_call_ns_p50  deep_entries_a_request  first_work_ns_a_load p50: 64KiB 512KiB 4MiB"
+    );
     let (word, posted, woke, worked, done, quit, chases) = (&word, &posted, &woke, &worked, &done, &quit, &chases);
     std::thread::scope(|s| {
         s.spawn(move || {
@@ -133,7 +139,13 @@ fn wake(server: usize, client: usize) {
         });
         pin(client);
         for gap_us in [0u64, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000] {
-            let reps = if gap_us >= 20_000 { 40 } else if gap_us >= 1000 { 100 } else { 300 };
+            let reps = if gap_us >= 20_000 {
+                40
+            } else if gap_us >= 1000 {
+                100
+            } else {
+                300
+            };
             let (mut wakes, mut calls, mut a, mut b, mut c) = (vec![], vec![], vec![], vec![], vec![]);
             let (name, before) = deep_entries(server);
             let gap = gap_us * tick_rate() / 1_000_000;

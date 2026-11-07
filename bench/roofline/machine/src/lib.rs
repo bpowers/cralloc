@@ -5,6 +5,9 @@
 //! kernel and sysfs. A heterogeneous machine has one PMU for each kind of core, so a counter is
 //! opened on the PMU of the CPU the thread is pinned to, not on `PERF_TYPE_HARDWARE`.
 #![cfg(target_arch = "aarch64")]
+// A probe's helpers take addresses in its own mappings, and marking each `unsafe` would say nothing
+// that the probes do not already.
+#![allow(clippy::not_unsafe_ptr_arg_deref, clippy::should_implement_trait)]
 
 use std::arch::asm;
 use std::ffi::c_void;
