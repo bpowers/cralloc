@@ -1,7 +1,7 @@
 # How we measure, and what has fooled us
 
-Every trap below produced a wrong conclusion that we wrote down before we found it. The rules that
-came from them:
+Each trap below misled us, and most reached a note as a wrong conclusion. The rules that came from
+them:
 
 - **Never compare two builds by one number each.** Switch the behaviour at run time in one binary,
   or compare means over a sweep of code placements. One build stands for any point in a range of 1
@@ -19,25 +19,28 @@ says why. Everything was measured on one machine (below).
 
 ### One number from each of two builds measures where the code landed
 
-**What we concluded.** That an edit had slowed the 4 MiB grow loop by 40%, 1,765k cycles a
-repetition against 1,262k. That moving to tokio 1.54 cost cralloc 3.6% on `connect log grpc h2`
+**What we concluded.** That cralloc was 17% behind glibc on the 4 MiB grow loop, a figure taken with
+its loop in a good place. That moving to tokio 1.54 cost cralloc 3.6% on `connect log grpc h2`
 through tokio's run-queue headers. That striding whole magazines cost the RPC log jobs 2 to 3% and
 striding first fills 1 to 2%, which is how the sibling stride's bound of 64 objects was chosen. All
 separate builds, interleaved, several runs each.
 
-**How we found out.** The two grow-loop binaries retired the same instructions with the same
-counters, and the loop was byte for byte the same; an unrelated edit had moved it. Builds of one
-stride rule that differed only in code ranged from 3.9% below main to 1.5% above it, with
-instructions level. A function of N bytes that never runs, ahead of all other code, moves it by
-exactly N: N = 0 to 64 ran 126.9 to 132.4k cycles a request. With the stride switched at run time
-inside one binary: off 129.3k, 16 siblings 129.0, 64 siblings 130.1, whole magazines 129.3. The
-headers were worth nothing measurable there, and the bound of 64 rests on nothing.
+**How we found out.** A later build of the same source ran the grow loop 40% slower, 1,765k cycles a
+repetition against 1,262k, at the same instructions and counters, with the loop byte for byte the
+same; an unrelated edit had moved it. Builds of one stride rule that differed only in code ranged
+from 3.9% below main to 1.5% above it, with instructions level. A function of N bytes that never
+runs, ahead of all other code, moves it by exactly N: N = 0 to 64 ran 126.9 to 132.4k cycles a
+request. With the stride switched at run time inside one binary: off 129.3k, 16 siblings 129.0, 64
+siblings 130.1, whole magazines 129.3. The headers were worth nothing measurable there, and the
+bound of 64 rests on nothing.
 
 **Why.** The slow builds starve the front end: 38k more empty dispatch slots at eight a cycle make
-4.8k cycles, the whole difference between a slow and a fast build. Over 90% of the extra op-cache
-misses fall in the service's generated protobuf decoder, and the allocator's code comes first in the
-binary, so any change to its size moves the decoder. The period is longer than a line, so no
-alignment fixes it, and the sensitive code is not ours.
+4.8k cycles, the whole difference between a slow and a fast build. Over 90% of the difference in
+sampled op-cache misses falls in the service's generated protobuf decoder. That is where the samples
+fall, not a forced result: the pad moves all later code at once and the decoder was not moved alone,
+and cralloc's own `realloc` is among the movers. The allocator's code comes first in the binary, so
+any change to its size moves the decoder. The period is longer than a line, so no alignment fixes
+it.
 
 **How large, today** (2026-10-28 at `2ff7322`, five placements, computed from the raw records):
 
@@ -47,16 +50,19 @@ alignment fixes it, and the sensitive code is not ours.
 | Order service, 4 jobs | 1.7 to 3.1% (1.2 to 2.7%) | mostly under 1.5% |
 | Sozu proxy | 2.8% (2.3%) | 2 to 3%: partly a mode of its work |
 | Log store; mini-redis | 1.4%; 1.4% (2.8%; 1.0%) | under 1% |
+| `rpc log c64`; `rpc echo c64` | 1.8%; 0.8% (5.8%; 1.1%) | 1 to 2.5% |
 
 Noise within one placement is a median half-range of 0.1 to 0.7%, so more placements help more than
-more rounds. One build of an allocator against one of cralloc on these ten jobs differs from the
-answer over placements by 1.9 points (standard deviation), and at worst by 6.8. The sign is wrong in
-1% of pairs where the gap is 1.5% or more, and in 29% where it is smaller. The Router is not
-sensitive (0.3 to 0.9%); JSON spreads 3.5 to 6.7% and the tree 3 to 9%
-([program-effects.md](program-effects.md)). Two builds of `mpmc p4 c4` whose sources differed only
-in a doc comment ran 4.2 and 4.9 ns in every session. Scratch builds that switched off rules a job
-barely reaches moved one Vec by up to 9% and rpc log by up to 4.7% (2026-10-18). Tails do it too:
-two builds of Meilisearch read +2.0 ms at p99.9 where one binary with a switch reads 0.0.
+more rounds. One build of an allocator (the median of 1 to 3 runs) against one of cralloc on the ten
+server jobs differs from the answer over placements by 1.9 points (standard deviation), and at worst
+by 6.8; a single run of each, by 2.4 points, at worst 14.2. The sign is wrong in 1% of pairs where
+the gap is 1.5% or more, and in 29% where it is smaller, all on Sozu and mini-redis, whose gaps are
+mostly unresolved anyway. The Router is not sensitive (0.3 to 0.9%); JSON spreads 3.5 to 6.7% and
+the tree 3 to 9% ([program-effects.md](program-effects.md)). Two builds of `mpmc p4 c4` whose
+sources differed only in a doc comment ran 4.2 and 4.9 ns in every session. Scratch builds that
+switched off rules a job barely reaches moved one Vec by up to 9% and rpc log by up to 4.7%
+(2026-10-18). Tails do it too: two builds of Meilisearch read +2.0 ms at p99.9 where one binary with
+a switch reads 0.0.
 
 **The rule.**
 
@@ -88,7 +94,8 @@ us to leave) or C3 (declares 350). Three checks:
   others within 0.4 us; cycles and saturated rates within 1%.
 
 **Why.** At one rate the faster server idles longer between requests, so its CPUs go deep more
-often. The allocator does nothing during these requests.
+often. The allocator does nothing during these requests. The load generator's CPUs busy-poll and
+never enter an idle state, so none of this is the client.
 
 **The rule.** Every server run records its deep entries per thousand requests, and the report marks
 two tails "confounded by idle" when those rates differ by 1.2 times and by at least 1 a thousand
@@ -97,16 +104,17 @@ switches the deep states off on the server's CPUs. The standings run that way.
 [servers.md](servers.md) has what sets the tails that remain.
 
 The default `SCHED_IDLE` spinner on each server CPU's SMT sibling removes C3's millisecond tails,
-but shares the core: cycles a request rise by a third on the order service, for everyone alike, so
-absolute cycles here are not a quiet core's. A spinner on the server's own CPU is no substitute: 40
-to 50% of requests went over 42 us. And p99.9 is noisy: medians to p99 repeat within 1 to 5%, p99.9
-within 10 to 50% in the millisecond regime.
+but shares the core: it raises jemalloc's cycles a request on the order service by 17%, alike for
+every allocator, so absolute cycles here are not a quiet core's. (cralloc's rise was once a third,
+and the rest was the magazine-end lock, since fixed: [servers.md](servers.md).) A spinner on the
+server's own CPU is no substitute: 40 to 50% of requests went over 42 us. And p99.9 is noisy:
+medians to p99 repeat within 1 to 5%, p99.9 within 10 to 50% in the millisecond regime.
 
 ### A short job after idle runs at the wrong clock
 
-**What we concluded.** That the large-object pipeline and tokio spawn ran in two modes, and that
-moves of several percent between sessions were changes to the allocator. Runs spread by up to 30% in
-time, and every ranking by time carried it.
+**What we reported.** That the large-object pipeline and tokio spawn ran in two modes. Moves between
+sessions went out as slowdowns or "not attributed", such as 14% on the split pipeline, part of which
+was a cold median. Runs spread by up to 30% in time, and every ranking by time carried it.
 
 **How we found out.** Cycles were flat across the spread. The pipeline took 62 ns an allocation in
 seven rounds and 79 to 81 in three, at 700 to 711 cycles in all ten. Run after a pause of 0.2 s it
@@ -124,21 +132,27 @@ job ranked by cycles is not.
 clock, within 3%, for three 5 ms windows: 15 ms a run. Every run records its clock, and the report
 counts runs over 5% below their allocator's usual clock on the job: 665 of 4,800 before, 4 after.
 
-### glibc's wins were the length of the binary's path
+### glibc's spawn result moved with the length of the binary's path
 
-**What we concluded.** That glibc was best on `spawn t4` (99 ns a task, cralloc 31% behind), and
-that the gap was something cralloc did to tasks.
+**What we took it for.** glibc as the bar on tokio `spawn`: 99 ns a task at four threads, with
+cralloc 31% behind. That figure was one draw from a range the path decided.
 
-**How we found out.** The same glibc binary ran `spawn t8` at 178 ns a task from a 101-byte path and
-235 from a 62-byte one. `std::env::args` appears to allocate the path ahead of everything tokio
+**How we found out.** Hard links to one glibc binary ran `spawn t8` at 192 to 227 ns a task, at
+paths 8 to 40 bytes longer. `std::env::args` appears to allocate the path ahead of everything tokio
 allocates, and glibc's 16-byte header then decides whether tokio's scheduler handle has its hot
 counter and a neighbour on one line.
 
+**What was left was real.** tokio 1.54 padded that line, and glibc then ran 180.9 to 183.9 ns at any
+path length. It still beat cralloc, 98.7 and 186.3 ns at four and eight threads against 111.6 and
+203.0, as jemalloc did. The cause was where cralloc's 40-byte class put tokio's run-queue headers,
+and the sibling stride closed it: 96 and 186 ns ([program-effects.md](program-effects.md)).
+
 **The rule.** Binaries at paths of equal length, environments of equal length. The runner's control
-cannot catch this: it does not test effects that differ by allocator entry. On the order service an
-environment variable's length alone moved the slowest request of a burst's first 5 ms by 20 to 115
-us; a dummy of equal length made the arms overlap (2026-10-21). tokio 1.54 padded the handle's line,
-and glibc then ran 180.9 to 183.9 ns at any path length.
+cannot catch this: it does not test effects that differ by allocator entry. On the order service the
+slowest request of a burst's first 5 ms was 20 to 115 us longer in every run of one arm, the same
+program as the other until shutdown, and most of that was an environment variable's length: with a
+dummy of equal length the slowest requests overlap, though p99 stayed 10 to 25 us higher
+(2026-10-21).
 
 ### Single runs on a shared machine drift by up to three times
 
@@ -147,9 +161,10 @@ every allocator in turn, because the job read a disk the machine shares. On `/de
 That tcmalloc took 17% fewer cycles on the drift study's swing job: one round. Three rounds gave 1
 to 17%, and that job's consumers spin on an empty queue, so its cycles count waiting.
 
-**How we found out.** Memory-bound jobs drifted by up to three times over half an hour with no load
-on their own CPU or its sibling (jemalloc on `churn live=1M`, 372 to 124 cycles an operation,
-2026-10-17). Builds on the same L3 were enough.
+**How we found out.** Every context switch on the server's CPUs put Qdrant's searchers in page
+faults on its payload store, the same in every arm. And memory-bound jobs drifted by up to three
+times over half an hour with no load on their own CPU or its sibling (jemalloc on `churn live=1M`,
+372 to 124 cycles an operation, 2026-10-17); builds on the same L3 were enough.
 
 **The rule.** Timed work goes through `scripts/measure`, builds and tests through `scripts/heavy`.
 The runner marks a run invalid over 0.1 CPUs of other work in a server segment, or 0.25 over any
@@ -181,7 +196,7 @@ moves under about 2%.
   build. Build every arm the same way. And the link can place a load on a hot word's page offset;
   `build` and `run` refuse that ([roofline.md](roofline.md)).
 - **Memory figures have edges.** A script's "after close" column took the last point of the memory
-  curve, about 300 ms after the end mark, in shutdown: jemalloc read 1,466 MiB on the store where it
+  curve, 0.3 to 6 s after the end mark, in shutdown: jemalloc read 1,466 MiB on the store where it
   held 1,542. Meilisearch's "peak under load" of 894 MiB was the first sample of its fill, left from
   indexing; through 70% load it reaches at most 710 to 739. Both found rereading the raw data,
   2026-11-06. Sozu's summed resident set once counted the 180 MB executable in each process, 53 to
@@ -196,9 +211,12 @@ moves under about 2%.
   larson, DataFusion on two L3s, the order service over HTTP/2 (4 to 6% more instructions, not tied
   to a build), Qdrant's search routing. Look at the runs before reading a median.
 - **Wall time misleads on parallel programs:** nine screened programs jump 20 to 70% run to run
-  while their cycles stay within a few percent. **Huge pages tie results to the machine's state:**
-  jaq ran 1.74 to 2.31 s, and 1.48 to 1.53 an hour later. Every run records the `thp_*` and
-  `compact_*` counters.
+  while their cycles stay within a few percent.
+- **Huge pages tie results to the machine's state.** jaq ran 1.74 to 2.31 s, and 1.48 to 1.53 an
+  hour later; gix-hours under mimalloc spent 27% of its cycles under page faults, in
+  `isolate_freepages_block`. Every run records the `thp_*` and `compact_*` counters.
+- **A rule that counts time follows core speed.** The hold counts time, so the large mix's peak at 2
+  GiB is 2.03 times live on the measurement CPUs and 1.39 on shared cores.
 
 ## The method in brief
 
@@ -222,17 +240,21 @@ rest. Three forms: a pair (allocate one, free it), a call pair (each out of line
 instruction selection or layout, and we fix it by construction ([roofline.md](roofline.md)).
 
 **Statistics.** Kernel jobs: the median of per-round ratios against the best incumbent, with a 95%
-bootstrap interval; "level" when it includes 1. Servers: the mean over placements of the median at
-each; a difference is **resolved** when the two ranges over placements do not overlap, or an exact
-permutation test of the placements' medians gives p < 0.05, and otherwise it is inside the range.
-Across jobs: geometric mean, with the geometric standard deviation over jobs (population form).
-Tails: the median over runs of each run's percentile.
+bootstrap interval; "level" when it includes 1. The best incumbent is the best of eight builds:
+mimalloc's three forms (its crate bundles 3.3.2, not v3.5.3), both tcmallocs, jemalloc, glibc and
+snmalloc. Servers: the mean over placements of the median at each; a difference is **resolved** when
+the two ranges over placements do not overlap, or an exact permutation test of the placements'
+medians gives p < 0.05, and otherwise it is inside the range. Across jobs: geometric mean, with the
+geometric standard deviation over jobs (population form). Tails: the median over runs of each run's
+percentile.
 
 **The control.** `mimalloc-ctl` is mimalloc built a second time and run as another allocator. At
-`80643d2` (2026-10-22, 56 jobs) 4 intervals exclude no difference where chance predicts 2.8, the
-median absolute difference is 0.5% and the 90th percentile 2.1%; the largest are jobs with modes,
-sh8bench 23%, none excluding zero. So 1% is resolved on single-threaded jobs and a few percent on
-cross-thread ones. It does not catch code placement, since both copies place their code alike.
+`80643d2` (2026-10-22, 56 jobs) the median absolute difference is 0.5% and the 90th percentile 2.1%.
+Four intervals exclude no difference where chance predicts 2.8: JSON -1.1%, `rpc log c256` +1.0%,
+`rpc log c64` +0.9%, BTreeMap -0.3%. The largest are jobs with modes, sh8bench 23%, none excluding
+zero. So about 1% is resolved on single-threaded jobs and a few percent on cross-thread ones; on the
+RPC log jobs 2% is not (-2.1 and -2.4% at `e96086d`). It does not catch code placement, since both
+copies place their code alike.
 
 **Caveats that stay.** One CPU model and kernel: the rules should carry, the numbers will not. Why a
 loop costs what it does is inferred, not documented. THP `madvise` decides much of the

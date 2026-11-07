@@ -30,9 +30,9 @@ Each runs on CPUs 0-3 with its load generator on 8-11, the allocator as `#[globa
   connect-rust's log-ingest benchmark. A 50-record protobuf batch a request: small blocks freed
   where they were made, 55 `realloc`s a request over HTTP/2. HTTP/1.1 at 85k requests a second,
   HTTP/2 at 63k.
-- **The log store** (`connect store 1M`): the same server keeping a million records, 1.4 GiB. Every
-  other request replaces 50 records and every other streams back 100. 36.3k a second; 2,610
-  allocations a request.
+- **The log store** (`connect store 1M`): the same server keeping a million records, 1.06 GiB live
+  in a 1.4 GiB heap. Every other request replaces 50 records and every other streams back 100. 36.3k
+  a second; 2,610 allocations a request.
 - **The order service** (`orders axum`, `orders actix`, `orders axum h2`): written for the suite.
   Parse a JSON order, price it, keep the last 100k in a sharded map, about 180 MiB live; blocks are
   freed by whichever worker evicts them. 235k, 280k and 166k a second.
@@ -95,17 +95,20 @@ known.
 threads ([memory.md](memory.md)).
 
 - **`steady`:** a cache shared by all threads, sizes around 128 B, most frees another thread's.
-  **`shift`:** the same, the median moving 128, 384, 1024 B by phase.
+  **`shift`:** the same, the median moving 128, 384, 1024 B by phase ("the size shift").
 - **`lifetime`, "the lifetime mix":** short-lived FIFOs alternating between a high and a low total
   beside a long-lived cache. Its low phases are "troughs". With a size table per phase it "wanders".
 - **`swing`:** the steady cache filled by producers and drained by consumers, busy threads 8, 2, 8,
   1, 8, 4 by phase. Its consumers spin, so its cycles count waiting.
-- **`large`, "the large mix":** a 1 GiB cache of buffers from 40 KiB to 32 MiB by phase, half built
-  by doubling with `realloc`.
+- **`large`, "the large mix"** (also the large-buffer job or cache, the large-block mix): a 1 GiB
+  cache of buffers from 40 KiB to 32 MiB by phase, half built by doubling with `realloc`. The
+  big-buffer variant makes one buffer in a hundred ten times larger.
 - **mini-redis rewritten:** 1.2M keys overwritten through phases of wide and small values. **The
   soak:** Qdrant on disk beside jemalloc for 10.6 hours of varied phases.
 - **Short probes:** `quiet` frees most of a heap and watches what stays (`burst-small`,
-  `burst-idle`). `regrow` times one `realloc` a class up.
+  `burst-idle`). `touch` is the "phase change": eight CPUs use every class, then one CPU uses one.
+  `workload burst` allocates a burst of one class and frees it in reverse. `regrow` times one
+  `realloc` a class up.
 
 ## The kernel suite
 
@@ -120,8 +123,8 @@ alternates L3s between neighbours, `both` fills one then the other.
   ([magazines.md](magazines.md)).
 - **`all-alloc`, `free-only`:** whether threads that only free first allocate once, as a service's
   do. jemalloc gives a free-only thread no thread cache: 22 ns against 7.6.
-- **`pipeline t2 sizes=large`:** 4 to 256 KiB crossing threads: 60.6, 40, 299, 41.7, 338 (per-thread
-  tcmalloc 35.5). The one cross-thread job cralloc loses.
+- **`pipeline t2 sizes=large`, "the large pipeline":** 4 to 256 KiB crossing threads: 60.6, 40, 299,
+  41.7, 338 (per-thread tcmalloc 35.5). The one cross-thread job cralloc loses.
 - **`exchange`:** a ring, each thread freeing what the last sent. **`mpmc`:** a shared queue.
   **`forkjoin`:** rayon stages. All three as `pipeline`: 3.7, 6.9, 7.6, 11.9, 45 ns on `exchange
   t2`.
@@ -130,11 +133,12 @@ alternates L3s between neighbours, `both` fills one then the other.
 - **`churn live=N`:** free a random object and allocate another. `live=100` sits in L1: 21.6, 37.3,
   33.9, 45.3, 34.8 cycles an operation. `live=10M` reaches DRAM: 208, 299, 245, 426, 457, and the
   suite's largest peak, about 1.1 GiB.
-- **`map btree`, `map hash`, `tree`, `json`:** build and drop, where mimalloc's huge pages tell.
-  `map hash` 533, 609, 636, 462, 1,108 cycles an entry; `json 32Mi` 16.0, 28.8, 23.4, 16.8, 22.8
-  cycles a byte.
+- **`map btree 1M` ("BTreeMap"), `map hash 1M` ("HashMap"), `tree depth=18` and `20` ("the Box
+  tree"), `json`:** build and drop, where mimalloc's huge pages tell. `map hash` 533, 609, 636, 462,
+  1,108 cycles an entry; `json 32Mi` 16.0, 28.8, 23.4, 16.8, 22.8 cycles a byte.
 - **`vecgrow`:** vectors doubled by `realloc`, filled by `memset` so that the job measures growth
-  and not a push loop. One to 256 MiB: 2.18, 11.8, 14.5, 9.65, 6.66 cycles an element.
+  and not a push loop. `vecgrow 1x256Mi` ("one Vec to 256 MiB"): 2.18, 11.8, 14.5, 9.65, 6.66 cycles
+  an element. `vecgrow 64x4Mi` ("64 Vecs", "the 64-Vec job"): 4.89, 6.42, 8.63, 3.95, 8.72.
 - **`largepair`:** one 64 KiB and one 1 MiB block, allocated, written once and freed: 49.9, 59.1,
   131, 90.5, 8.07 ns a pair. glibc serves both from the top of its heap.
 - **C programs, preloaded:** `larson` (C++ through libstdc++'s operators), `xmalloc-test` (two modes
@@ -162,22 +166,28 @@ do not rank.
 - **jaq** (20%): the most allocation-bound, 37% of glibc's cycles, 38M live blocks; moves with THP
   state.
 - **boa** (23%): cralloc 10% ahead of jemalloc, its best case. **egglog** (16%): median lifetime
-  under 100 ns; mimalloc led by 8%. **rhai** (9%): a heap under 4 MB isolates the fast path;
-  mimalloc led by 6%.
+  under 100 ns; mimalloc 7% ahead in cycles. **rhai** (9%): a heap under 4 MB isolates the fast
+  path; mimalloc 7% ahead.
 - **pulldown-cmark** (13%): one buffer grown to 1 GiB. The allocator's code is 0.1% of cycles, yet
   allocators differ through faults and how the block grows.
 - **ruff check** (15% on one thread, 12% on eight, 27% cross-thread frees). **oxlint** (10%): 41%
-  cross-thread. **rust-analyzer** (13%): salsa's graph, 11M live blocks, steady; mimalloc led by 5%.
-  **typst** (14%): a steady 770 MB; mimalloc led by 9%.
+  cross-thread. **rust-analyzer** (13%): salsa's graph, 11M live blocks, steady; mimalloc 4% ahead.
+  **typst** (14%): a steady 770 MB; mimalloc 7% ahead.
 - **datafusion** (10%): the widest size mix. **gix-hours** (11%): 30% of calls are `realloc`, 2.6
   GB. **tpchgen** (7%). **uv-loop** (17%): short processes, 43% of cycles in the kernel. **axum**
   (15%) and **actix** (24%): the order service; under actix half its blocks are freed on another
   thread.
-- **Controls:** ripgrep and rav1e, zero spread in cycles. **cargo-resolve** (25%; mimalloc 13%
+- **Controls:** ripgrep and rav1e, zero spread in cycles. **cargo-resolve** (25%; mimalloc 10%
   ahead) needs a private, pinned `CARGO_HOME` first.
 
 The suite has built boa, ruff, DataFusion and the order service, with tpchgen beside it; the rest
 are candidates. Sozu, the Router, Meilisearch, Qdrant and SurrealDB came later, as real servers.
+
+**What real programs' allocations look like.** In almost every program 75 to 100% of blocks are 256
+bytes or less; tpchgen, oxipng, datafusion and pulldown-cmark are the exceptions. `realloc` is 30%
+of gix's calls and 28% of tokei's, 90 to 99% of them doubling. The median block lives under 1 us in
+egglog, rhai, starlark, axum, mini-redis and rust-analyzer, and about as long as the process in jaq,
+boa and actix.
 
 **Rejected:**
 
