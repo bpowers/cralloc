@@ -1065,15 +1065,73 @@ mod tests {
     use crate::os::sim::{Native, Shape, Standard, Tiny};
     use crate::space::{Geometry, Plan};
 
-    /// The plans the tests cover: the largest and smallest of the design, and the simulator's.
-    fn plans() -> [Plan; 5] {
+    /// The plans the tests cover: the largest and smallest of the design and of the kernels with
+    /// larger pages, and the simulator's.
+    fn plans() -> [Plan; 11] {
         [
             Geometry::DESIGN.largest_plan(),
             Geometry::DESIGN.smallest_plan(),
+            Geometry::of_kernel(12).largest_plan(),
+            Geometry::of_kernel(12).smallest_plan(),
+            Geometry::of_kernel(14).largest_plan(),
+            Geometry::of_kernel(14).smallest_plan(),
+            Geometry::of_kernel(16).largest_plan(),
+            Geometry::of_kernel(16).smallest_plan(),
             Standard::GEOMETRY.largest_plan(),
             Native::GEOMETRY.largest_plan(),
             Tiny::GEOMETRY.largest_plan(),
         ]
+    }
+
+    /// Every stagger lies in its slot, multiples of 64 bytes, and a block is found again from where
+    /// it starts: at the slot's start or at its stagger, and nowhere else. The room covers it.
+    #[test]
+    fn a_stagger_is_a_multiple_of_a_line_in_its_slot_and_its_block_is_found_again() {
+        use crate::back::policy::{STAGGER_STEP, stagger_room};
+        for plan in plans() {
+            let geometry = plan.geometry();
+            for class in Class::all().filter(|&c| !c.is_small()) {
+                let Some(layout) = Layout::new(plan, class) else {
+                    continue;
+                };
+                let room = stagger_room(geometry, class.size());
+                for slot in (0..300).map(|s| s % layout.slots()) {
+                    let into = layout.stagger(slot);
+                    assert_eq!(into % STAGGER_STEP, 0, "{class:?} {slot}");
+                    assert!(into < room && into < class.size(), "{class:?} {slot}");
+                    let start = layout.slot_bytes(slot);
+                    assert_eq!(layout.block_at(start), Some((slot, 0)), "{class:?} {slot}");
+                    assert_eq!(
+                        layout.block_at(start + into),
+                        Some((slot, into)),
+                        "{class:?} {slot}"
+                    );
+                    if into + 1 < class.size() {
+                        assert_eq!(layout.block_at(start + into + 1), None, "{class:?} {slot}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A block's first page is its slot's where its stagger stays in the first page, and past it by
+    /// the page term's pages where it does not.
+    #[test]
+    fn a_blocks_first_page_is_past_the_page_term() {
+        let plan = Geometry::of_kernel(14).largest_plan();
+        let page = plan.geometry().page_size();
+        let layout = Layout::new(plan, Class::of_size(1 << 24).unwrap()).unwrap();
+        for slot in [0, 1, 5, 31, 32, 33] {
+            let unit = layout.slot_unit(slot).unwrap();
+            let into = layout.stagger(slot);
+            assert_eq!(layout.first_page(slot, unit, 0), unit.start, "{slot}");
+            assert_eq!(
+                layout.first_page(slot, unit, into),
+                unit.start + (into / page) as u32,
+                "{slot}"
+            );
+            assert_eq!(into / page, slot as usize % 32, "{slot}");
+        }
     }
 
     #[test]

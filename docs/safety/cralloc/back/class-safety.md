@@ -26,10 +26,13 @@ changes no contents and which the hold's walk reads only as a hint (BACK-REGION-
 caller"). A clean bit says the page has not been written since it was carved or last purged:
 only a purge, a range the holder returned whole (a shrink's tail, a piece behind a move's
 copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-08;
-`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
-written) set one, each by the slot's holder (only the holder of every slot a bit describes
+`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages outside its block, past its extent
+or below its stagger, which nothing has written) set one, each by the slot's holder (only the holder of every slot a bit describes
 writes it); the claim (`region::settle_slot`) clears the bits under
-what the new tenant may write, and so does any change that widens it (`region::cover`).
+what the new tenant may write, from its first page, and so does any change that widens it
+(`region::cover`, from the slot's start where the slot is advised for huge pages, since a huge
+fault makes the pages below a block resident; a tenant at the slot's start cleared those at its
+claim).
 Clean bits only steer the retained count and the purge walk; no zero bit is set by any of
 this, and a claim takes a slot for zero only from its zero bit, which only a purge sets. So a
 claim never reports pages as zero that are not
@@ -197,8 +200,8 @@ the runs it copies, `Space::purge` on whole pages of `to` under a window's zero 
 **Preconditions.** As for `copy_nonoverlapping`, `purge_part`, `Space::purge` and `is_zero`
 (BACK-CLASS-04).
 
-**Offsets.** A large block starts at its slot's start or at its stagger, less than a page
-in; `offset_in_slot` gives which. Every range below that `purge_part` or `give_back` takes is
+**Offsets.** A large block starts at its slot's start or at its stagger, under an eighth of
+the slot and 4 KiB in (`policy::stagger_room`); `offset_in_slot` gives which. Every range below that `purge_part` or `give_back` takes is
 counted from the slot's start (from the run's for a run, which is never staggered).
 
 **Proof.** `move_large` is an `unsafe fn`: its caller promises that `from` is a large block it
@@ -259,10 +262,10 @@ zero (step 5).
    `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`,
    `a_hole_is_copied_when_the_destinations_purge_fails`).
 4. *The purges of `from`.* Pieces end at multiples of the piece in the address space. Each range is
-   either a part already copied that ends at such a multiple (`into + done` rounded down to a
-   page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
-   takes the stagger's padding, which holds nothing, or the previous multiple, which is
-   page-aligned) or, once and for an outgrown slot not kept only, everything from the last
+   either a part already copied that ends at such a multiple (from the slot's start for the
+   first, which takes the pages a stagger passed over, whose contents no one needs, and an
+   earlier tenant may have left; and from the previous multiple after that, which is
+   page-aligned; to `into + boundary`) or, once and for an outgrown slot not kept only, everything from the last
    multiple at or below
    `from + len` (or from the slot's start, if there is none) to the end of the slot. Every
    byte of the block before that start has been copied. A block of one piece or less that
@@ -278,10 +281,10 @@ zero (step 5).
 5. *The release.* The slot is marked zero only if every `give_back` reported its whole
    range returned: `purge_part` answers `true` only when the OS accepted the range it was
    given, untrimmed (`a_trimmed_purge_of_an_advised_slot_says_it_kept_part`), and the
-   ranges together are every page of the slot past the copy's start. So a slot marked zero
+   ranges together are every page of the slot, below the block too. So a slot marked zero
    has no stale byte in it, and the next zeroed allocation of it may skip clearing. (Today
-   no move range is ever trimmed, since pieces end on huge-page boundaries and a piece is a
-   huge page; the argument does not depend on that.) If every purge succeeded, every page of
+   no move range is ever trimmed, since pieces end on huge-page boundaries and a block under
+   advice moves a huge page at a time at least; the argument does not depend on that.) If every purge succeeded, every page of
    the slot has gone back, and
    `mark_purged` and an uncounted release leave it exactly as `purge_held` does; if any did
    not, the slot is released as resident and counted by its pages that are not clean
@@ -362,13 +365,14 @@ most the class size, a whole number of pages, so it lies in the slot.
 
 `at` is the start of the huge page holding `end`; `fresh` is `into + new` rounded up to a
 page, the new usable end; `room` is the start of the huge page holding `fresh - 1`. `unspill`
-returns early unless `into < at`, `0 < part <= page` with `part = end - at`,
+returns early unless `into < at`, `0 < part` with `part = end - at`, `part` at most a page or
+the block's stagger rounded up to a page (a whole number of pages, since `end` and `at` are),
 `at + huge <= room`, and `room + part <= fresh`. So `spill` (offset `at`, `part` bytes) and
 `aside` (offset `room`, `part` bytes) both lie inside what the block may now use, and `aside`
 starts at or past `at + huge`, past the end of `spill`, so they do not overlap. `spill` holds
 the block's contents from `at` to `end`; `aside` lies past `end`, in new room whose contents
 the caller does not need, so writing it destroys nothing (a zeroed grow clears it after the
-resize, `Heap::resize_large_in_place`). `rest` is `at + page .. at + huge`, whole pages inside
+resize, `Heap::resize_large_in_place`). `rest` is `at + part .. at + huge`, whole pages inside
 the block, which the caller does not write during the call and nothing else can reach (below);
 `resident` only reads, and its answer only decides whether the copies and the purge follow.
 The purge range is `at..at + huge`: whole pages, before `room` and so inside what the block may

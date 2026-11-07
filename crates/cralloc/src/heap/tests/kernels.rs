@@ -146,7 +146,11 @@ fn serve<S: Shape>(heap: SimHeap<S>, seed: u64) {
     let back = heap.heap.back().unwrap();
     // A large slot's charge is exact, so nothing of it is left. A small class keeps the free slots
     // of the page its watermark is in, which no purge may take.
-    assert_eq!(back.retained_large(), 0, "a large slot's charge all went back");
+    assert_eq!(
+        back.retained_large(),
+        0,
+        "a large slot's charge all went back"
+    );
     let page = S::GEOMETRY.page_size();
     assert!(back.retained() <= 16 * page, "{} retained", back.retained());
     for &size in &SIZES {
