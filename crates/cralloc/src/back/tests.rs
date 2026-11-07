@@ -5578,3 +5578,7 @@ mod tail_protocol;
 
 /// A walk's class for a region comes from the published tag (`back::tags`).
 mod published_tag;
+
+/// What the bitmaps, the summary bits and the assignment of regions need of the memory order, on
+/// real threads.
+mod ordering;

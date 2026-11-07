@@ -154,6 +154,8 @@ mod scale;
 #[rustfmt::skip]
 pub(crate) mod spec;
 pub mod stats;
+#[cfg(test)]
+mod stress;
 pub(crate) mod thread_word;
 
 #[cfg(cralloc_real)]
