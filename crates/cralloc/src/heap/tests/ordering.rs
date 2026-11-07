@@ -42,10 +42,12 @@ type Owned = (u64, BTreeMap<usize, Seen>);
 
 /// A pipeline: producers allocate blocks and take their ledgers, and consumers take them again and
 /// free them, so that blocks go by magazines from the consumers back to the producers. `place` is
-/// [`spread`] or [`together`]. Returns what the count that catches a stale ledger needs.
-fn pipeline<H: GlobalAlloc + Sync>(
+/// [`spread`] or [`together`], and `take` takes a block's ledger. Returns what the count that catches
+/// a stale ledger needs.
+fn pipeline<H: GlobalAlloc + Sync, R>(
     heap: &H,
     place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
+    take: unsafe fn(*mut u8) -> R,
     pairs: usize,
     time: Duration,
     size: usize,
@@ -71,7 +73,7 @@ fn pipeline<H: GlobalAlloc + Sync>(
                 assert!(!p.is_null());
                 // SAFETY: this thread's block, of at least the ledger's size. What the block's last
                 // owner wrote has come only through the allocator.
-                unsafe { own(p) };
+                unsafe { take(p) };
                 owned += 1;
                 slot.store(p, Ordering::Release);
                 at = (at + 1) % ring.slots.len();
@@ -95,7 +97,7 @@ fn pipeline<H: GlobalAlloc + Sync>(
                 slot.store(ptr::null_mut(), Ordering::Relaxed);
                 at = (at + 1) % ring.slots.len();
                 // SAFETY: the producer gave the block up, through the ring.
-                unsafe { own(p) };
+                unsafe { take(p) };
                 owned += 1;
                 blocks.insert(p.addr(), Seen(p));
                 // SAFETY: allocated with this layout, freed once.
@@ -124,7 +126,7 @@ fn blocks_keep_their_last_owners_writes(time: Duration, drains: bool) {
     let heap = SimHeap::<crate::os::sim::Standard>::new();
     // A purge reads as zero, and the count would not add up.
     heap.os().set_faults(Call::Purge, Faults::ALWAYS);
-    let run = || pipeline(&heap, |n, f| spread(n, f), 2, time, 512);
+    let run = || pipeline(&heap, |n, f| spread(n, f), own, 2, time, 512);
     let owned = if drains {
         with_drains_running(&heap, run)
     } else {
@@ -156,12 +158,14 @@ fn blocks_keep_their_last_owners_writes_through_drains_fully() {
 }
 
 /// The real routines on the real kernel: plain loads and stores on the fast paths, and
-/// `membarrier` for the drains `collect` makes while the pipeline runs. A purge can zero a free
-/// block, so the count at the end does not hold here; the ledgers' two words do.
+/// `membarrier` for the drains `collect` makes while the pipeline runs. The process's heap is every
+/// test's, and a purge can zero a free block, so the count at the end does not hold here; the
+/// ledgers' two words do.
 #[cfg(cralloc_real)]
 mod process {
     use super::*;
     use crate::Cralloc;
+    use crate::stress::own_shared;
     use core::sync::atomic::AtomicU64;
 
     fn on_the_real_routines(
@@ -171,12 +175,12 @@ mod process {
         let stop = AtomicBool::new(false);
         thread::scope(|scope| {
             scope.spawn(|| {
-                while !stop.load(Ordering::SeqCst) {
+                while !stop.load(Ordering::SeqCst) && !failed() {
                     Cralloc::collect();
                     thread::sleep(Duration::from_millis(1));
                 }
             });
-            let _ = pipeline(&Cralloc, place, 2, time, 512);
+            let _ = pipeline(&Cralloc, place, own_shared, 2, time, 512);
             stop.store(true, Ordering::SeqCst);
         });
     }
@@ -211,13 +215,20 @@ mod process {
 
     #[test]
     fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_quickly() {
-        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, QUICK, 512);
+        let _ = pipeline(
+            &CEntryPoints,
+            |n, f| spread(n, f),
+            own_shared,
+            2,
+            QUICK,
+            512,
+        );
     }
 
     #[test]
     #[ignore = "slow: run with scripts/gate --all"]
     fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_fully() {
-        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, FULL, 512);
+        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), own_shared, 2, FULL, 512);
     }
 
     /// Threads taking turns on one CPU: a block's only way from a free to the next allocation is
@@ -246,7 +257,7 @@ mod process {
         thread::scope(|scope| {
             scope.spawn(|| {
                 let process = crate::heap::global::process();
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Relaxed) && !failed() {
                     for cpu in 0..16 {
                         let _ = process.drain(cpu);
                     }

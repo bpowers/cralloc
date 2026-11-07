@@ -9,7 +9,10 @@ store-then-load pattern left out of the sequentially consistent order, a kernel 
 in it, and above all that our own tests could not have shown a mistake.
 
 Arguments here rest on Rust's memory model and on the Arm architecture's, not on what one CPU does:
-a CPU that never reorders some pair says nothing about another. Kernel facts were read at tag v7.2.
+a CPU that never reorders some pair says nothing about another. Two rules rest on Arm's model and
+not on Rust's, which says nothing of a routine's plain store or of an address dependency: a slab word
+read with no protection against the committed mark, and a block passed with no order. Kernel facts
+were read at tag v7.2.
 
 ## What was wrong
 
@@ -32,9 +35,10 @@ another thread. Three kernel facts do instead.
 **A context switch is a full barrier.** `__schedule` takes the runqueue lock and then
 `smp_mb__after_spinlock()` (`kernel/sched/core.c:7108-7109`), a `dmb ish` on arm64
 (`arch/arm64/include/asm/spinlock.h`), before it stores `rq->curr`, and `__switch_to` has a
-`dsb(ish)` after that (`arch/arm64/kernel/process.c:756`), "required by the membarrier system call". So all a
-thread stored before it left a CPU the next thread on that CPU sees, and a migrated thread keeps its
-own order. This is what makes the routines correct between threads of one CPU, with no fence of ours.
+`dsb(ish)` after that (`arch/arm64/kernel/process.c:756`), "required by the membarrier system call".
+So all a thread stored before it left a CPU the next thread on that CPU sees, and a migrated thread
+keeps its own order. This is what makes the routines correct between threads of one CPU, with no
+fence of ours.
 
 **The fence is a barrier on the target CPU, before and after.** `membarrier` with
 `PRIVATE_EXPEDITED_RSEQ` does `smp_mb()` on the caller (`guard(mb)`, `:373`), reads the CPU's
@@ -266,7 +270,7 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 | A free's OR with no release, or a claim with no acquire | not caught | caught |
 | Summary words, hint or sleep to acquire and release | not caught | caught |
 | A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
-| Tags with no order | not caught | over its limit of 900 CPU seconds |
+| Tags with no order | not caught | not caught on 4 seeds: this test's readers have the carving word's order, which covers the tag |
 | The simulator's barrier relaxed | not caught | caught, on 4 of 8 runs of 8 seeds |
 
 Why the hardware misses so much is under "What fooled us". On the unweakened code Miri passes every
