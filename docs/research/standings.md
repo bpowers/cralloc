@@ -47,8 +47,9 @@ each: two rounds a placement, three on HTTP/2 Connect and HTTP/2 orders, one for
 computed across jobs from the raw records. The ten are not independent: three are one service and
 four are one program.
 
-- **Over the ten, the gap to jemalloc and tcmalloc is instructions, not stalls.** Their instructions
-  a request rise more than their cycles, so their instructions per cycle (IPC) are level or better.
+- **Over the ten, most of the gap to jemalloc and tcmalloc is instructions.** Their instructions a
+  request rise more than their cycles, so their instructions per cycle (IPC) are level or better. No
+  stall shows, though this split cannot exclude one ([program-effects.md](program-effects.md)).
   tcmalloc on the Connect jobs is the exception, losing a fifth to a third of its gap in stalls.
   mimalloc and glibc lose about 70% of their gap in instructions and the rest in stalls. glibc on
   the order service is the clearest stall: +25.3% cycles on +8.3% instructions, IPC 1.34 against
