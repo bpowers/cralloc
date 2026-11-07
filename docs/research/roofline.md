@@ -30,9 +30,10 @@ Three things still set the cycles:
   number, take over: taking out 5 ops saved 0.22 cycles.
 - **With mixed sizes and cold objects, by inference, loads.** Instructions a cycle fall from 8 to
   5.9 on mixed sizes and to 3.8 on churn over 10,000 objects.
-- **In real programs, misses and where the caller's code lands.** An inlined pair costs 12 to 15
-  cycles on servers against 5 to 7 in a loop. The fast path is 11% of the log store's cycles, where
-  it is largest, and 1 to 5% elsewhere.
+- **In real programs, misses and where the caller's code lands.** A pair costs about 14 cycles on
+  servers against 5 to 7 in a loop, with the core shared in the first case and not the second ("Why
+  a pair costs more in real programs"). The fast path is 11% of the log store's cycles, where it is
+  largest, and 1 to 5% elsewhere.
 
 Byte alignment by itself, byte savings and where the store and reload sit in the code do not matter,
 and a routine's position matters only through lines ("What turned out not to matter").
@@ -137,9 +138,9 @@ add` beside 16 dependent adds costs 20.0, not 36. A lock-free stack pop and push
 exchanged in the depot, about one per 64 objects in the back end (`docs/design.md`, "Summary").
 **Enforced.** The instruction model the routines are written in has no locked instruction, so none
 can be written. The emitter refuses a restartable sequence that does not end in a plain store
-(`Rust.checkRseq`). For each routine Lean proves what it may touch: it writes only `rseq_cs`, one
-slab word and the magazine that word names, and otherwise reads only `__rseq_offset`, `cpu_id` and,
-in C, tables the fast path never writes.
+(`Rust.checkRseq`). For each fast-path routine Lean proves what it may touch: it writes only
+`rseq_cs`, one slab word and the magazine that word names, and otherwise reads only `__rseq_offset`,
+`cpu_id` and, in C, tables the fast path never writes.
 
 ### A write into freed memory is paid by the object's next user
 
@@ -500,13 +501,17 @@ line for every size up to 512).
 
 ## Why a pair costs more in real programs
 
-On servers a pair costs 12.3 to 14.9 cycles inlined and 17.7 out of line, against 5 to 7.3 in the
-loops; jemalloc's costs 15.2 to 19.3 and 27.4 on the same jobs (2026-10-22 at `040033a`, before the
-shorter lookup; the sums of allocation and free, whose split moves with sampling skid;
-`servers.md`). The fast path is 10.6% of the log store's cycles, 5.3% of Meilisearch's, 2.9% of the
-order service's and 1.1 to 1.3% of the RPC jobs'. From what was measured, not a new experiment, the
-difference is:
+On four of the seven profiled server jobs a pair costs 12.3 to 14.9 cycles inlined and 17.7 out of
+line, against 5 to 7.3 in the loops; jemalloc's costs 15.2 to 19.3 and 27.4 on the same jobs
+(2026-10-22 at `040033a`, before the shorter lookup; the sums of allocation and free, whose split
+moves with sampling skid). `servers.md` has all seven: about 14, 11 to 18. The fast path is 10.6% of
+the log store's cycles, 5.3% of Meilisearch's, 2.9% of the order service's and 1.1 to 1.3% of the
+RPC jobs'. From what was measured, not a new experiment, the difference is:
 
+- **A shared core.** The server figures have an idle-priority spinner on each core's SMT sibling,
+  where the loops have the sibling idle. That spinner raises jemalloc's cycles a request on the
+  order service by 17% (`measuring.md`), so part of this gap is the spinner. How much was not
+  separated.
 - **Misses.** The allocator's own L1 misses are about 180 a request on the store against about 5,200
   calls: one call in thirty misses on a slab word, a magazine slot or a table, mostly to L2, about
   15 cycles. That alone adds about half a cycle a call. Op samples inside the pop fall on the slab
