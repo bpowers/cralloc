@@ -563,7 +563,11 @@ mod kernel {
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
             os.commit(base, 2 * huge()).unwrap();
-            os.advise_huge(base, 2 * huge(), HugePages::Prefer).unwrap();
+            if os.advise_huge(base, 2 * huge(), HugePages::Prefer).is_err() {
+                std::eprintln!("this kernel has no transparent huge pages: nothing to show");
+                os.unmap(base, 2 * huge()).unwrap();
+                return;
+            }
             for i in 0..huge() / page() {
                 p.add(i * page() + 7).write(i as u8 | 1);
             }
@@ -608,7 +612,11 @@ mod kernel {
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
             os.commit(base, 2 * huge()).unwrap();
-            os.advise_huge(base, 2 * huge(), HugePages::Prefer).unwrap();
+            if os.advise_huge(base, 2 * huge(), HugePages::Prefer).is_err() {
+                std::eprintln!("this kernel has no transparent huge pages: nothing to show");
+                os.unmap(base, 2 * huge()).unwrap();
+                return;
+            }
             for i in 0..huge() / page() {
                 p.add(i * page() + 7).write(i as u8 | 1);
             }

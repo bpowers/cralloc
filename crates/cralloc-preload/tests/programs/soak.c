@@ -722,7 +722,7 @@ static long rss_mib(void) {
     FILE *f = fopen("/proc/self/statm", "r");
     if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
     if (f) fclose(f);
-    return rss * 4096 / (1 << 20);
+    return rss * sysconf(_SC_PAGESIZE) / (1 << 20);
 }
 
 static void run_quiet(void) {
@@ -1156,7 +1156,11 @@ static void arm_at(uint64_t at) {
     a.sigtrap = 1;
     a.bp_type = HW_BREAKPOINT_X;
     a.bp_addr = at;
+#ifdef __aarch64__
+    a.bp_len = 4;  // an instruction
+#else
     a.bp_len = sizeof(long);
+#endif
     trap_fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
     if (trap_fd < 0) die("perf_event_open for a breakpoint failed: %d", errno);
 }

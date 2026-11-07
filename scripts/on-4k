@@ -2,10 +2,10 @@
 # Runs a command on a real kernel with 4 KiB pages, in a microVM on this host's performance cores,
 # and returns its output and exit status. A binary built here runs there unchanged, which is the
 # test of the page size found at run time. The VM shares the filesystem. Its kernel has no
-# transparent huge pages, and may be older than the host's.
+# transparent huge pages, lists no cache past the L1s, and may be older than the host's.
 #
 # muvm does not return the command's output or status, so the command writes them to files that
-# this script reads back.
+# this script follows and reads back.
 #
 # Usage: scripts/heavy scripts/on-4k command args...
 #   ON_4K_CPUS  the host's CPUs the VM runs on, default 2-5
@@ -18,6 +18,7 @@ mem="${ON_4K_MEM:-4096}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/on-4k.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+touch "$work/out"
 
 {
   echo '#!/usr/bin/env bash'
@@ -25,16 +26,18 @@ trap 'rm -rf "$work"' EXIT
   export -p | grep -Ev '^declare -x (DBUS_|DISPLAY=|WAYLAND_|XDG_|SSH_|TERM=|OLDPWD)' || true
   printf 'cd %q\n' "$PWD"
   printf '%q ' "$@"
-  printf '> %q 2>&1\n' "$work/out"
+  printf '>> %q 2>&1\n' "$work/out"
   printf 'echo $? > %q\n' "$work/status"
 } > "$work/run"
 chmod +x "$work/run"
 
-muvm --mem="$mem" -c "${ON_4K_CPUS:-2-5}" -- "$work/run" > "$work/muvm" 2>&1 || true
+muvm --mem="$mem" -c "${ON_4K_CPUS:-2-5}" -- "$work/run" > "$work/muvm" 2>&1 &
+vm=$!
+tail -n +1 -f --pid="$vm" "$work/out"
+wait "$vm" || true
 if [ ! -f "$work/status" ]; then
   echo "on-4k: the command did not finish in the VM; muvm said:" >&2
   cat "$work/muvm" >&2
   exit 125
 fi
-cat "$work/out"
 exit "$(cat "$work/status")"

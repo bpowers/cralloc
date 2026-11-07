@@ -153,7 +153,7 @@ fn decode(status: c_int) -> Exit {
 }
 
 /// Room for the C library's `pthread_attr_t`, which is 56 bytes on x86-64 Linux with glibc and
-/// with musl.
+/// with musl, and 64 on aarch64 with glibc.
 #[repr(C, align(8))]
 struct ThreadAttr([u8; 64]);
 
