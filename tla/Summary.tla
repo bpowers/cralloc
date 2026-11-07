@@ -13,12 +13,12 @@
              summary bit, clears the summary bit and then reads the word
              again; if it is no longer empty, sets the bit back.
 
-   The design states these for one level. Applying them at every level is the
-   reading modelled here: a summary word is "a word" for the level above.
+   These apply at every level: a summary word is "a word" for the level above.
 
    Reread = FALSE drops the re-read and shows why it is there.
-   Heal = TRUE is a proposed change: a free walks all the way up and sets any
-   summary bit it finds clear, even when its word was not empty.
+   Heal = TRUE is the design's free: it walks all the way up and sets any
+   summary bit it finds clear, even when its word was not empty. FALSE is the
+   free described above, which a fork defeats (Summary_crash).
    Crash = TRUE lets every thread but one vanish at an arbitrary step, once,
    which is what a forked child sees.
    Run = TRUE adds what a run of claims (a fill) does:

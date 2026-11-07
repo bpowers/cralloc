@@ -18,11 +18,11 @@
 
    Repair:
      "none"   nothing is done about a drain cut off by the fork.
-     "sweep"  the design: the first slow path in the child clears every
+     "sweep"  rejected: the first slow path in the child clears every
               marker and flag; no drain starts until the sweep is done.
-     "gen"    proposed: flags and markers carry the fork generation, and a
+     "gen"    the design: flags and markers carry the fork generation, and a
               drain takes over a stale claim (Drain.tla).
-   Heal = TRUE is the proposed change to free in Summary.tla.
+   Heal = TRUE is the design's healing free, as in Summary.tla.
    ForkMode "idle": the forking thread is outside the allocator. "any": it
    may be at any step (fork called from a signal handler). *)
 EXTENDS Naturals, FiniteSets, TLC

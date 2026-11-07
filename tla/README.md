@@ -1,203 +1,136 @@
-# TLA+ models of the lock-free protocols
+# TLA+ models of the protocols
 
-Each protocol in `docs/design.md` that involves more than one thread has a small TLA+ model
-here, checked exhaustively with TLC. The OS is an explicit actor in each: it stops, moves
-and restarts threads, runs signal handlers, fences, forks, and hands out address space.
+These models check cralloc's lock-free protocols as designed (`docs/design.md` defines the terms).
+The OS is an actor in each: it stops, moves and restarts threads, runs signal handlers, fences,
+forks and hands out address space. TLC explores every interleaving of a few threads over a few
+magazines and objects.
 
-The models exist to find flaws in the design before it is implemented. A configuration that
-is expected to fail is kept as a test: it records a flaw that was found, or shows that a
-rule in the design is needed.
+A pass means no interleaving within those bounds breaks the model's properties. It does not cover
+weak memory, since every step is atomic and sequentially consistent, or the Rust, whose schedule
+explorers follow these models by review, not proof (`back/models.rs` and `depot/interleave.rs` in
+`crates/cralloc/src`).
 
-## Getting the tools
+A check expected to fail is kept on purpose: it shows the model can see a flaw, and that a rule is
+needed or a limit is real.
 
-TLC needs Java 11 or later and `tla2tools.jar`. Neither is installed system-wide.
+*Cid* in the models means the number that picks a slab: the CPU number, not the kernel's concurrency
+ID (`docs/design.md`, "What Linux provides"). The models need only that two running threads never
+share it.
 
-```
-cd tla
-curl -sL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-```
+## Running them
 
-`v1.8.0` is a rolling pre-release tag, so the file changes over time. The models were
-checked with the build that reports `TLC2 Version 2026.10.24.013619 (rev: 2ef2af8)`,
-SHA-256 `d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f`. The jar is
-gitignored.
-
-`./check` uses `java` from `PATH` if there is one, and otherwise runs
-`nix shell nixpkgs#jdk_headless -c java`, which needs only `nix` and no root. Set
-`TLA2TOOLS` to use a jar somewhere else.
-
-`nix shell nixpkgs#tlaplus` also provides `tlc`, but it is the 1.7 line, which does not
-understand the `ALIAS` line in the drain configurations.
-
-## Running
+TLC needs Java 11 or later and `tla2tools.jar`, which is gitignored. From the top of the repository:
 
 ```
-tla/check                 # everything
-tla/check Drain           # lines whose spec or configuration name matches
-tla/check -v Drain_v1     # also print TLC's output, to read a counterexample
+curl -sL -o tla/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
 ```
 
-On a shared machine pin TLC and cap its workers:
+`v1.8.0` is a rolling tag, so this can fetch a newer build than the one behind the recorded results:
+`TLC2 Version 2026.10.24.013619 (rev: 2ef2af8)`, SHA-256
+`d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f`.
+
+`tla/check` uses `java` from `PATH`, or else `nix shell nixpkgs#jdk_headless -c java`. In a git
+worktree, set `TLA2TOOLS` to the jar's path. Run it through `scripts/heavy`, like all heavy work:
 
 ```
-TLC_PREFIX="taskset -c 11,26,27" TLC_WORKERS=3 tla/check
+scripts/heavy tla/check               # every check
+scripts/heavy tla/check Purge         # the checks whose spec or configuration name contains this
+scripts/heavy tla/check -v Drain_v1   # also print TLC's output, to read a counterexample
+SLOW=1 scripts/heavy tla/check        # four more checks as well
 ```
 
-`models.sh` lists every check as `run SPEC CONFIG EXPECTATION`. `check` fails if any result
-differs from its expectation, and prints the number of distinct states and the time for
-each. The whole run takes about a quarter of an hour on three cores, most of it in
-`Exchange` and the four largest drain configurations. `SLOW=1 tla/check` adds
-`Drain_gen_any_full`, which takes about ten minutes more, and `Summary_run_wide`, which
-takes about six (81 million distinct states, on four workers, 2026-10-18).
+`check` fails if a result differs from `models.sh`. A full run takes a little over an hour on the
+default three workers (`TLC_WORKERS`), and `SLOW=1` adds most of another. State files can reach
+gigabytes, under `target/tla` or `TMPDIR`.
 
 ## The models
 
-Every model is safety-checked over all interleavings within its bounds. "Never permanently
-invisible" and "no thread ever waits" are stated as invariants (an obligation some thread
-still holds, a step that is always enabled) rather than as temporal properties, which keeps
-them cheap.
-
 | Spec | Covers | Abstracts away |
 |---|---|---|
-| `Rseq.tla` | Pop, push and install as multi-step sequences that commit with the last step; preemption, migration and restart; cids, including an out-of-range cid. The slab invariant holds in every state, and no object is duplicated or lost. | The rest of the slow path is one step on a pool. |
-| `Exchange.tla` | The slow path between routines: obtain, install, retire or put back; migration at every step; two threads on one cid; a signal handler as a nested call at any step; the marker branch; a call with no valid cid. Everything has exactly one owner and a call in progress always has a step it can take. | Routines, depot and back end are single steps. The drainer is an environment. |
-| `Drain.tla` | The drain: claim, exchange of slab word and spare head, one fence, re-read, release; back-out when `membarrier` fails; concurrent drainers; drain against install, pop, push and spare push and pop in flight; fork during a drain and the child's repair. | One class and one spare stack per cid. Magazines carry a fill level, not objects. The depot is a set. |
-| `Depot.tla` | Push and pop by compare-and-swap on a head with a version counter, with stale link reads and owners overwriting the link. | One stack. The depot has many: per class (and per magazine size, for empty magazines) one stack in each cache domain and one shared by all of them. A slow path pushes on its domain's stack while that is under a cap, else on the shared one, and pops its domain's, else the shared one. The stacks share no head: each has its own head and version counter, and a magazine is on at most one at a time, which the stack's own ownership argument gives (a push needs a magazine its pusher holds, a pop hands it to one thread). Which stack a slow path picks is a choice of heads, not a step of the protocol, so the one-stack model covers every stack. A capped push that finds its stack at the cap gives up after reading the head and the top's link, having written at most the link of the magazine it still holds (which the model lets an owner do), so the magazine stays its pusher's: in the model, a thread that does not push. The words beside the heads are shared across stacks and outside every model: each stack's water word, the sets of classes and domains that owe (`depot/shed.rs`) and the hint of which domains' stacks hold magazines (`depot/held.rs`). They only steer launders and looks, which are safe at any time; the interleaving checker covers their races (`depot/interleave.rs`), and no model does. |
-| `Summary.tla` | Claim by compare-and-swap, release by atomic OR, set-on-first-free, clear-then-reread, at every level of a summary tree. With `Run` (`Summary_run*`), a fill's run of claims: searches that start at any word, empty words left to the thread that emptied them, and the clears of several emptied words made with one AND and a re-read of each. With `Keep` (`Summary_keep*`), a large class's claim: one that empties a word never clears its summary bit, and the next search to find the word empty does. With `Look` (`Summary_look*`), each free whose word was empty chooses whether to read the summary bit before setting it, as a scattered launder does while grouped launders and single frees on the same tree do not. | One region; two bits to a word (three in `Summary_run_wide`); batches only at the leaf level. |
-| `SummaryLookUp.tla` | `Summary.tla` with a free that may look at every level of its walk up, the one above a summary word its own OR found empty included, as `tree::release_one` does on a large class's tree, whose claims keep their bits (`Keep`); every walk may mix that step with the unread OR of `Summary.tla`. `SummaryLookUp_crash` adds a fork, at one summary level; `SummaryLookUp_deep` has two summary levels and no fork. | As `Summary.tla`. Fork healing with this step at two summary levels (`SummaryLookUp_deep_crash`, not in `models.sh`) did not finish: 723 million states to depth 30, no violation. The explorer scenario `kept_bits_and_single_frees_lost_at_any_step` (`back/models.rs`) covers it on the real code, within its preemption bound. |
-| `Purge.tla` | Purge as a claim against allocation and laundering, with objects that do not line up with pages, and the zero bitmap of large classes. | Summary bits; the watermark. |
-| `Startup.tla` | Racing initializers, one compare-and-swap, the loser unmapping, callers arriving throughout; a limited address-space budget; fork. | The heap's contents. |
-| `Fork.tla` | One small instance of every shared structure, a fork at any step, and what the child can and cannot reach afterwards. | Routines and depot operations are single steps. |
+| `Rseq` | Pop, push and install as steps that commit with the last; preemption, migration, restart; an out-of-range cid. | The rest of the slow path. |
+| `Exchange` | The slow path between routines, with the half-full swap; migration at every step; a handler as a nested call; a live marker; no valid cid. | Routines, depot and back end are single steps. The drainer is an environment. |
+| `Drain` | Claim, exchange, fence, re-read, release, back-out; concurrent drainers; sequences in flight; a fork at any step. | One class and spare stack per cid; the depot is a set; magazines carry a fill level, not objects; the generation is a counter. |
+| `Depot` | Push and pop by compare-and-swap on a versioned head; stale link reads; owners overwriting the link. | One stack, since each has its own head. A capped push that gives up did not push. |
+| `Summary` | Claim, release and clear-then-re-read at every level of the tree, with the healing free (`Heal`), a fill's batched clears (`Run`), a claim that keeps its bit (`Keep`), and a free that reads a bit first (`Look`). | One region; two bits to a word (three in `Summary_run_wide`); batches only at the leaf level. |
+| `SummaryLookUp` | `Summary` with a free that may read every level of its walk (`tree::release_one`), and claims that keep their bits. | As `Summary`. |
+| `Purge` | A purge as a claim against allocation and laundering; objects that straddle pages; the zero bitmap. | Summary bits, the watermark, clean-page bits; which pages a purge picks. |
+| `Startup` | Racing initializers, one compare-and-swap, the loser unmapping; a limited address-space budget; a fork. | The heap's contents; the allocator's retry and halving. |
+| `Fork` | Slab words, drain flags, magazines, the depot, a bitmap word and summary bit, the purge claim, and a fork at any step. At the fork a child loses only what other threads held privately: at most a magazine each, and an object being freed or one bitmap word's bits. | Routines and depot operations are single steps. No sequences in flight, no spare stacks. |
+| `Tail` | The word saying where a region's huge-page advice is off: owner bit, advice call, give-back; an OS that refuses part-way; an owner taken over while alive; a fork; a claim's mark and its flag. | One region of two or three huge pages; when a change is due. |
+| `TailStale` | A thread holding the previous interval against a fresh owner, with a stamp ahead of it read as fresh (`Tail::owned`). | A copy of `Tail` with no flag or looks. |
+| `Assign` | How a class takes a region, where a walk learns its class, and a fork child's repair of what a cut-off thread named. | Two regions; each assigner and the run go once; a carve is one fact. |
 
-### Bounds, and why they are enough
+`SummaryLookUp_deep_crash.cfg`, a fork at two summary levels, is not in `models.sh`: it did not
+finish (stopped at 723 million states, no violation). `kept_bits_and_single_frees_lost_at_any_step`
+in `back/models.rs` covers the case on the code.
 
-The flaws these protocols can have need few actors. A lost or duplicated magazine needs one
-thread per conflicting view of a word: a sequence in flight, a drainer, and a second
-drainer. An ABA on a stack needs one victim and one thread doing the pops and pushes. So
-every model has two or three threads, two cids, two or three magazines of one or two
-objects, and three or four objects. Each recorded counterexample is found within these
-bounds, most of them within twenty steps.
+## Why small bounds are enough
 
-What small bounds cannot show is a flaw that needs four or more distinct views of one word
-at once, or a counter overflow; `Depot_wrap` covers the latter by shrinking the counter.
+The flaws these protocols can have need few actors: a lost or duplicated magazine needs one thread
+per conflicting view of a word, such as a sequence in flight, a drainer and a second drainer. So two
+or three threads, two cids and a handful of magazines and objects are enough, and the
+counterexamples below take about twenty states at most. Small bounds cannot show a flaw that needs
+four or more views of one word, or a counter overflow, which `Depot_wrap` reaches by shrinking the
+counter.
 
-The drain configurations with a fork split the roles between threads to stay small.
-`Drain_gen_any` has two threads; a three-thread version was explored to 22 million states
-without a violation and not run to completion.
+## The rules, and what fails without them
 
-With two bits to a word, a batch of held clears in `Summary_run` is at most two words, and
-they are every word under their summary word. `Summary_run_wide` has three bits to a word
-and two threads, so a batch can leave a sibling's bit set in the summary word.
+- **A stopped sequence restarts, and two running threads never share a cid:** the OS guarantees the
+  design trusts (`Rseq_norestart`, `Rseq_sharedcid`).
+- **A half-full swap installs only over the zero it left,** or it overwrites another call's magazine
+  (`Exchange_centre_blind`).
+- **A commit stores a value computed from the word read,** or it corrupts a word a drainer exchanged
+  (`Drain_inplace`).
+- **A drain claims the slab first,** or a second drainer re-marks a word a sequence committed to,
+  and the first takes a stale word (`Drain_v1`).
+- **A drain writes zero whenever the word is still its marker,** or markers stay in words that held
+  no magazine (`Drain_zerorule`).
+- **A claim or marker carries the process's generation, and another generation's counts as absent**
+  (`Drain_gen`, `Drain_gen_any`). A cut-off drain needs some repair (`Fork_norepair`), but a sweep
+  races later drains (`Drain_sweep`, `Drain_sweep_dup`) and, with those held back, cannot tell a
+  dead thread's claim from a live drainer's after a fork from a handler (`Drain_sweep_hold_any`).
+- **A stack head carries a version counter,** or a stale compare-and-swap succeeds (`Depot_nover`).
+- **Whoever clears a summary bit then re-reads the word,** or a free made meanwhile stays invisible
+  (`Summary_noreread`, `Summary_run_noreread`).
+- **A free sets every summary bit it finds clear on its way up,** since a fork can leave one clear
+  over a non-empty word (`Summary_crash`, `Fork_summary`). Until the next free into that word, its
+  objects stay hidden.
+- **A purge claims every object touching its pages** (`Purge_claim_inside`) **and sets zero bits
+  only of objects wholly inside, before releasing them** (`Purge_zero_claimed`,
+  `Purge_zero_after`).
+- **An owner whose bit was taken over asks for a repair,** or its late call leaves the advice wrong
+  (`Tail_norepair`).
+- **A fork child asks for that repair on every tail word** (`Tail_orphan`), **clears every owner bit
+  and flags any mark,** or the mark goes unanswered (`Tail_stuck`).
+- **A thread that clears the flag and loses its take of the word tries again,** or nothing finds the
+  mark (`Tail_lost`).
+- **A walk takes a region's class from the published tag, not the table,** or it can act on another
+  owner's region (`Assign_table`).
+- **A child's repair re-reads the tag after finding the region carved from,** or it publishes
+  another class's region (`Assign_repair`).
 
-`Drain.tla` keeps no cid for a thread outside a sequence. A sequence starts on any cid that
-no sequence in flight is using, and the OS may abort any sequence at any time. This is the
-same set of behaviours as explicit preemption and resumption, with far fewer states;
-`Rseq.tla` models cids without the shortcut.
+Three failures have no rule behind them. They are limits we accept:
 
-## Findings
+- **A fork from a handler that interrupted a drain can lose what the drain displaced,** if a second
+  thread drains that slab in the child: a bounded leak, nothing duplicated (`Drain_gen_any_loss`,
+  `Fork_gen_any_loss`; `Fork_any_loss` under a sweep).
+- **A depot counter can wrap,** given exactly a multiple of 2^32 pushes and pops during one
+  compare-and-swap attempt, with the same magazine on top (`Depot_wrap`).
+- **Racers can share too little address space,** under `RLIMIT_AS` or with eight or more first calls
+  at once. A short reservation can win and leave the heap small for good (`Startup_tight_size`), or
+  a first allocation can fail just before a heap is published (`Startup_tight_null`). The
+  allocator's retry narrows this to a racer stalled through a bounded patience. It is never unsafe
+  (`Startup_tight`).
 
-Each has a configuration that reproduces it. Run `tla/check -v NAME` for the trace.
+## What is not modelled
 
-1. **Two drainers, one marker value** (`Drain_v1`; fixed in the design by the drain claim).
-   A sequence in flight commits over the first drainer's marker, a second drainer exchanges
-   the new word, and the first then finds "its" marker and takes a stale word.
-   `Drain_claim` and `Drain_backout` check the claim-based protocol, including back-out.
+The models leave out what decides when a protocol runs: a drain, purge or advice change may start at
+any time. So the heartbeat's pacing, the activity counter, the retained-memory cap and where
+huge-page advice should go are outside them. So are:
 
-2. **The child's sweep races new drains** (`Drain_sweep`). The sweeping thread has not
-   reached a slab yet; another thread claims that slab and exchanges its word; the sweep
-   then clears the live marker and the flag; the drainer re-reads zero and drops the
-   magazine it displaced. A longer trace clears a live flag and reproduces finding 1
-   (`Drain_sweep_dup`).
-   Smallest change: no drain starts until the sweep has finished (`Drain_sweep_hold`).
-   Superseded by the fix to finding 3, which has no sweep.
-
-3. **Fork from a signal handler that interrupted a drain** (`Drain_sweep_hold_any`). The
-   forking thread is the drainer, so its claim and markers are live in the child. The sweep
-   cannot tell them from a dead thread's and clears the flag; a second drainer claims the
-   slab, and finding 1 follows: a magazine is taken at a stale fill level. Holding drains
-   back does not help.
-   The fix, now built (`Drain_gen`, `Drain_gen_any`): the flag and the marker carry the
-   process's fork generation. A claim or marker of an older generation counts as absent: a
-   drain may claim over it, and an exchange that returns it has displaced nothing. A
-   drainer accepts only a marker of its own generation at step 4, and releases its claim
-   with a compare-and-swap. There is no sweep. The generation comes from the wiped page:
-   a slow path that reads it as zero adds one to a counter kept in ordinary memory and
-   installs the result in the wiped page with a compare-and-swap, so every process has a
-   generation greater than any ancestor's. Nothing is ever duplicated. (As built, the
-   generation is a random number the child draws instead, which differs from every
-   ancestor's with overwhelming probability; see "Fork" in the design.) In the case of this
-   finding the forking thread may still lose the magazines it had displaced
-   (`Drain_gen_any_loss`), which is a bounded leak in a case that needs `fork` inside a
-   handler and a second thread draining the same slab in the child.
-   A slab left with stale markers stays on the slowest path until some drain visits it, so
-   a slow path that meets a stale marker should drain that slab. The model lets a drain
-   start on any slab at any time and does not model that trigger, nor the two-word
-   generation update.
-
-4. **A summary bit left clear in a forked child** (`Summary_crash`, `Fork_summary`). A
-   thread sets a word's bits and the fork takes it before it sets the summary bit (or
-   between clearing the bit and reading the word again). In the child the word is not
-   empty, so no later free into it is a "first free", and nothing sets the bit: the word's
-   objects, and under a higher-level bit a whole subtree, stay invisible to every search.
-   The design's claim that the child's shared structures are valid does not hold for this
-   hint. The fix, now built (`Summary_heal*`): after its OR, a free reads the summary bit at
-   each level on the way up and sets any it finds clear, not only when its word was empty.
-   That costs a load per level and repairs the path the next time anything is freed into
-   the word. It does not make the objects visible before then.
-
-5. **Start-up with too little address space for every racer** (`Startup_tight_size`,
-   `Startup_tight_null`). "As much as the process is allowed" depends on what other
-   initializers hold at that instant. One racer reserves everything, a second gets the
-   scraps and wins the compare-and-swap, and the first unmaps: the heap is small for the
-   life of the process. Or the second gets nothing and fails its first allocation while a
-   heap is about to be published. This needs `RLIMIT_AS`, or eight threads making their
-   first call at once. No fix is proposed or checked here. Reading the heap word again
-   after a short or failed reservation would narrow the window without closing it.
-
-`Fork.tla` checks the rest of what a child inherits. With the forking thread outside the
-allocator, what the child cannot reach is exactly what the other threads held privately:
-per thread, at most one magazine with its objects, plus one object being freed or the bits
-of one bitmap word being claimed, laundered or purged. A reservation that an initializer
-had not yet published or unmapped stays mapped (`Startup_fork`).
-
-## Readings of the design
-
-Where the prose was open, the models take the reading below. Each is a suggestion for the
-design text.
-
-- **Step 4 of the drain writes zero whenever the word is still the marker**, whether or
-  not the old value named a magazine. Writing zero only when it did leaves a marker in
-  every word that held none (`Drain_zerorule`).
-- **Back-out restores a displaced value only by compare-and-swap from the drainer's own
-  marker**, and never restores a marker. Sequences in flight may then still commit, which
-  is ordinary operation (`Drain_backout`).
-- **A routine's commit stores a value computed from the word it read.** Adjusting the word
-  in place corrupts it when a drainer has exchanged it (`Drain_inplace`).
-- **Where an unloaded magazine keeps its fill level** is not stated. The slab word carries
-  it for a loaded magazine; the models keep it in the magazine while it is in a spare
-  stack or the depot. The depot's "non-empty" stack holds partly full magazines, because
-  the marker branch sends one there after serving a single request, and a magazine emptied
-  that way belongs on the empty stack.
-- **Summary bits at higher levels** follow the one-level rule applied recursively. A
-  search that finds an empty word under a set bit also clears and re-reads.
-- **A purge claims every object that touches the pages it returns**, not only those inside
-  them, since class sizes need not divide the page size (`Purge_claim_inside`). It sets the
-  zero bit only of objects wholly inside, and before it releases their free bits
-  (`Purge_zero_claimed`, `Purge_zero_after`). An allocation tests and clears the zero bit
-  after it has claimed the object. The rule behind all of this: a zero bit is written only
-  by the holder of the object's claim.
-- **Everything a caller needs from the heap is in place before the publishing
-  compare-and-swap**, including whether rseq is usable.
-- **A slow path that holds a magazine and finds its cid out of range** treats that as the
-  marker case: it serves the request from the magazine and sends it to the depot.
-- **With no magazine to be had** (the magazine array is exhausted), the slow path serves
-  the call from the back end.
-
-## Not modelled
-
-The heartbeat's pacing and the activity counter (a drain may target any cid at any time),
-the retained-memory cap, huge-page policy, large-object resize, the choice between
-`MADV_DONTNEED` units, and `membarrier` registration. A 32-bit depot counter leaves open
-only the case in which exactly a multiple of 2^32 pushes and pops land between one
-thread's read of the head and its compare-and-swap, and the head names the same magazine
-at both ends; `Depot_wrap` shows the failure with a counter of four values.
+- installing over another generation's marker: the slow paths here treat every marker as live, and
+  `a_fork_at_any_step_duplicates_nothing` (`depot/interleave.rs`) explores the real install;
+- carving from a watermark (`carving_threads_get_disjoint_slots` in `back/models.rs`);
+- large-object resize and `membarrier` registration;
+- the other words more than one thread writes: `docs/design.md`, "Models of the protocols", says why
+  a flaw in one cannot cost a block.
