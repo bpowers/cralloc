@@ -12,7 +12,8 @@ interleaved with everyone else's work; `docs/research/` records what each one fo
    the runner, the fixed RPC client, the load generator and the normal builds.
 3. Server jobs move by several percent with where the program's code lands, so each allocator
    runs at five placements. Under `scripts/heavy`, `pad-build.sh workloads` and `pad-build.sh
-   PROGRAM` build them (`cra jem tcm mim gli`, pads 0, 16, 32, 48, 64). Append `pad-entries.sh`'s
+   PROGRAM` build them (`cra jem tcm mim gli`, pads 0, 16, 32, 48, 64, or on aarch64 steps of 32 to
+   128). Append `pad-entries.sh`'s
    output to `bench/allocators.toml` for the sessions; it is local and never committed.
 4. Tails rank idle states unless deep idle is off: `scripts/deep-idle off` (root). `guard.sh`
    checks it before each session and stops the queue if it is on.

@@ -192,6 +192,14 @@ pub fn read_trim(path: &str) -> String {
     std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
+/// On aarch64, the implementer and part numbers of the last core, which on a machine with two
+/// kinds of core is a big one: what names the CPU, for what is measured per kind of machine.
+pub fn cpu_key() -> Option<String> {
+    let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let last = |name: &str| s.lines().rfind(|l| l.starts_with(name))?.split(':').nth(1).map(|v| v.trim().to_string());
+    Some(format!("{}-{}", last("CPU implementer")?, last("CPU part")?))
+}
+
 /// The CPU's name, where /proc/cpuinfo has one. On aarch64 it does not, so the machine's name from
 /// the device tree, if any, and the implementer and part numbers of the first core and the last.
 pub fn cpu_model() -> String {
