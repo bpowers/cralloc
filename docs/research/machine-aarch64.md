@@ -176,7 +176,9 @@ rounds. Across rounds the before column moved by up to 21%, and the rule's lay i
 | 32 MiB | 9.19 / 0.43 | 0.64 / 0.37 |
 
 *2026-11-07, `09c0e19` against `335f834`, CPU 8, `bench/roofline/rules`, `rules stagger`.* The
-before column is the stagger the first port had: lines of 128 bytes and no page term.
+before column is the stagger the first port had: lines of 128 bytes and no page term. On a 4 KiB
+kernel under `muvm` 64 buffers go from 1.0 at 1 MiB, 6.7 at 2 MiB and 18 from 4 MiB up to 0.80 to
+0.87, nested walks inflating the first figures, as above.
 
 ### Order: pops ascend
 

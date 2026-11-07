@@ -613,8 +613,8 @@ impl<'a, O: Os> Back<'a, O> {
 
     /// [`Back::alloc`] for a large block whose alignment is at most `policy::STAGGER_STEP`: it
     /// starts at its slot's stagger (`Layout::stagger`) if the object fits there, so that large
-    /// blocks of a class do not all start at the same offset in the caches. A small class is
-    /// never staggered.
+    /// blocks of a class do not all start at the same offset in the caches and the TLB. A small
+    /// class is never staggered.
     pub fn alloc_staggered(&self, class: Class, size: usize) -> Option<Block> {
         self.alloc_at(class, size, true)
     }
@@ -734,8 +734,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// milliseconds (`docs/research/large-blocks.md`, "Slack: what earlier tenants left in an
     /// occupied slot"). What a trim leaves below the step stays in the slot, resident and in no
     /// count, until the slot's next claim trims again or its free charges it. A step here is
-    /// pages and never whole huge pages, as the purge walk's pieces are in a class of a huge
-    /// page or more: those pieces must not split a huge page of a free slot that kept its
+    /// pages and never whole huge pages, as the purge walk's pieces are where a huge page is
+    /// 2 MiB: those pieces must not split a huge page of a free slot that kept its
     /// advice, and a slot that kept it here, which only a refused call to take it back leaves,
     /// has its range cut inward to whole huge pages by `purge_part`: nothing of a step inside
     /// the slot's whole huge pages goes, and a part in its unaligned tail, which the advice
@@ -1001,10 +1001,11 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
-    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`)
-    /// at a time, and the whole pages of `from` behind each piece go back to the OS before the
-    /// next is copied, so the two copies are both resident for one piece at most. Aborts if
-    /// `from` is not the start of a handed-out large slot or a run.
+    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`, or
+    /// a huge page if the slot is advised for larger ones) at a time, and the whole pages of
+    /// `from` behind each piece go back to the OS before the next is copied, so the two copies
+    /// are both resident for one piece at most. Aborts if `from` is not the start of a
+    /// handed-out large slot or a run.
     ///
     /// What becomes of `from`'s slot depends on `why` (design: "Large objects"):
     ///
