@@ -26,7 +26,7 @@ use crate::space::Space;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
 /// Bytes of the magazine area committed at a time, beyond what a new magazine needs, so that
 /// most magazines are made without a system call.
@@ -142,9 +142,12 @@ impl Magazine<'_> {
         self.slot(0)
     }
 
-    /// The level and depth recorded in the last slot.
+    /// The level and depth recorded in the last slot. Relaxed, here and in [`Magazine::set_record`]:
+    /// whoever reads a record of a magazine it holds came to it by the stack's release and acquire,
+    /// the drain's fence or the CPU's context switch, which order the record with the rest of the
+    /// magazine. A read of a spare stack's top that it does not hold is only for a hint of depth.
     pub(crate) fn record(&self) -> Record {
-        let word = self.slot(self.size().slots() - 1).load(Acquire).addr() as u64;
+        let word = self.slot(self.size().slots() - 1).load(Relaxed).addr() as u64;
         Record {
             level: ((word as u32) as usize).min(self.size().capacity()),
             depth: (word >> 32) as u32,
@@ -157,7 +160,7 @@ impl Magazine<'_> {
         let level = record.level.min(self.size().capacity());
         let word = (record.depth as u64) << 32 | level as u64;
         self.slot(self.size().slots() - 1)
-            .store(ptr::without_provenance_mut(word as usize), Release);
+            .store(ptr::without_provenance_mut(word as usize), Relaxed);
     }
 
     /// The level recorded in the last slot.
