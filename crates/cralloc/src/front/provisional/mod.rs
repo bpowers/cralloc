@@ -1,15 +1,16 @@
 //! Hand-written aarch64 routines, until Lean emits them.
 //!
-//! Each is the direct translation of its x86-64 routine in `generated/`, with the same module and
-//! function names that `generated/aarch64/` and `generated/aarch64_inline/` will have, so that the
-//! swap to Lean's output is the one `use` in `front`. They keep the design's rules (docs/design.md,
-//! "Front end: magazines under rseq"), which their proofs will have to find:
+//! Each does what its x86-64 routine in `generated/` does, by the instructions measured as best in
+//! `docs/research/firestorm.md`, with the same module and function names that `generated/aarch64/`
+//! and `generated/aarch64_inline/` will have, so that the swap to Lean's output is the one `use` in
+//! `front`. They keep the design's rules (docs/design.md, "Front end: magazines under rseq"), which
+//! their proofs will have to find:
 //!
 //! - a routine changes nothing another thread could see before its one commit store, its last
-//!   instruction in the sequence, and a read of the CPU number is the sequence's first;
-//! - an abort restarts it from the arming store, with its arguments as they were, so nothing
-//!   before the commit writes a register the restart reads: an output lives in a scratch register
-//!   until the commit is done, and an inline routine's operands are early-clobber;
+//!   instruction in the sequence, and a read of the CPU number comes first where it decides anything;
+//! - an abort returns to the arming store with the registers as they were, so nothing after it
+//!   writes the rseq area's register, the descriptor's, or an argument, and a register that a
+//!   routine writes and returns is set again after the arming store;
 //! - a miss leaves the arguments intact, so that a C routine reaches its slow path with the C
 //!   function's own, by one branch.
 //!
@@ -17,12 +18,11 @@
 //!
 //! - The abort handler is preceded by the signature glibc registered, `brk #0x45e0`, and the thread
 //!   pointer is `tpidr_el0`.
-//! - A conditional branch reaches 1 MiB, and a linker cannot put a veneer on one. So every miss stub
-//!   and abort handler stays in its function's own section, after the function (`.subsection 1`), and
-//!   nothing a condition targets is in another section. A function larger than 1 MiB is out of the
-//!   reach of its own stubs, and fails to assemble rather than to run. `b` reaches 128 MiB and a
-//!   linker may add a veneer, which may overwrite x16 and x17: only a C routine's tail call to its
-//!   slow path crosses sections, and those registers then hold nothing.
+//! - A conditional branch reaches 1 MiB, and a linker cannot put a veneer on one. So a condition only
+//!   targets its own routine: an inlined routine's end, with the result already set, or a stub after
+//!   a function's `ret`. The abort handler holds an unconditional branch, in `.subsection 1`, past
+//!   the end of its function, with no veneer: `b` reaches 128 MiB, and only a C routine's tail call to
+//!   its slow path crosses sections, where a veneer's x16 and x17 hold nothing.
 //! - Displacements are small and `adr` reaches 1 MiB, so what x86-64 reads at a displacement from
 //!   `SLABS` it reaches here by `adrp`, which reaches 4 GiB. The displacements are the specification's,
 //!   the same on every target.

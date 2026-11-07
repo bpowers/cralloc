@@ -1,8 +1,8 @@
 # Safety ledger: `crates/cralloc/src/front/provisional/`
 
-The aarch64 routines are hand-written until Lean emits them. Each is the translation of the x86-64
-routine of its name and has that routine's contract, so what `Real` and the C layer owe them is
-already discharged (`real-safety.md`, `c/routines-safety.md`), but for the red zone, which this
+The aarch64 routines are hand-written until Lean emits them. Each does what the x86-64 routine of its
+name does, by the instructions `docs/research/firestorm.md` chose, and has that routine's contract, so
+what `Real` and the C layer owe them is already discharged (`real-safety.md`, `c/routines-safety.md`), but for the red zone, which this
 architecture does not have. What x86-64's proofs give the generated routines, these have only by the
 argument below and by test: the twins' differential test and the breakpoint tests run them. Nobody
 has reviewed these entries, and the Lean proofs replace them.
@@ -17,27 +17,35 @@ has reviewed these entries, and the Lean proofs replace them.
 **Proof.**
 
 1. *The area.* `mrs tpidr_el0` plus `__rseq_offset` is the calling thread's rseq area, by glibc's
-   definition of the variable (signed; the routine adds it). On musl the area is the crate's own
-   (PROVISIONAL-03), and the offset the linker's: `:tprel_hi12:` and `:tprel_lo12_nc:` of it.
+   definition of the variable (signed; the routine adds it). The routine finds the variable's address
+   in a word of its own, 32 bytes past its descriptor (`.quad __rseq_offset`), or, for `current_cpu`,
+   in a word in `.data.rel.ro`. On musl the area is the crate's own (PROVISIONAL-03), and the offset
+   the linker's: `:tprel_hi12:` and `:tprel_lo12_nc:` of it.
 2. *The sequence.* The descriptor names `6..7` and the abort handler `4`. The handler is preceded by
    the signature glibc registers on aarch64, `0xd428bc00` (`sysdeps/unix/sysv/linux/aarch64/bits/rseq.h`):
    the kernel reads the four bytes before the abort address and kills a thread on a mismatch. The
-   handler jumps to `5`, which reloads the area and arms again, since the kernel clears `rseq_cs`
-   when it aborts.
+   handler jumps to `5`, the arming store, since the kernel clears `rseq_cs` when it aborts. x10 and
+   x11 hold the area and the descriptor for it: the thread is the same one, and nothing writes them
+   after `5`.
 3. *One commit.* Between `6` and `7` the only stores are to a slot of the magazine the word names,
    which nothing can observe until the commit, and the commit, the last instruction before `7`.
    So an abort at any instruction leaves no change another thread can see. A store is a single
    64-bit `str` to an 8-aligned address, which is single-copy atomic, so the drain's exchange on
    another CPU sees the word before or after it.
-4. *The restart.* Everything `5` or later reads is an input: an operand no instruction writes. An
-   inlined routine's outputs and scratch operands are `out`, which the compiler keeps apart from
-   its inputs, and a naked routine writes only x9 to x14, and x0 only after `7`.
-5. *The branch.* Each conditional branch's target is in the same section, in the same function or
-   after it (`.subsection 1`), so that it is resolved by the assembler and needs no veneer, which
-   could overwrite x16 or x17, where an inlined routine's input may live. The abort handler's `b`
-   is the same.
+4. *The restart.* Everything from `5` reads an input no instruction writes, x10 or x11, or something
+   the sequence sets after `6`: an inlined pop's x0, a push's x4, the slab routines' x3 (`NO_CPU`),
+   set first of all. The operands are in fixed registers, which the compiler keeps apart. A naked
+   routine writes the result's register only after `7` and otherwise only x1 to x15 that are not
+   its arguments: `c_calloc` and `c_free_sized` leave x1, their second argument, alone.
+5. *The branch.* Each conditional branch's target is in its own routine: its end `7`, where the
+   result is as the routine set it first, or the stub after a naked routine's `ret`. The assembler
+   resolves each, and none needs a veneer. The abort handler's `b` is in the same section, past the
+   function's end, and a function does not reach 128 MiB. A naked routine's tail calls may get a
+   veneer, whose x16 and x17 hold nothing the slow path takes.
 6. *The miss.* A CPU number of 8192 or more, as an unregistered thread's -1 or -2 reads unsigned,
-   branches before any address is formed from it. Nothing has been stored.
+   branches before any address is formed from it. Nothing has been stored. A miss leaves the
+   sequence, so `rseq_cs` names a sequence the thread is not in, which the kernel clears when it next
+   looks.
 7. *The ABI.* The naked routines write only registers AAPCS64 lets a callee write and the flags;
    none uses the stack or x16, x17 or x18. The `asm!` blocks declare every register they write, and
    leave `nostack` true: no stack, and the kernel builds a signal frame below `sp`, there being no
@@ -56,15 +64,17 @@ under the C names.
 
 **Proof.** As PROVISIONAL-01, with these differences.
 
-1. *The tables.* A table's address comes by `adrp` and `:lo12:`, with the displacements of the
-   specification, which `aarch64/mod.rs` asserts. Each index is in range as on x86-64: the size
-   compared first for `malloc` and `calloc`, the low 16 bits for the sized free's table, and the
-   compare with 4096 for the region table. A position read from a table is a byte, below the 256
-   entries of the masks' table, and a zero mask misses.
-2. *The arguments.* x0 and x1 are not written before a commit, so a restart finds them, and a miss
-   reaches its slow path with them by one `b`, whose veneer, if the linker adds one, may overwrite
-   only x16 and x17, which hold nothing the slow path takes. `c_calloc`'s block goes in x2, which
-   neither restart nor miss reads, and `c_malloc` returns its block through x10.
+1. *The tables.* A table's address comes by `adrp`, with the displacements of the specification,
+   which `aarch64/mod.rs` asserts, and `SLABS` is page-aligned. Each index is in range as on x86-64:
+   the size compared first for `malloc` and `calloc`, the low 16 bits for the sized free's table, and
+   the compare with 4096 for the region table. `calloc`'s product is below 2^32, both factors being
+   below 65536, and is compared with 1024 before it indexes. A position read from a table is a byte,
+   below the 256 entries of the masks' table, and a zero mask misses. The hot word is at `[x3, x5,
+   lsl #3]`, this CPU's slab indexed by that position.
+2. *The arguments.* x0 and x1 are not written before a commit by a routine that takes them, so a
+   restart finds them, and a miss reaches its slow path with them by one `b`. `c_malloc` writes x1,
+   which is not its argument, and holds its block in x4 until after the commit, and `c_calloc` moves
+   its block to x2 after the commit for the tail. Neither restart nor miss reads x2.
 3. *The mirror.* A stale region shift, base or byte gives a position whose mask is zero, an index
    out of range or a class that the slow path corrects, as on x86-64: the routine's contract holds
    for every content of those words. So their order on a weak machine is no matter of safety.

@@ -20,7 +20,67 @@
 
 static int fd_cyc = -1, fd_ins = -1;
 
+#ifdef __aarch64__
+#include <dirent.h>
+
+/* Reads a small file under the PMU's sysfs directory into buf; returns 0 if it cannot. */
+static int pmu_read(const char *pmu, const char *file, char *buf, size_t n) {
+    char path[256];
+    snprintf(path, sizeof path, "/sys/bus/event_source/devices/%s/%s", pmu, file);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t got = fread(buf, 1, n - 1, f);
+    buf[got] = 0;
+    fclose(f);
+    return got > 0;
+}
+
+/* Whether a kernel CPU list such as "2-5,8" holds cpu. */
+static int in_list(const char *list, int cpu) {
+    while (*list) {
+        char *end;
+        long a = strtol(list, &end, 10), b = a;
+        if (*end == '-') b = strtol(end + 1, &end, 10);
+        if (a <= cpu && cpu <= b) return 1;
+        list = *end == ',' ? end + 1 : "";
+    }
+    return 0;
+}
+
+/* The PMU of the CPU this runs on: on a machine with two kinds of core the generic hardware type
+ * lands on whichever the kernel picks. Cycles and instructions by that PMU's own codes. */
+static int counter_on(int cpu, uint64_t which) {
+    DIR *d = opendir("/sys/bus/event_source/devices");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char buf[64];
+        if (!pmu_read(e->d_name, "cpus", buf, sizeof buf) || !in_list(buf, cpu)) continue;
+        const char *names[2][2] = {{"events/cycles", "events/cpu_cycles"}, {"events/instructions", "events/inst_retired"}};
+        int w = which == PERF_COUNT_HW_INSTRUCTIONS;
+        unsigned long code;
+        char ev[64];
+        if (!pmu_read(e->d_name, names[w][0], ev, sizeof ev) && !pmu_read(e->d_name, names[w][1], ev, sizeof ev)) continue;
+        if (sscanf(ev, "event=%lx", &code) != 1 || !pmu_read(e->d_name, "type", buf, sizeof buf)) continue;
+        closedir(d);
+        struct perf_event_attr a;
+        memset(&a, 0, sizeof a);
+        a.size = sizeof a;
+        a.type = (uint32_t)strtoul(buf, NULL, 10);
+        a.config = code;
+        a.disabled = 1;
+        a.exclude_kernel = 1;
+        a.exclude_hv = 1;
+        return (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
+    }
+    if (d) closedir(d);
+    return -1;
+}
+#endif
+
 static int counter(uint64_t config) {
+#ifdef __aarch64__
+    return counter_on(sched_getcpu(), config);
+#endif
     struct perf_event_attr a;
     memset(&a, 0, sizeof a);
     a.size = sizeof a;
