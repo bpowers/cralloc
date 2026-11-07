@@ -206,13 +206,15 @@ moves under about 2%.
   builds it as asking for snmalloc's Debug configuration, and `cc` as asking for frame pointers. The
   suite's release profile has `debug = 1`, so snmalloc ran unoptimized with its assertions on, 158
   ns a pipeline allocation and 502 cycles a `churn live=1k` operation on the M1 Max against 13.8 and
-  21.0 in Release, and the crates' jemalloc and mimalloc kept frame pointers. Those crates now build
-  as a default release profile does (2026-11-07 at `69dd363`), and every figure of them on the Ryzen
-  is from before. A thread whose first jemalloc call is a free gets no thread cache: tikv's prefixed
-  build ran 181% and 104% slower than Fedora's on jobs with free-only threads, and 1 to 4% faster
-  elsewhere, hence the `all-alloc` and `free-only` forms. tcmalloc's shared library through TLS
-  descriptors understated it by 14 to 26%. A program that compiles in its own allocator hides under
-  preload: difftastic's spread was 2.7% until its jemalloc came out, then 18%.
+  21.0 in Release, and the crates' jemalloc and mimalloc kept frame pointers and nothing else of a
+  debug build (the mimalloc crate's debug mode needs a feature; the mimalloc built from third_party
+  was never touched). All three now build as a default release profile does (2026-11-07 at
+  `69dd363`), and every figure of them on the Ryzen is from before. A thread whose first jemalloc
+  call is a free gets no thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's
+  on jobs with free-only threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and
+  `free-only` forms. tcmalloc's shared library through TLS descriptors understated it by 14 to 26%.
+  A program that compiles in its own allocator hides under preload: difftastic's spread was 2.7%
+  until its jemalloc came out, then 18%.
 - **Some jobs run in two modes, and their medians compare mode counts:** xmalloc-test, glibc on
   larson, DataFusion on two L3s, the order service over HTTP/2 (4 to 6% more instructions, not tied
   to a build), Qdrant's search routing. Look at the runs before reading a median.
