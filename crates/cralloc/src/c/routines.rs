@@ -1,4 +1,5 @@
-//! The generated C entry points (`front/generated/x86_64/centry.rs`), callable from Rust:
+//! The generated C entry points (`front/generated/x86_64/centry.rs`, and on aarch64 their
+//! hand-written counterparts in `front/provisional/`), callable from Rust:
 //! `malloc`, `calloc`, `free` and `free_sized` as the exported C symbols run them, for the tests and the
 //! conformance suite, which cannot export `malloc` from their own processes. Each is a call of
 //! the routine; the exported symbols are the routines themselves (`export_c_abi!`). The ledger

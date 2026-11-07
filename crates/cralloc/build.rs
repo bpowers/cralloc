@@ -21,7 +21,7 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(cralloc_real)");
     let is = |name: &str, value: &str| var_os(name).is_some_and(|v| v == value);
     if is("CARGO_CFG_TARGET_OS", "linux")
-        && is("CARGO_CFG_TARGET_ARCH", "x86_64")
+        && (is("CARGO_CFG_TARGET_ARCH", "x86_64") || is("CARGO_CFG_TARGET_ARCH", "aarch64"))
         && var_os("CARGO_CFG_KANI").is_none()
     {
         println!("cargo::rustc-cfg=cralloc_os");

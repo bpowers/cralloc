@@ -447,8 +447,7 @@ impl<O: Os> Back<'_, O> {
             // Whoever raises the count past the floor has the line already: an add that
             // crosses an eighth of the floor looks at the whole count, and over the floor asks
             // a slow path to look at the level (`crate::thread_word`).
-            // Every space is made on the OS's geometry, so the step is a constant.
-            let floor = const { allowance_floor(O::GEOMETRY) };
+            let floor = allowance_floor(self.space.plan().geometry());
             if crate::thread_word::crosses(old, bytes, floor / 8) {
                 // The hold's floor is on large memory alone: a crossing that takes it over
                 // tells the background thread, if its plan for the hold waited for that.

@@ -8,7 +8,7 @@
 //! instructions and then aborts: the "every prefix followed by an abort" case a restartable
 //! sequence has to survive, made deterministic.
 //!
-//! x86-64 Linux with glibc 2.35 or later (the probe uses glibc's rseq registration).
+//! x86-64 or aarch64 Linux with glibc 2.35 or later (the probe uses glibc's rseq registration).
 use std::arch::asm;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
@@ -21,7 +21,7 @@ extern "C" {
     static __start_cs_points: [u64; 6];
 }
 
-// glibc's `struct sigaction` on x86-64.
+// glibc's `struct sigaction` on x86-64 and aarch64.
 #[repr(C)]
 struct SigAction {
     handler: usize,
@@ -30,9 +30,20 @@ struct SigAction {
     restorer: usize,
 }
 
+#[cfg(target_arch = "x86_64")]
 const SYS_CLOSE: i64 = 3;
+#[cfg(target_arch = "x86_64")]
 const SYS_IOCTL: i64 = 16;
+#[cfg(target_arch = "x86_64")]
 const SYS_PERF_EVENT_OPEN: i64 = 298;
+#[cfg(target_arch = "aarch64")]
+const SYS_CLOSE: i64 = 57;
+#[cfg(target_arch = "aarch64")]
+const SYS_IOCTL: i64 = 29;
+#[cfg(target_arch = "aarch64")]
+const SYS_PERF_EVENT_OPEN: i64 = 241;
+// Execution breakpoints use sizeof(long) on x86-64 and an instruction's length on aarch64.
+const BP_LEN: u64 = if cfg!(target_arch = "aarch64") { 4 } else { 8 };
 const SIGTRAP: i32 = 5;
 const SA_SIGINFO: i32 = 4;
 const PERF_EVENT_IOC_DISABLE: i64 = 0x2401;
@@ -58,7 +69,7 @@ fn arm(addr: u64) -> i32 {
     attr[5] = (1 << 5) | (1 << 6) | (1 << 36) | (1 << 37);
     attr[6] = HW_BREAKPOINT_X << 32; // bp_type (upper half; wakeup_events stays 0)
     attr[7] = addr; // bp_addr
-    attr[8] = 8; // bp_len: execution breakpoints must use sizeof(long)
+    attr[8] = BP_LEN; // bp_len
     let fd = unsafe { syscall(SYS_PERF_EVENT_OPEN, attr.as_ptr(), 0i64, -1i64, -1i64, 0i64) } as i32;
     assert!(fd >= 0, "perf_event_open failed: {}", std::io::Error::last_os_error());
     fd
@@ -70,6 +81,60 @@ fn arm(addr: u64) -> i32 {
 /// The store into `slots` happens before the commit, as in a real per-CPU push: an abort
 /// after it must leave a dead write above the length and nothing else.
 #[inline(never)]
+#[cfg(target_arch = "aarch64")]
+unsafe fn push(rseq: *mut u8, hdr: *mut u64, slots: *mut u64, cap: u64, val: u64) -> u32 {
+    let res: u32;
+    asm!(
+        "adrp {tmp}, 3f",
+        "add {tmp}, {tmp}, :lo12:3f",
+        "str {tmp}, [{rseq}, #8]",
+        "20:",
+        "ldr {tmp}, [{hdr}]",
+        "21:",
+        "cmp {tmp}, {cap}",
+        "22:",
+        "b.hs 5f",
+        "23:",
+        "str {val}, [{slots}, {tmp}, lsl #3]",
+        "24:",
+        "add {tmp}, {tmp}, #1",
+        "25:",
+        "str {tmp}, [{hdr}]", // the single committing store
+        "4:",
+        "mov {res:w}, #0",
+        "b 6f",
+        "5:",
+        "mov {res:w}, #1",
+        "b 6f",
+        // The signature glibc registers on aarch64: `brk #0x45e0`.
+        ".inst 0xd428bc00",
+        "7:",
+        "mov {res:w}, #2",
+        "6:",
+        ".pushsection __rseq_cs, \"aw\"",
+        ".balign 32",
+        "3:",
+        ".long 0, 0",
+        ".quad 20b, 4b - 20b, 7b",
+        ".popsection",
+        ".pushsection cs_points, \"awR\"",
+        ".quad 20b, 21b, 22b, 23b, 24b, 25b",
+        ".popsection",
+        rseq = in(reg) rseq,
+        hdr = in(reg) hdr,
+        slots = in(reg) slots,
+        cap = in(reg) cap,
+        val = in(reg) val,
+        tmp = out(reg) _,
+        res = out(reg) res,
+        options(nostack),
+    );
+    res
+}
+
+/// The same section on x86-64.
+#[inline(never)]
+#[cfg(target_arch = "x86_64")]
 unsafe fn push(rseq: *mut u8, hdr: *mut u64, slots: *mut u64, cap: u64, val: u64) -> u32 {
     let res: u32;
     asm!(
@@ -128,11 +193,23 @@ unsafe fn push(rseq: *mut u8, hdr: *mut u64, slots: *mut u64, cap: u64, val: u64
     res
 }
 
+fn thread_pointer() -> usize {
+    let tp: usize;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly))
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags))
+    };
+    tp
+}
+
 fn main() {
     let act = SigAction { handler: on_trap as *const () as usize, mask: [0; 16], flags: SA_SIGINFO, restorer: 0 };
     assert_eq!(unsafe { sigaction(SIGTRAP, &act, std::ptr::null_mut()) }, 0);
-    let tp: usize;
-    unsafe { asm!("mov {}, fs:0", out(reg) tp) };
+    let tp = thread_pointer();
     let rseq = (tp as isize + unsafe { __rseq_offset }) as *mut u8;
     println!(
         "rseq area at tp{:+}, size {}, cpu_id {}",

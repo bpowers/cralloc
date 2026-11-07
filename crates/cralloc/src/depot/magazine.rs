@@ -327,7 +327,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// Makes `start..end` of the area writable if it is not already.
     fn commit_to(&self, end: usize) -> bool {
-        let page = O::GEOMETRY.page_size();
+        let page = O::geometry().page_size();
         loop {
             let committed = self.depot.growth.committed.load(Acquire);
             if committed >= end {
