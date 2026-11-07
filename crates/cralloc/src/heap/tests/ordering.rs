@@ -162,6 +162,7 @@ fn blocks_keep_their_last_owners_writes_through_drains_fully() {
 mod process {
     use super::*;
     use crate::Cralloc;
+    use core::sync::atomic::AtomicU64;
 
     fn on_the_real_routines(
         place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
@@ -202,5 +203,69 @@ mod process {
     #[ignore = "slow: run with scripts/gate --all"]
     fn blocks_keep_their_last_owners_writes_on_one_cpu_fully() {
         on_the_real_routines(|n, f| together(n, f), FULL);
+    }
+
+    /// Threads run the fast paths as hard as they can while another drains their CPUs, one fence
+    /// at a time, as fast as it can. A commit that landed after the drainer believed it owned the
+    /// word would leave a running thread and the depot with one magazine, and sooner or later two
+    /// threads with one block: each block carries its holder's stamp, checked as it is freed.
+    /// `collect` above is too slow to hit that: this finds a fence left out in seconds.
+    fn a_drain_leaves_each_thread_its_own_blocks(time: Duration) {
+        const HELD: usize = 16;
+        let l = layout(64, 8);
+        let rounds = Rounds::of(time, 0);
+        let stop = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let process = crate::heap::global::process();
+                while !stop.load(Ordering::Relaxed) {
+                    for cpu in 0..16 {
+                        let _ = process.drain(cpu);
+                    }
+                }
+            });
+            spread(4, |me| {
+                let mut held = [ptr::null_mut::<u8>(); HELD];
+                let mut round = 0u64;
+                while rounds.go_on(round) {
+                    let at = round as usize % HELD;
+                    let stamp = |round: u64| (me as u64) << 56 | round;
+                    if !held[at].is_null() {
+                        // SAFETY: a block this thread holds, of at least 8 bytes.
+                        let word = unsafe { AtomicU64::from_ptr(held[at].cast()) };
+                        assert_eq!(
+                            word.load(Ordering::Relaxed),
+                            stamp(round - HELD as u64),
+                            "a block two threads hold"
+                        );
+                        // SAFETY: allocated with this layout, freed once.
+                        unsafe { Cralloc.dealloc(held[at], l) };
+                    }
+                    // SAFETY: a valid layout.
+                    held[at] = unsafe { Cralloc.alloc(l) };
+                    assert!(!held[at].is_null());
+                    // SAFETY: as above.
+                    unsafe { AtomicU64::from_ptr(held[at].cast()) }
+                        .store(stamp(round), Ordering::Relaxed);
+                    round += 1;
+                }
+                for block in held.into_iter().filter(|block| !block.is_null()) {
+                    // SAFETY: as above.
+                    unsafe { Cralloc.dealloc(block, l) };
+                }
+            });
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn a_drain_leaves_each_thread_its_own_blocks_quickly() {
+        a_drain_leaves_each_thread_its_own_blocks(QUICK);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn a_drain_leaves_each_thread_its_own_blocks_fully() {
+        a_drain_leaves_each_thread_its_own_blocks(FULL);
     }
 }
