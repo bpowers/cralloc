@@ -317,7 +317,7 @@ Lessons:
   UMA on their locks, our stock on a failed compare-and-swap.
 - **A round trip sizes a buffer; the rate of a one-way flow sizes a batch.** Only tcmalloc's growth
   past two batches asks for a round trip. tcmalloc, jemalloc and Linux all grow transfers on runs in
-  one direction, and magazines of 1,024 slots moved our one-way pipelines by 4 to 20%
+  one direction, and magazines of 1,024 slots moved our one-way pipelines by 10 to 20%
   ([magazines.md](magazines.md)). Linux grows on a plain refill by design, since a CPU that only
   allocates holds no idle pages.
 - **One-way ratchets fail.** glibc's mmap threshold only grows, and rpmalloc dropped its 1.3
