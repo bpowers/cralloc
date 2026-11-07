@@ -4,6 +4,7 @@
 // realloc that copies the whole block writes them all and makes the new block resident.
 // usage: sparse_realloc [MIB]
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 
 static long rss_mib(void) {
@@ -11,7 +12,7 @@ static long rss_mib(void) {
     FILE *f = fopen("/proc/self/statm", "r");
     if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
     if (f) fclose(f);
-    return rss * 4096 / (1 << 20);
+    return rss * sysconf(_SC_PAGESIZE) / (1 << 20);
 }
 
 int main(int argc, char **argv) {

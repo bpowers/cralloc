@@ -156,8 +156,19 @@ const fn case(name: &'static str, call: Call, expect: Expect) -> Case {
 const BLOCK: Expect = Expect::Block { align: 0 };
 const PAGE_ALIGNED: Expect = Expect::Block { align: PAGE };
 
-/// The page size on x86-64 Linux, which `valloc` and `pvalloc` align to.
+/// The least page size, which is what a case can say it expects of `valloc` and `pvalloc`; what
+/// they are checked against is the kernel's ([`page`]).
 const PAGE: usize = 4096;
+
+/// The page size of the kernel the test runs on, which `valloc` and `pvalloc` align to.
+fn page() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: c_int) -> core::ffi::c_long;
+    }
+    const SC_PAGESIZE: c_int = 30;
+    // SAFETY: a query of a constant of the system.
+    unsafe { sysconf(SC_PAGESIZE) as usize }
+}
 
 /// Sizes that cross every kind of boundary: 8-byte classes, the 16-byte rule, class steps, the
 /// end of the small classes, large slots, and back down.
@@ -990,7 +1001,7 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
                     c.set_errno(ERRNO_SENTINEL);
                     let p = c.valloc(size).ok_or("no valloc")?;
                     Made {
-                        align: PAGE,
+                        align: page(),
                         ..Made::new(p, size, c.errno())
                     }
                 }
@@ -998,9 +1009,9 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
                     c.set_errno(ERRNO_SENTINEL);
                     let p = c.pvalloc(size).ok_or("no pvalloc")?;
                     // The whole of the last page is the caller's.
-                    let pages = size.checked_next_multiple_of(PAGE).unwrap_or(size);
+                    let pages = size.checked_next_multiple_of(page()).unwrap_or(size);
                     Made {
-                        align: PAGE,
+                        align: page(),
                         ..Made::new(p, pages, c.errno())
                     }
                 }

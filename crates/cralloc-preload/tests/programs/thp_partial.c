@@ -54,13 +54,14 @@ static void show(const char *what) {
 }
 
 int main(void) {
-    size_t huge = 2 << 20, n = 32 * huge;
+    // One page table's worth of pages: 2 MiB on 4 KiB pages, 32 MiB on 16 KiB, 512 MiB on 64 KiB.
+    size_t page = (size_t)sysconf(_SC_PAGESIZE), huge = page * page / 8, n = 32 * huge;
     char *raw = mmap(0, n + huge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     char *p = (char *)(((size_t)raw + huge - 1) & ~(huge - 1));
     show("start");
     madvise(p, n, MADV_HUGEPAGE);
-    for (size_t i = 0; i < n; i += 4096) p[i] = 1;
-    show("64 MiB written under MADV_HUGEPAGE");
+    for (size_t i = 0; i < n; i += page) p[i] = 1;
+    show("32 huge pages written under MADV_HUGEPAGE");
     madvise(p, n, MADV_NOHUGEPAGE);
     // Half of every huge page.
     for (size_t i = 0; i < n; i += huge) madvise(p + i + huge / 2, huge / 2, MADV_DONTNEED);

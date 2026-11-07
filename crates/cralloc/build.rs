@@ -16,6 +16,8 @@ use std::env::var_os;
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    // The page of the simulated shapes (`os::sim`), which the crate reads with `option_env!`.
+    println!("cargo::rerun-if-env-changed=CRALLOC_SIM_PAGE_SHIFT");
     println!("cargo::rustc-check-cfg=cfg(kani)");
     println!("cargo::rustc-check-cfg=cfg(cralloc_os)");
     println!("cargo::rustc-check-cfg=cfg(cralloc_real)");
