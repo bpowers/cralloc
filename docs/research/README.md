@@ -30,9 +30,10 @@ patterns below, ranked by what one event costs:
 **What binds once those are gone** is op count and the chain of loads through the CPU number to the
 slab word. A tight pair retires 33.7 ops, which at 8 a cycle would take 4.2 of its 4.96 cycles, yet
 taking out 5 ops saved only 0.22, since the loads then wait on the chain. Nothing yet separates that
-from the front end. In real programs what binds is misses and where the caller's code lands: inside
-the pop on the log store, cycles fall on the slab word's load (26%) and the magazine slot's (37%).
-Byte alignment by itself and byte savings did not matter. [roofline.md](roofline.md)
+from the front end. In real programs what binds is misses and where the caller's code lands. Inside
+the pop on the log store, cycles fall on the slab word's load (26%) and the magazine slot's (37%),
+though one call in thirty misses. Byte alignment by itself and byte savings did not matter.
+[roofline.md](roofline.md)
 
 ## What the hardware charges
 
@@ -73,19 +74,21 @@ instruction:
 | mimalloc | 1.083 (x1.05) | 1.057 (x1.02) | 1.024 (x1.03) |
 | glibc | 1.254 (x1.09) | 1.175 (x1.09) | 1.067 (x1.08) |
 
-No stall shows for those two, though this split cannot exclude one: a quarter to two fifths of
-jemalloc's gap is not explained by its extra code at its own speed, and no stall counter has been
-run. Stalls do show for mimalloc on the log store (1.09) and glibc on the order service (1.14 to
-1.20), where blocks cross CPUs. Nothing yet separates those into misses and lock waits.
+No stall shows for those two, except tcmalloc's unresolved 1 to 2% on the Connect jobs, though this
+split cannot exclude one: a quarter to two fifths of jemalloc's gap is not explained by its extra
+code at its own speed, and no stall counter has been run. Stalls do show for mimalloc on the log
+store (1.09) and glibc on the order service (1.14 to 1.20). Nothing yet separates those into misses
+and lock waits.
 
 **False sharing has one measured case in a program.** Keeping tokio's run-queue headers apart takes
 8 to 14% off a spawn loop and moves no server measured, at four CPUs on one L3. All of the program's
 cross-core heap loads could be worth 10 to 18% of the order service's cycles and 3 to 4% of the RPC
 jobs'. How much of that is false sharing is not known.
 
-**Spreading objects over more lines has never been tested.** Every experiment so far reorders the
-same slots, and there order decides. Lines per object has not been varied on any server. Our rule so
-far is to keep objects dense and ascending, and act only on the first objects of a run.
+**Spreading objects over more lines has barely been tested.** Nearly every experiment reorders the
+same slots, and there order decides. Lines per object has been varied on a server once, for one
+class, and fills did not move. It has not been varied across a heap. Our rule so far is to keep
+objects dense and ascending, and act only on the first objects of a run.
 
 **Where placement has mattered, it is a few lines or one shape of program:**
 
@@ -183,8 +186,8 @@ job named here.
 - **Whether an allocator spreads a program's objects over more cache lines, and how the share of
   false sharing changes between allocators.** We want this measured. We have L1 fills for two or
   three allocators and the size of two known structures, nothing across all five, and nothing has
-  varied lines per object on a server. [program-effects.md](program-effects.md), "Not yet measured",
-  has how to measure it.
+  varied lines per object across a heap. [program-effects.md](program-effects.md), "Not yet
+  measured", has how to measure it.
 - **Anything beyond one CPU model.** A second machine would show which rules are Zen 5's.
 - **Anything beyond four CPUs.** Every server run pinned the server to four, so we have not seen
   what magazines park on 32 CPUs, or how false sharing grows.
