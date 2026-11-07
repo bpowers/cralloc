@@ -263,9 +263,10 @@ and spread over the ten jobs:
 
 Moving purge to the thread has no tail cost: in one binary switching it at run time, on Meilisearch,
 14 paired rounds of two minutes, p99 moves -0.9 ms (95% interval -2.1 to +0.5) and p99.9 0.0 (-2.3
-to +2.3), with TLB shootdowns the same (2026-10-22). Page faults rise 5% (87 against 83 a request)
-at no cost in latency. The thread then wakes 25 times a second at 70% and does about 9 ms of work a
-second there.
+to +2.3), with TLB shootdowns the same (2026-10-22). Within that binary page faults read 5% higher
+(87 against 83 a request) at no cost in latency, but the separate builds of the two behaviours are
+level at 82.5, so whether the rise is real is not settled. The thread then wakes 25 times a second
+at 70% and does about 9 ms of work a second there.
 
 ### The first requests after a silence
 
