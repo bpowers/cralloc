@@ -5,12 +5,13 @@ in the source we read. Stress on the reference host attacked most of them; the t
 on a reading alone. The weakest evidence is for the fence the drain uses, which no probe isolates.
 
 An earlier design also trusted the range of the concurrency ID, and that failed. After an `execve`
-that returns, in a process with more threads than 1.25 times its allowed CPUs, a thread can read
-`mm_cid == 0x80000000`: reproduced on 7.2.9, with the same code at every tag read from v6.19 to
-v7.4-rc1. cralloc therefore indexes its caches by CPU number and compares that number with the slab
-count on every call, so no value the kernel writes can index outside the slabs. That is all the
-compare buys. A wrong `cpu_id` in range would put two threads on one slab, so that the number is
-right is trusted and not checked (`docs/design.md`, "What is trusted").
+that returns, in a process with more threads than 1.25 times its allowed CPUs, or than the machine's
+possible CPUs if fewer, a thread can read `mm_cid == 0x80000000`: reproduced on 7.2.9, with the same
+code at every tag read from v6.19 to v7.4-rc1. cralloc therefore indexes its caches by CPU number
+and compares that number with the slab count on every call, so no value the kernel writes can index
+outside the slabs. That is all the compare buys. A wrong `cpu_id` in range would put two threads on
+one slab, so that the number is right is trusted and not checked (`docs/design.md`, "What is
+trusted").
 
 | What we rely on | Read in source | Attacked on the host by |
 |---|---|---|
@@ -76,7 +77,8 @@ call.
 | uprobe inside the sequence | **no abort**, and `rseq_cs` is cleared: the probed instruction runs out of line, so the saved instruction pointer is outside when the check runs (`kernel/entry/common.c:58-59`, `103`). From source |
 
 Forced on the host: preemption, migration, signals and `membarrier` by `cid_stress.rs`, and a
-breakpoint by `rseq_abort.rs`. A page fault with no switch, ptrace and single-step rest on the
+breakpoint by `rseq_abort.rs`. Page faults inside a section by `cid_stress.rs`, which does not
+separate those that resume in place from those that abort. ptrace and single-step rest on the
 source.
 
 **What an abort changes.** The kernel sets the saved instruction pointer to the abort handler and
@@ -202,10 +204,11 @@ and `os.posix_spawn` (`rseq_preload.rs`).
 ## Why we do not use `mm_cid`
 
 The area also carries a concurrency ID, a compact numbering of a process's running threads. Since
-the November 2025 rework a task owns its ID until threads pass 1.25 times its allowed CPUs, and then
-the kernel moves to per-CPU ownership. A cache indexed by it would act as a thread cache when
-threads are few and a bounded CPU cache when they are many, for the same instructions at another
-offset. We evaluated it, built it first, and replaced it on 2026-10-17, for three reasons.
+the November 2025 rework a task owns its ID until threads pass 1.25 times its allowed CPUs, or the
+machine's possible CPUs if fewer, and then the kernel moves to per-CPU ownership. A cache indexed by
+it would act as a thread cache when threads are few and a bounded CPU cache when they are many, for
+the same instructions at another offset. We evaluated it, built it first, and replaced it on
+2026-10-17, for three reasons.
 
 1. **A thread without a registration reads 0, which is a valid ID.** It would share another thread's
    cache unprotected, and telling the two apart costs instructions on every call. It reads a
@@ -237,11 +240,11 @@ threads reproduce it at the same rate. The value lasted 6 to 14 ms where sampled
 nothing bounds it. The kernel's own comment acknowledges the window ("the fork()/execve() window
 leaves the task active with no owned CID", `core.c:10979-10989`) but treats it as an internal
 hazard. v6.18 and earlier assigned an ID immediately and are not affected. v6.19 to 7.3-rc7 have
-this code (read 2026-10-16). The ID code in `core.c` and `task_mm_cid` are unchanged at v7.3 and,
-with `rseq_entry.h`, `rseq.h` and `rseq.c`, at v7.4-rc1 (read 2026-11, not run). A fast path that
-adds the ID to a static array unchecked reads a word a terabyte or more past it. A realistic trigger
-is a server pinned to four CPUs, with a blocking pool, that tries to run a script with a bad `#!`
-line and frees the `Command`.
+this code (read 2026-10-16). `bprm_execve`, `task_mm_cid` and the rseq files are unchanged at v7.3
+and v7.4-rc1, and `core.c`'s ID code too but for the threshold for going back to per-task mode at
+v7.4-rc1 (read 2026-11, not run). A fast path that adds the ID to a static array unchecked reads a
+word a terabyte or more past it. A realistic trigger is a server pinned to four CPUs, with a
+blocking pool, that tries to run a script with a bad `#!` line and frees the `Command`.
 
 **What did hold.** An ID comes from a per-process bitmap under the runqueue lock and changes only
 while the thread is switched out, so two running threads never share one and a change always aborts.
