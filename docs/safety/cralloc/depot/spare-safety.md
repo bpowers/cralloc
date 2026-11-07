@@ -14,4 +14,4 @@ turned into a handle with `class.magazine()` and pushed back on the full stack o
 (MAGAZINE-01). On `Pushed` the stack holds the magazine and the handle is dropped unused; on
 `Marker` or `NoCpu` nothing was written and the handle comes back to the caller.
 
-Reviewed: 3b5a3f5
+Reviewed: cb8a219

@@ -163,4 +163,4 @@ pointers are valid for writes of a `sigset_t` and a `stack_t`.
 (POSIX: with a null `set`, `how` is ignored); `sigaltstack(NULL, &stack)` only stores the
 current alternate stack. Both targets are locals of the right layout (BACKGROUND-01).
 
-Reviewed: c832e1b
+Reviewed: 7bad17e

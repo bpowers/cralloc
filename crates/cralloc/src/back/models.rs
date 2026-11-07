@@ -2234,7 +2234,7 @@ fn wide_direct_frees_heal_what_a_fork_left_fully() {
     direct_frees_heal_what_a_fork_left(1, true);
 }
 
-/// Review of the single free that looks at every level (`tree::release_one`, main `5c38865`).
+/// Review of the single free that looks at every level (`tree::release_one`, main `cc154bd`).
 /// The step it takes that `Up` in `tla/Summary.tla` does not: its OR of a level-1 bit finds
 /// the level-1 word empty, and it still reads the level-2 bit before setting it, while the
 /// thread that emptied that word is clearing the same bit on its way up

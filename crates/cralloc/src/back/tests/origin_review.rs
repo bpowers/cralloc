@@ -1,4 +1,4 @@
-//! Review of the small classes' origins (`Plan::slot_origin`, merged as `a76b222`): slot `i`
+//! Review of the small classes' origins (`Plan::slot_origin`, merged as `f361b53`): slot `i`
 //! of a small class is at `region_base + origin + i * size`, and the pages below the origin
 //! are meant never to be committed, purged or handed out.
 //!

@@ -1,7 +1,7 @@
 // What an in-place growth of a staggered large block costs, call by call: the faults, huge-page
 // faults and TSC ticks inside realloc, the resident memory it adds before the program writes a
 // byte, and the same for the program's fill of the new room. (Review of Back::unspill, main
-// f2f2c68.) A buffer is grown by doubling from 1 MiB to the top size, filled as it grows, and
+// 960cc3e.) A buffer is grown by doubling from 1 MiB to the top size, filled as it grows, and
 // freed, over and over; a second buffer holds slot 0 of the class, which has no stagger, so the
 // one measured sits in slot 1. Every byte is checked after each realloc.
 //

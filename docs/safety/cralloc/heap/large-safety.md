@@ -78,4 +78,4 @@ small class, its size rounded up to its alignment is at most `len`, which `block
 from `Back::room` (the bytes from the block's start to its slot's or run's end), the block
 stays after a shrink (`stays_after_shrink`), and `ptr` is aligned as `new` asks.
 
-Reviewed: 502257d
+Reviewed: c18c19d

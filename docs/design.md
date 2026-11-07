@@ -1371,7 +1371,7 @@ saved; we copy.
   C++ and the size that sized deletes carry; `docs/research/roofline.md`,
   "C++ new and delete without our operators", measures it. An implementation of every form
   but the throwing ones was built and then removed; the last commit that has it is
-  `58bf936`, under `crates/cralloc/src/c/`.
+  `d12eacf`, under `crates/cralloc/src/c/`.
 - **A size from C is a prediction, never trusted.** A sized free may use the size to find
   the class early, but the class from the address is the truth, and a wrong size behaves
   exactly like a free with no size.

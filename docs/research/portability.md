@@ -96,7 +96,7 @@ elsewhere.
 **Ruled out by construction.** The kernel requires a registered area to be 32-byte aligned, so
 `cpu_id` and `rseq_cs` always sit at bytes 4 to 15 of a 32-byte chunk. Each class therefore has a
 32-byte chunk with its hot word outside those bytes, today at 24 to 31, where no 16-aligned word can
-overlap it either. Minimum cycles over three interleaved rounds, against main at `f41dbf9`; the
+overlap it either. Minimum cycles over three interleaved rounds, against main at `f6d9023`; the
 adopted word then sat at bytes 16 to 23:
 
 | | Before | Two hot words a chunk | One a chunk (adopted) |

@@ -52,4 +52,4 @@ argument, `zeroed`, as `false`, which asks nothing of `to`: the back end then ne
 a page of `to` on the strength of it reading as zero (it purges the part under any zero source
 page first, BACK-CLASS-03).
 
-Reviewed: 502257d
+Reviewed: c18c19d

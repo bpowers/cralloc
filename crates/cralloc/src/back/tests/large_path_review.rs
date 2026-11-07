@@ -1,5 +1,5 @@
-//! Evidence for the adversarial review of the shorter large-object path (main `6ff0a8e`,
-//! `5c38865`): the release store of a size word, the unlocked activity count, the single-slot
+//! Evidence for the adversarial review of the shorter large-object path (main `ef2e43d`,
+//! `cc154bd`): the release store of a size word, the unlocked activity count, the single-slot
 //! release that looks at every level, the retained count as two tallies, the clock-led decay
 //! step, `Space::metadata_at`, and the one-pass claim.
 //!
@@ -349,7 +349,7 @@ fn the_tallies_wrap_and_a_subtraction_ahead_reads_as_zero() {
 /// A heartbeat that finds a pass due and nothing retained ends the pass as it starts: no pass
 /// is left under way, the heartbeats of the interval after it change nothing, and memory freed
 /// in that interval is returned by the first pass an interval after the empty one, not by the
-/// next heartbeat. (Before `6ff0a8e` a heartbeat with nothing retained left the decay word
+/// next heartbeat. (Before `ef2e43d` a heartbeat with nothing retained left the decay word
 /// alone, so the first heartbeat after a free found a pass long overdue and purged at once.)
 #[test]
 #[cfg_attr(miri, ignore)]

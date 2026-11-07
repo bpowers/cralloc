@@ -14,4 +14,4 @@ taken (design: "Concurrency rules", rule 4). So every object here is one the dep
 giving up. A program that freed a block twice breaks that, and `launder` then aborts or, if
 the copies never meet, hands the slot out twice: SLOW-03 in `c/slow-safety.md` says what that does.
 
-Reviewed: d38075c
+Reviewed: 8cbb15e

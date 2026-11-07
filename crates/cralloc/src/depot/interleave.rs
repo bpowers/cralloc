@@ -632,7 +632,7 @@ fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
     earned
 }
 
-/// Finding (review of stock, commit 1bd3010): the drain clears the count of stock bytes of the
+/// Finding (review of stock, commit bc301e8): the drain clears the count of stock bytes of the
 /// slab it drained with a plain store after it has given the slab back to its CPU (markers
 /// cleared in step 4's first pass, then the disposal of everything taken, a launder each for
 /// `maintain`, then the store). Stock the CPU pushes meanwhile, with the credit the drain left

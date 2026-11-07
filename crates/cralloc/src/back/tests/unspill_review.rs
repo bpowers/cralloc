@@ -1,4 +1,4 @@
-//! Review of `Back::unspill` (main `f2f2c68`): a block that grows in place over the huge page
+//! Review of `Back::unspill` (main `960cc3e`): a block that grows in place over the huge page
 //! holding its old end has that page returned and its first page written back, so that the
 //! page faults whole.
 //!
@@ -216,7 +216,7 @@ fn a_purge_that_fails_part_way_keeps_the_bytes() {
     }
 }
 
-/// The check of the fixes (main `5a406f3`), at the edges of where the page is set aside: old
+/// The check of the fixes (main `f14cd61`), at the edges of where the page is set aside: old
 /// and new sizes whose ends fall just before, on and just past page and huge-page boundaries,
 /// up to the slot's end. Whatever the growth does, the block keeps every byte it could use,
 /// the growth returns one huge page at most, and no advised huge page of the new room is

@@ -45,7 +45,7 @@ better than the samples below. User-mode demand fills, at 70% load, one to three
 | Connect log, HTTP/2 | 2,208 | 2,444 | 1.107 |
 | Meilisearch | 163,479 | 157,707 | 0.965 |
 
-*2026-10-22, `040033a`.* The excess on the Connect jobs is jemalloc's own accesses: on gRPC the
+*2026-10-22, `7619eef`.* The excess on the Connect jobs is jemalloc's own accesses: on gRPC the
 allocator's own L1 misses are 186 a request against 446, and the program's heap misses are level.
 Demand fills miss what a prefetcher fetched first, so a fill count cannot tell a dense layout from a
 sparse one by itself.
@@ -60,7 +60,7 @@ request, cralloc / jemalloc:
 | Connect log gRPC, HTTP/2 | 1,689 / 1,702 | 41 / 49 | 0 / 0 | 7.3 / 6.1 |
 | Log store, 1M records | 3,018 / 2,890 | 714 / 596 | 237 / 255 | 33 / 90 |
 
-*2026-10-22, `040033a`, one op in 500,000, means over one to three runs. The samples are thin: 221
+*2026-10-22, `7619eef`, one op in 500,000, means over one to three runs. The samples are thin: 221
 and 217 cross-core samples on the order service and 26 and 31 on gRPC, so one run reads about +-7%
 and +-20%. "Level" here means within about 1% of the server's cycles.*
 
@@ -72,7 +72,7 @@ misses more than ours: 246 L1-missing loads a request on the store against 55.
 
 **glibc on the order service is where misses move.** On axum it fills 810 lines a request against
 cralloc's 612, 231 of them from beyond L2 against 94; on HTTP/2, 1,244 against 912, and 250 against
-88 (2026-10-21, `f9ee162`, one to three rounds). The order service caches orders that another worker
+88 (2026-10-21, `575760a`, one to three rounds). The order service caches orders that another worker
 later evicts, so 20 to 28% of the blocks followed by address are freed on another CPU. We have not
 split glibc's fills between its chunk headers, the program's objects and lines that move while
 threads wait for its locks.
@@ -112,7 +112,7 @@ eight server jobs, geometric standard deviation across jobs in brackets:
 | mimalloc | 1.083 (x1.05) | 1.057 (x1.02) | 1.024 (x1.03) |
 | glibc | 1.254 (x1.09) | 1.175 (x1.09) | 1.067 (x1.08) |
 
-*2026-10-28, cralloc at `2ff7322`. Each job is the mean over five code placements of per-placement
+*2026-10-28, cralloc at `e5e69b1`. Each job is the mean over five code placements of per-placement
 medians (glibc one run a placement). Computed from the standings' raw results. The jobs are the
 three Connect log jobs, the log store and four order service jobs, so they are three programs.
 miniredis and the sozu proxy barely allocate and are left out; with them in, the cycles column reads
@@ -223,7 +223,7 @@ binary:
 | Connect log gRPC, k cycles a request | 129.3 | 129.0 to 130.1 |
 | RPC log, 64 connections, k cycles a request | 121.9, 122.9 | 121.9 to 122.7 |
 
-*2026-10-22, on `7a82ea4`, 4 to 6 interleaved rounds, medians. "On" is the settings of 16 and 64
+*2026-10-22, on `386a1f0`, 4 to 6 interleaved rounds, medians. "On" is the settings of 16 and 64
 siblings and the whole first magazine of a run, where run. A setting of 4 separates four workers'
 headers but not eight's, so a stride must cover at least as many siblings as workers.*
 
@@ -305,7 +305,7 @@ without a server measurement.
 | Drop, M cycles | 1,079 | 627 | 350 |
 | DRAM fills, M | 9.9 | 3.6 | 4.0 |
 
-*2026-10-18, `91d97b9`, the tree built ten times a run, 5 interleaved rounds, medians.*
+*2026-10-18, `76e4533`, the tree built ten times a run, 5 interleaved rounds, medians.*
 
 **Handing out every fill apart is what breaks a walk.** A strided order on every fill cost a tree's
 build and walk 47% and, across builds, a JSON parse 6% and BTreeMap and HashMap about 1%. Units of
@@ -336,7 +336,7 @@ servers, whose small classes circulate. Striding every fill has never run on a s
 | RPC echo, 64 connections | -2.3% (one cross-build number) | 24.1 to 5.5 |
 | BTreeMap, forkjoin, mstress | within 1% | level |
 
-*2026-10-19, `700c8ce` against `35b00fa`, 3 or 4 rounds, medians. sh8bench preloaded ran 2.2 to 3%
+*2026-10-19, `2c27ffe` against `5a3aa18`, 3 or 4 rounds, medians. sh8bench preloaded ran 2.2 to 3%
 slower, not analysed.*
 
 - *L1 and L2 sets on a small heap: real, and too small to matter.* Five in six of cralloc's L1
@@ -360,7 +360,7 @@ are level or faster on all six jobs; with huge pages from a class's first carve,
 fills' order and spacing are not the cause. Two of the four single-thread gaps, tree depth 18 and
 JSON 8 MiB, are mostly the drop, as is what is left on BTreeMap ([magazines.md](magazines.md)). At
 an exact 2 MiB switch BTreeMap still takes 15.5M L1 dTLB misses on 4 KiB pages. (2026-10-18,
-`016877c`.)
+`fca1d12`.)
 
 **Classes of at least 4 slots a page, to 1 KiB, switch to huge pages after 16 MiB carved.** 4 MiB
 would take BTreeMap from 942 to 901 cycles an entry and tree depth 18 from 39.5 to 35.4, for up to 6
@@ -379,7 +379,7 @@ binary that advised every whole block of 2 MiB or more:
 | Meilisearch, a request | -1.1% (inside its spread) | 3% of its walks land in such blocks |
 | Order service at 2 GiB, log store, Connect log gRPC | switch never acts | no block of 2 MiB or more |
 
-*2026-10-24, `46126f0`, 1 to 10 rounds by job, medians.*
+*2026-10-24, `875c19a`, 1 to 10 rounds by job, medians.*
 
 The cost of being wrong is large and has no ceiling but the block. A block touched in one page in 64
 holds 11 to 16 times its memory. Written whole and reused, each life costs 25 times what it does
@@ -397,7 +397,7 @@ L3 freed were popped by the other, and every slot and most objects were then a f
 L3. A stack per domain took independent pipelines over two L3s from 11.16 to 4.78 ns an allocation
 (two pipelines), 9.53 to 5.54 (three) and 10.23 to 5.60 (four), with fills from the other L3 down
 40% on sh8bench. Jobs on one L3 moved -1 to +3%. Peaks rose 0.3 to 0.8 MiB on jobs using both L3s.
-(2026-10-18, `f023136` against `69bcd42`, 5 rounds.)
+(2026-10-18, `5e2350f` against `130887d`, 5 rounds.)
 
 **Keeping fills in their L3 is not built.** The back end still takes a class's lowest free slots,
 whoever freed them. A prototype that carved a region per class and domain, and refilled from a
@@ -405,7 +405,7 @@ domain's own free slots before popping another domain's magazine, gave independe
 13% and flows between L3s 2 to 4%, and left everything else level. It added 0.3 to 1.6 MiB at peak,
 a small-heap floor that grows with domains, and up to the retained cap held when load moves between
 domains. That is a narrow gain for a change across the back end, the launder and the depot, so we
-left it. Build it only if work spread over many L3s becomes a target. (2026-10-19, `515412e`; tag
+left it. Build it only if work spread over many L3s becomes a target. (2026-10-19, `5097226`; tag
 `repro/exp-domain-regions`.)
 
 ## The allocator moves the program's code

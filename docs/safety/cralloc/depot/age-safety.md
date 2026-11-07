@@ -81,4 +81,4 @@ the walk follows the chain the commit took.
   and 4 write nothing over a commit they did not make.
 - If the routine does not commit, nothing is read from or written to the chain.
 
-Reviewed: 3b5a3f5
+Reviewed: cb8a219

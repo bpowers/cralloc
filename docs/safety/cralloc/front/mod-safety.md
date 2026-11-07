@@ -41,4 +41,4 @@ to the miss path before it touches a slab.
 It is public, and hidden, only so that the C routines the export macros define in another crate
 can name it as an operand; what any code can do with it is read a constant.
 
-Reviewed: 3b5a3f5
+Reviewed: cb8a219

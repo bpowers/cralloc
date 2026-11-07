@@ -1019,7 +1019,7 @@ fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
 /// intervals before it owes anything. The test of 2, 8 and 64 domains above looks on every slow
 /// path, sixteen times the allocator's rate. At the allocator's rate and the same pace (640
 /// slow paths an interval on the one busy CPU), 63 quiet domains holding five classes each take
-/// 16 intervals to empty and with two classes 7; at ee4c29b, where a look read one class in
+/// 16 intervals to empty and with two classes 7; at e0e2611, where a look read one class in
 /// every domain, both took 3.
 #[test]
 
@@ -1313,7 +1313,7 @@ fn stock_unused_for_an_interval_goes_back() {
     rig.census(&[], false);
 }
 
-// Findings of the adversarial review of stock (`stock.rs`, commit 1bd3010). Each test below
+// Findings of the adversarial review of stock (`stock.rs`, commit bc301e8). Each test below
 // fails as the code stands and is ignored so that the gate stays green; each names what it
 // shows. Run them with `cargo test -p cralloc --lib stock_review_ -- --ignored`.
 
@@ -1570,7 +1570,7 @@ fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
 }
 
 // Tests the review added for rules that no test held (each mutation named was not noticed by
-// the suite at 1bd3010). They pass.
+// the suite at bc301e8). They pass.
 
 /// Gives the rig's CPU 0 forty magazines of full stock of `bursty`, for the tests below.
 fn stock_up(rig: &TestRig, bursty: SmallClass, busy: SmallClass) {
@@ -1775,7 +1775,7 @@ fn the_bottom_spares_are_taken(stock: bool) -> bool {
     taken
 }
 
-/// Finding (check of the fix, b5070c3): a class with credit whose stock is in use by the
+/// Finding (check of the fix, db0ba83): a class with credit whose stock is in use by the
 /// low-water rule keeps its fixed full spares out of the sweep, on the argument that "the pops
 /// that use the stock reach them, or the low-water mark shrinks the stock until they do"
 /// (`stock.rs`, "Disuse"). The mark shrinks the stock only down to the fixed limit: pops that
@@ -2350,7 +2350,7 @@ fn compound_within(class: SmallClass, pattern: &[(usize, usize)], percent: usize
     );
 }
 
-/// Two swings of different sizes in each repetition, the review of ff7c39b's worst cases
+/// Two swings of different sizes in each repetition, the review of 5dceb66's worst cases
 /// (1,024-byte class, magazines of 62): while a run after a half-full swap counted as absorbed,
 /// the rule retried them every repetition. From a single starting level they also measured the
 /// luck of its phase (`compound_over_phases`).

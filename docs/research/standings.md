@@ -18,9 +18,9 @@ work, and vanishes on the two jobs that barely allocate.
 - **For the design.** The request path is not where the next gain is. What is left is page faults
   from large blocks returned and taken back, and where objects land after a fall in live data.
 
-Latest session: 2026-10-27 to 28, cralloc at `2ff7322`, on the reference host (Ryzen 9 9950X, Linux
-7.2.9). Main has since gained the tail walk's question to the kernel (`ad11370`), the clocked pass's
-goal (`607ef11`) and the refresh on evidence (`ab6fe66`), and tokio moved to 1.54.1. The refresh
+Latest session: 2026-10-27 to 28, cralloc at `e5e69b1`, on the reference host (Ryzen 9 9950X, Linux
+7.2.9). Main has since gained the tail walk's question to the kernel (`4648919`), the clocked pass's
+goal (`fba5ed4`) and the refresh on evidence (`f3efb89`), and tokio moved to 1.54.1. The refresh
 rule, switched in one binary, leaves the 2 GiB order service and the steady cache level and takes
 the 2 GiB trough from 1.11 to 0.95 GiB. "What the latest session did not run", below, dates every
 older number. [workloads.md](workloads.md) defines the jobs; [measuring.md](measuring.md) gives the
@@ -42,7 +42,7 @@ differences are resolved.
 | **Geomean over the ten** | | **1.046 (x1.034)** | **1.045 (x1.036)** | **1.065 (x1.053)** | **1.197 (x1.130)** |
 | Instructions, the same ten | | 1.051 (x1.034) | 1.060 (x1.047) | 1.046 (x1.029) | 1.137 (x1.105) |
 
-2026-10-27 to 28 at `2ff7322`. Each figure is the mean over five code placements of the median at
+2026-10-27 to 28 at `e5e69b1`. Each figure is the mean over five code placements of the median at
 each: two rounds a placement, three on HTTP/2 Connect and HTTP/2 orders, one for glibc. Geomeans
 computed across jobs from the raw records. The ten are not independent: three are one service and
 four are one program.
@@ -64,13 +64,13 @@ four are one program.
 
 | Job | cralloc | jemalloc | tcmalloc | mimalloc | glibc | Evidence |
 |---|---:|---:|---:|---:|---:|---|
-| Apollo Router | 2.72M | +6.1% | +1.3% | +3.0% | +37.7% | five placements, `46126f0`, 2026-10-24 |
-| SurrealDB, 1.7 GiB | 2.02M | +13.6% | +7.0% | +12.6% | +27.2% | cralloc and tcmalloc three placements, others single builds, `46126f0`, 2026-10-25 |
-| Meilisearch | 16.76M | +4.0% | +1.8% | +7.2% | +7.1% | single builds, `2ff7322` |
+| Apollo Router | 2.72M | +6.1% | +1.3% | +3.0% | +37.7% | five placements, `875c19a`, 2026-10-24 |
+| SurrealDB, 1.7 GiB | 2.02M | +13.6% | +7.0% | +12.6% | +27.2% | cralloc and tcmalloc three placements, others single builds, `875c19a`, 2026-10-25 |
+| Meilisearch | 16.76M | +4.0% | +1.8% | +7.2% | +7.1% | single builds, `e5e69b1` |
 
 - **Qdrant's cycles do not rank allocators:** allocation is 2% of them, and runs differ by 5% in
   work.
-- **Closed-loop RPC**, five placements at `2ff7322`: `rpc log c64` jemalloc +3.0%, tcmalloc -0.1%*,
+- **Closed-loop RPC**, five placements at `e5e69b1`: `rpc log c64` jemalloc +3.0%, tcmalloc -0.1%*,
   mimalloc -0.2%*, glibc +20.0%; `rpc echo c64` +0.6%*, +0.4%*, +2.4%, +6.8%.
 - **Saturated rates agree.** cralloc's over the other's, geomean over ten jobs, three rounds of
   single builds: jemalloc 1.048 (x1.035), tcmalloc 1.054 (x1.050), mimalloc 1.063 (x1.070), glibc
@@ -110,7 +110,7 @@ less.
 | Batch programs, peak (4) | 0.953 (x1.070) | 0.949 (x1.169) | 1.674 (x1.424) | 0.948 (x1.119) |
 | Kernel jobs that peak at 30 MiB or more (14) | 1.075 (x1.112) | 1.120 (x1.318) | 1.352 (x1.285) | 1.158 (x1.148) |
 
-Servers `2ff7322`; batch programs `2ff7322` and, for ruff and boa, `515412e`; kernel jobs `80643d2`.
+Servers `e5e69b1`; batch programs `e5e69b1` and, for ruff and boa, `5097226`; kernel jobs `874b687`.
 
 The three large-heap servers, anonymous MiB, peak through 70% load and a minute after close (three
 rounds, cralloc six runs; Meilisearch's heap sits beside a mapped store, 3.5 to 4.6 GiB resident):
@@ -134,15 +134,15 @@ Long runs, resident heap over the bytes the program holds:
 
 | Job | cralloc | jemalloc | tcmalloc | mimalloc | glibc | Evidence |
 |---|---:|---:|---:|---:|---:|---|
-| Steady cache, 2 GiB, 15G operations | 1.105 | 1.148 | 1.127 | 2.97 | 1.27 | `5536610`, 2026-10-24 |
-| Order service, 10 GiB, under load | 1.073 | 1.095 | 1.095 | 1.149 | | `bf837db`, 2026-10-26 |
-| Lifetime mix, 2 GiB, peaks | 1.10 | 1.12 | 1.13 | 1.15 | 1.09 | `bf837db`, 2026-10-27 |
-| Size shift, median 384 B | 1.36 | 1.19 | | | 1.83 (1.33 in its first cycle) | `0cd82ec`, 2026-10-25; glibc's last cycle `5536610` |
+| Steady cache, 2 GiB, 15G operations | 1.105 | 1.148 | 1.127 | 2.97 | 1.27 | `7cfe3af`, 2026-10-24 |
+| Order service, 10 GiB, under load | 1.073 | 1.095 | 1.095 | 1.149 | | `ac72e9e`, 2026-10-26 |
+| Lifetime mix, 2 GiB, peaks | 1.10 | 1.12 | 1.13 | 1.15 | 1.09 | `ac72e9e`, 2026-10-27 |
+| Size shift, median 384 B | 1.36 | 1.19 | | | 1.83 (1.33 in its first cycle) | `b7aa62a`, 2026-10-25; glibc's last cycle `7cfe3af` |
 | mini-redis rewritten, wide phases | 1.15 to 1.18 | 1.16 | | | 1.16 to 1.29 | tail rule, 2026-10-25 to 27 |
 
 A 10.6-hour soak of Qdrant beside jemalloc drifted in neither: 155 MiB at the quiet points against
-178 (`8e9d097`, 2026-10-28). SurrealDB's 750k records peak at 1,723 MiB against 1,800 to 1,931, and
-its 1.5M at 3,333 against 3,505 to 3,782 (`46126f0`). [memory.md](memory.md) has the mechanisms.
+178 (`994fd44`, 2026-10-28). SurrealDB's 750k records peak at 1,723 MiB against 1,800 to 1,931, and
+its 1.5M at 3,333 against 3,505 to 3,782 (`875c19a`). [memory.md](memory.md) has the mechanisms.
 
 ## Programs
 
@@ -160,19 +160,19 @@ tpchgen runs within 0.5 to 4.6%.
 | ruff, 4 threads, s | 1.064 | 1.101 | 1.097 | 1.049 | 1.140 |
 | Geomean of the four against cralloc | | 1.026 (x1.030) | 1.004 (x1.034) | 0.992 (x1.016) | 1.030 (x1.034) |
 
-DataFusion and tpchgen `2ff7322`; boa and ruff `515412e`, 2026-10-20, six rounds, wall time.
+DataFusion and tpchgen `e5e69b1`; boa and ruff `5097226`, 2026-10-20, six rounds, wall time.
 
 **All of the loss is the kernel.** On DataFusion cralloc's user cycles equal tcmalloc's and beat the
 others; its kernel cycles are 3.07 G over tcmalloc's, against a total gap of 3.04 G. On tpchgen it
 has the fewest user cycles and the most kernel cycles.
 
-**The screening** of 34 program configurations, preloaded, three rounds (`515412e`, 2026-10-19):
+**The screening** of 34 program configurations, preloaded, three rounds (`5097226`, 2026-10-19):
 cycles against cralloc's, jemalloc 1.019 (x1.044), mimalloc 0.995 (x1.067), glibc 1.055 (x1.075). It
 predates most of the memory rules, and a preloaded free carries no size. Its worst gaps, not
 measured again: 3.6 to 10% behind mimalloc in cycles on rust-analyzer, rhai, egglog, typst and
 cargo.
 
-**The kernel suite** is a regression check, not a target (`80643d2`, 2026-10-22 to 23, ten rounds of
+**The kernel suite** is a regression check, not a target (`874b687`, 2026-10-22 to 23, ten rounds of
 native jobs, seven of preloaded, medians). Against the best incumbent on each job cralloc is ahead
 on 38, level on 2 and behind on 15, and the geomean of its time over the best's is 0.803. The others
 against cralloc, by group (the RPC jobs are above):
@@ -196,19 +196,19 @@ Each cause is the one its own study found; none was profiled again at the latest
   order service, where the thread never starts, is level within its range: 151 (136 to 188) against
   jemalloc's 135 (104 to 204), six and three runs, three of the nine flagged for other work and
   kept.
-- **Troughs.** At a 2 GiB trough cralloc holds 0.95 GiB, jemalloc 0.66 (`ab6fe66`, `d36e0cb`,
+- **Troughs.** At a 2 GiB trough cralloc holds 0.95 GiB, jemalloc 0.66 (`f3efb89`, `0fd0853`,
   2026-10-28), on the same live slots. Each allocation takes the slot the last free pushed, so
   survivors stay spread over the peak's pages: free slots beside live ones are 273 MiB against 40.
   The rule of 2026-10-28 took about 15% off for 0.6% of cycles on that job. Classes of 128 bytes and
   down do not move ([memory.md](memory.md)).
 - **A size mix that shifts.** The old classes' tails stay: 1.36 against jemalloc's 1.19 at a
-  384-byte median, with the tail rule (`0cd82ec`, 2026-10-25). Rewritten mini-redis is no longer
+  384-byte median, with the tail rule (`b7aa62a`, 2026-10-25). Rewritten mini-redis is no longer
   behind (table above).
 - **A mix of large buffers** ends its phases at 1.30, 1.25, 1.45, 1.48 against 1.42, 1.89, 1.29,
-  1.36 (`0eaf879`; a phase moves up to 0.3 between runs), with page tables three times the
+  1.36 (`5cb773c`; a phase moves up to 0.3 between runs), with page tables three times the
   incumbents' ([large-blocks.md](large-blocks.md)).
-- **Qdrant's heap.** Peak 483 and a minute after close 139 MiB (`bf837db`, 2026-10-27) against
-  jemalloc's 449 and 131 (`46126f0`, 2026-10-24), across sessions; tcmalloc's peak is 474.
+- **Qdrant's heap.** Peak 483 and a minute after close 139 MiB (`ac72e9e`, 2026-10-27) against
+  jemalloc's 449 and 131 (`875c19a`, 2026-10-24), across sessions; tcmalloc's peak is 474.
   Small-class pages stranded in huge-page units made most of the first gap, and the tail rule
   returned them.
 - **Small heaps at rest.** 2 to 11 MiB over jemalloc 10 s after close (Connect log 10 to 12 against
@@ -222,17 +222,17 @@ Each cause is the one its own study found; none was profiled again at the latest
   of a slot's slack cost about 0.8% on DataFusion and 2.0% on tpchgen for lower peaks. Huge pages
   for large blocks allocated whole would give DataFusion 2.9%, but no server gains and a sparse
   block would pay many times its size ([large-blocks.md](large-blocks.md)).
-- **Kernel jobs** (`80643d2`). `largepair`, 520% behind glibc, which serves both from the top of its
+- **Kernel jobs** (`874b687`). `largepair`, 520% behind glibc, which serves both from the top of its
   heap, and ahead of everyone else. Large objects crossing threads, 71% behind per-thread tcmalloc:
   a leaf word's line moves between cores each time, and no profiled server makes such a flow.
   `vecgrow 64x4Mi`, 23% behind mimalloc: faulting back outgrown slots; keeping them within a count
-  (`81437b0`) later took 15% off, for a peak of 327 MiB against 265. `map hash 1M`, 21% behind
+  (`cd2dd36`) later took 15% off, for a peak of 327 MiB against 265. `map hash 1M`, 21% behind
   mimalloc's crate: in its build a quarter first-touch faults and the rest dTLB misses on a table
   allocated whole, and scattered launders on the drop add about a quarter of the job's gap. `map
   btree 1M`, 8%: a locked OR per scattered slot on the drop. tokio `spawn`, 1% and 5% behind
   jemalloc: the sibling stride closed most of it. `rpc log c64` and `c256`, about 4% behind mimalloc
   as single builds: c64 is level over placement, c256 was not swept.
-- **C programs preloaded** (`80643d2`), regression checks: larson 9 to 12% behind mimalloc, through
+- **C programs preloaded** (`874b687`), regression checks: larson 9 to 12% behind mimalloc, through
   libstdc++'s operators, whose export is deferred; mstress 7%; JSON 2%; cfrac 1%; sh8bench 20 to
   56%, 0.387 s against 0.323 and 0.248 for mimalloc's second copy. There the size is not resolved;
   the sign is.
@@ -243,19 +243,19 @@ The latest result of each:
 
 | What | Commit | Date |
 |---|---|---|
-| Router, SurrealDB and Qdrant's jemalloc, with deep idle on | `46126f0` | 2026-10-24 to 25 |
-| Qdrant's cralloc, deep idle off | `bf837db` | 2026-10-27 |
-| Meilisearch's saturated rate: cralloc 1,413, jemalloc 1,372, tcmalloc 1,423, mimalloc 1,328 req/s | `d945f62` | 2026-10-21 |
-| Long-run memory, all five: steady, shift, lifetime, mini-redis; before the tail rule | `5536610` | 2026-10-24 to 25 |
-| The large-block mix; heaps of 0.5 to 10 GiB; troughs | `0eaf879`; `bf837db`; `d36e0cb` | 2026-10-25 to 28 |
-| Kernel suite, with the 64-Vec, 256 MiB and spawn jobs; memory after a peak | `80643d2` | 2026-10-22 to 23 |
-| ruff and boa; the screening | `515412e` | 2026-10-20; 2026-10-19 |
+| Router, SurrealDB and Qdrant's jemalloc, with deep idle on | `875c19a` | 2026-10-24 to 25 |
+| Qdrant's cralloc, deep idle off | `ac72e9e` | 2026-10-27 |
+| Meilisearch's saturated rate: cralloc 1,413, jemalloc 1,372, tcmalloc 1,423, mimalloc 1,328 req/s | `26f9789` | 2026-10-21 |
+| Long-run memory, all five: steady, shift, lifetime, mini-redis; before the tail rule | `7cfe3af` | 2026-10-24 to 25 |
+| The large-block mix; heaps of 0.5 to 10 GiB; troughs | `5cb773c`; `ac72e9e`; `0fd0853` | 2026-10-25 to 28 |
+| Kernel suite, with the 64-Vec, 256 MiB and spawn jobs; memory after a peak | `874b687` | 2026-10-22 to 23 |
+| ruff and boa; the screening | `5097226` | 2026-10-20; 2026-10-19 |
 
 ## Open questions
 
 - **Tails with deep idle off** are not measured for the Router, SurrealDB or jemalloc on Qdrant, all
   in milliseconds.
-- **The changes since `2ff7322`.** The refresh rule, measured alone, leaves the 2 GiB order service
+- **The changes since `e5e69b1`.** The refresh rule, measured alone, leaves the 2 GiB order service
   level; the pass's goal has no such measure, and the full server table has not been run since.
 - **One DataFusion run** peaked at 1,454 MiB against 852 to 862 for cralloc's other five, at the
   same faults and cycles. It was the first of its session. Not explained.

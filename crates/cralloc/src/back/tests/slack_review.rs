@@ -1,5 +1,5 @@
 //! Evidence for the adversarial review of the trim at the claim and per-slot ageing
-//! (`large-slack-rule` at `7e09b15`). Each test states what the branch says and fails where the
+//! (`large-slack-rule` at `18d9a61`). Each test states what the branch says and fails where the
 //! code does otherwise; the experiments print what they measured.
 
 use super::super::hold::walk_aged;

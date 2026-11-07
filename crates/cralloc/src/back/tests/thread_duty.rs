@@ -617,7 +617,7 @@ fn the_threads_plan_keeps_a_crossings_look_under_every_schedule() {
     assert!(found.complete, "{found:?}");
 }
 
-// From the review of 26cc261 (findings 1 and 5), kept as regression tests.
+// From the review of f258bcf (findings 1 and 5), kept as regression tests.
 
 /// The most growth left unpaid while 32 MiB is carved in 1 MiB slots (two of a slow path's
 /// purge steps each, in this geometry) over a heap 40 MiB over the cap, with four heartbeats after each carve (2 MiB of payments where heartbeats pay) and a thread that is awake and never runs.

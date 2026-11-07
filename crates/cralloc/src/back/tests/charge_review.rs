@@ -1,5 +1,5 @@
 //! Evidence for the adversarial review of the large-slot charge and the budget for kept grown
-//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`). The budget
+//! blocks (main `f6e6ee3..eda46e0`), and for the check of its fix (main `4dd3bcf`). The budget
 //! has since become the count of kept outgrown slots (`Back::keep_outgrown`), which the tests
 //! here check too: the random runs and the threaded ones hold it to the charge of the slots
 //! marked kept at every step.

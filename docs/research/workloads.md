@@ -79,7 +79,7 @@ threads.
 - **tpchgen** 4.0.0: TPC-H SF1 to Parquet, 8 threads, preloaded (outside the suite). The only
   program dominated by blocks of 1 to 32 KiB, and the one where cralloc's faults stand out.
 
-At `515412e` (2026-10-20) the allocator moved them by 9% (ruff), 7% (boa) and 6% (DataFusion) in
+At `5097226` (2026-10-20) the allocator moved them by 9% (ruff), 7% (boa) and 6% (DataFusion) in
 time, against under 1% between runs, and up to 3.6 times in memory. **mimalloc buys time with
 memory:** huge pages for its whole heap, so ruff's peak is 3.4 times glibc's (119 against 35 MiB).
 The kernels' heaps hide this.
@@ -112,7 +112,7 @@ threads ([memory.md](memory.md)).
 
 ## The kernel suite
 
-`benchrun run --suite full`, 55 jobs plus xmalloc-test. Figures are `80643d2`, 2026-10-22, medians,
+`benchrun run --suite full`, 55 jobs plus xmalloc-test. Figures are `874b687`, 2026-10-22, medians,
 in the order cralloc, per-CPU tcmalloc, jemalloc, mimalloc, glibc. `local` is one L3, `split`
 alternates L3s between neighbours, `both` fills one then the other.
 
@@ -157,7 +157,7 @@ of depth 18, JSON of 8 MiB, sh8bench preloaded, and one buffer doubled to 1 and 
 
 ## The screening: what each program showed
 
-2026-10-19, cralloc at `515412e` preloaded against glibc 2.43, Fedora's jemalloc and mimalloc 3.5.3:
+2026-10-19, cralloc at `5097226` preloaded against glibc 2.43, Fedora's jemalloc and mimalloc 3.5.3:
 three rounds, a fresh pinned process a run. No abort, hang or wrong output in over 400 runs. Spread
 is best to worst in cycles. On three runs programs rank by sensitivity; allocators within a program
 do not rank.

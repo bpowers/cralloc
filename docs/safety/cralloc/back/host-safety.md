@@ -41,9 +41,9 @@ and offers a class for a region number only through the published byte (`tla/Ass
 checks the protocol, and `Assign_table` shows a walk that read the table instead acting on a
 region another class or a run then had).
 
-The reviewed finding at d36e0cb (the walks read the table, and could act on a region given
+The reviewed finding at 0fd0853 (the walks read the table, and could act on a region given
 back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
-tag, and the finding of the review of cb9dccf (the repair's stale read) by its second read.
+tag, and the finding of the review of 1f52647 (the repair's stale read) by its second read.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
@@ -178,4 +178,4 @@ fit the block (`layouts_fit_*`) and the leaf commit covers the carved slots
 (`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols on a heap does not fit
 the memory cap, so the access paths are tested, not proved.
 
-Reviewed: d38075c
+Reviewed: 8cbb15e

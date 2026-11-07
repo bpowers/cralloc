@@ -1,5 +1,5 @@
 //! Adversarial review of the huge-page tail (`back::tail`, branch `huge-tail-rule` at
-//! `3c2265e`). Each test states what the rule promises and fails where the code does not keep
+//! `22d669e`). Each test states what the rule promises and fails where the code does not keep
 //! it; the review's report says which fail and why.
 
 use super::super::layout::{Grow, Hints};
@@ -1118,7 +1118,7 @@ mod protocol {
         );
     }
 
-    /// Second round, on the fixes (`d8c8fad`). `MarkVisible`: once nobody is at work, a word
+    /// Second round, on the fixes (`67ee2f4`). `MarkVisible`: once nobody is at work, a word
     /// that carries a mark has the flag set. The model's take is one step; the code's raise
     /// loads the word and then takes the bit with a compare-and-swap, which a walker's note in
     /// between makes fail. The look has cleared the flag, no owner exists to set it again, and
@@ -1237,7 +1237,7 @@ fn the_short_runs_of_a_split_huge_page_go_back_at_the_pass_for_short_runs() {
     );
 }
 
-/// Third round, on the accounting (`ae24bca`). A raise counts every clean page of the
+/// Third round, on the accounting (`460c742`). A raise counts every clean page of the
 /// non-empty huge pages it puts back under the advice as resident, whether or not the kernel
 /// has rebuilt anything (khugepaged takes minutes). The cap acts on that count: a burst that
 /// reaches a little above the boundary in many classes at once puts the count over the cap
@@ -1327,7 +1327,7 @@ fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
     );
 }
 
-/// Fourth round, on the accounting by distrust (`ea0e524`). Below the boundary the walk
+/// Fourth round, on the accounting by distrust (`a787c9a`). Below the boundary the walk
 /// returns a non-empty huge page's clean runs again, once, and the lowering that follows makes
 /// the bits trusted. Where the kernel refuses the lowering (out of mappings, or a kernel that
 /// takes no advice) the boundary never comes down, so every lap asks for the splits and

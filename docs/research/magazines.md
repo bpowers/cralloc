@@ -58,7 +58,7 @@ measurement here ran on four, and what magazines park scales with CPUs, not with
 
 Cycles and instructions per object, a magazine a call (254 objects, the size then), 8 to 256-byte
 classes alike; lowest of seven repetitions, medians of five interleaved rounds, pinned; 2026-10-18
-at 1868dd0 and d56e3bf.
+at ed3d139 and bc29678.
 
 | Case | Cycles | Instructions |
 |---|---:|---:|
@@ -139,7 +139,7 @@ suspect, was the smaller part.
 So a claim retries against the value it found, a run of claims moves past the group of 64 words
 where it meets another claimer, and a run clears its own emptied words with one AND, then rereads
 each and sets back any no longer empty (`tla/Summary.tla`, `Run`, shows the rereads are needed).
-Fill, cycles per object per thread, two interleaved rounds, 867aadf against the change:
+Fill, cycles per object per thread, two interleaved rounds, 3acaa1d against the change:
 
 | Threads | Dense, before | Dense, after | One in 8, before | One in 8, after |
 |---|---:|---:|---:|---:|
@@ -157,7 +157,7 @@ A class's magazine is the most slots whose objects fit in 64 KiB, at most 1,024 
 1,022 objects up to 64 bytes, 510 for 80 to 128, 254 for 160 to 256, and on down to 2.
 
 **Slots.** Each size a constant change against 254 slots, three to seven rounds; change in the job's
-metric, then cgroup peak in MiB (2026-10-19 at e96086d). A *pipeline* has threads that allocate and
+metric, then cgroup peak in MiB (2026-10-19 at 31b46f4). A *pipeline* has threads that allocate and
 threads that free what those allocated; an *exchange* job has threads that trade objects; *mpmc* has
 many producers and consumers; *sh8bench* is a C stress program (below).
 
@@ -178,7 +178,7 @@ routines and their proofs needed no change.
 to -20%, split across L3s -10 to -12%, independent pipelines across L3s -11 to -18%, two-thread
 exchange -5 to -8%, tree -7%, sh8bench -22%, RPC level within 2%, and JSON about -5%, not resolved,
 since its control moved five points between sessions. On sh8bench across L3s 1,024 slots halve the
-gap to mimalloc (0.597 to 0.431 s at a945951, mimalloc 0.27). Small cross-thread heaps grow 0.5 to 3
+gap to mimalloc (0.597 to 0.431 s at 44071fb, mimalloc 0.27). Small cross-thread heaps grow 0.5 to 3
 MiB (two-thread pipeline 2.0 to 3.0, eight-thread 7.8 to 10.8, four-by-four mpmc 6.1 to 8.2),
 fork-join 1.1 to 1.8, and every other heap over 10 MiB under 2%.
 
@@ -246,7 +246,7 @@ price (seven interleaved rounds; rows from three sessions, up to 20 cycles run t
 
 | Build, cycles a slow path | Swap with a spare, 8 B | Half through the depot, 64 B |
 |---|---:|---:|
-| As first measured, 5c9881f | 338 | 450 |
+| As first measured, 4c5ed68 | 338 | 450 |
 | Handles of whole words | 288 to 304 | 331 to 345 |
 | And heartbeats paced by bytes | 271 | 352 |
 
@@ -280,7 +280,7 @@ class on one CPU, so its lines stay in L1; a server's do not, which was not meas
 
 With one depot, magazines one L3 freed were popped by the other, and each slot and most objects were
 then a fill from the other L3. C stress programs, the same thread counts on one L3 and spread over
-two, five rounds, at b784f1a:
+two, five rounds, at 9e8ebc0:
 
 | Program | cralloc, one L3 / two | Fills from the other L3, per op | mimalloc, one L3 / two |
 |---|---:|---:|---:|
@@ -306,7 +306,7 @@ slow path pushes on its domain's stack below a cap, else the shared stack, and p
 else the shared, else fills. No exchange reads another domain's stack.
 
 **The cap is a quarter.** At half, jobs across L3s were no faster and peaked up to 0.7 MiB higher
-(mpmc 4+4: 6.16 MiB before, 6.70 at half, 6.18 at a quarter). Five interleaved rounds at ee4c29b.
+(mpmc 4+4: 6.16 MiB before, 6.70 at half, 6.18 at a quarter). Five interleaved rounds at e0e2611.
 
 **Looks cost where the domain is busy.** A look visiting a whole other domain made three pipelines 5
 to 7% slower, so a look skips a domain whose own CPUs looked this interval. A heartbeat reading the
@@ -324,7 +324,7 @@ another node; a shared stack per node is not built.
 
 sh8bench is a C stress program: 16 threads on 8 CPUs, each allocating and freeing its own blocks in
 bursts of 50,000, two thirds of them 16-byte. We do not steer by C programs, but it isolates
-contention well. With 254-slot magazines, at a945951, five rounds, on one L3 it took 14.5 cycles a
+contention well. With 254-slot magazines, at 44071fb, five rounds, on one L3 it took 14.5 cycles a
 call against mimalloc's 9.2: +2.2 in depot pushes and pops on a contended head, +1.6 in the rest of
 each exchange, +1.2 in launder and fill, +0.6 in the program touching objects not in this core's L2,
 and -0.6 in fast paths and PLT.
@@ -367,7 +367,7 @@ freed them. A throwaway build tried a carving region per class and domain. Fills
 own domain's free slots alone buy little, because a domain with none reuses the other's, and the
 shared stack goes on trading bursts. A pair of rules buys the rest: carve in one's own domain before
 reusing another's slots, and refill from one's own free slots before popping a magazine another
-domain pushed, unless its objects live here. On sh8bench across L3s (2026-10-19, 515412e): 0.390 s
+domain pushed, unless its objects live here. On sh8bench across L3s (2026-10-19, 5097226): 0.390 s
 and 15.6 cycles a call at base, 0.373 and 14.8 with fills preferring their own, 0.297 and 10.8 with
 both rules, against mimalloc's 0.256 and 9.8; fills from the other L3 fall from 0.022 a call to
 0.003, and the peak rises from 137 to 147 MiB.
@@ -394,7 +394,7 @@ the far end of the new magazine, every request, and each crossing puts the next 
 again. Which (CPU, class) pairs lock is decided early, by where the first magazines land, and lasts
 for as long as the worker stays put. A pair started mid-magazine never takes a slow path.
 
-Counted per CPU and class in connect-rust's log server at saturation, 2026-10-20 at db31497, 15 of
+Counted per CPU and class in connect-rust's log server at saturation, 2026-10-20 at a7fd79c, 15 of
 24 processes had locked pairs: those with none ran at 246k to 262k req/s, those with 20 to 29 at
 228k to 236k. A locked pair takes one allocation and one free slow path per request, in classes of 8
 to 48 bytes and a few larger (640, 5,120). On CPUs with spare room they are swaps; on CPUs without,
@@ -455,7 +455,7 @@ One-way flows never reverse and never pay, and memory after a peak does not move
 ## When a server's load reaches the slow path
 
 Counts from a scratch build, never timed, and cycles from `perf` in separate runs at the same rate
-(70%), 2026-10-22 at 040033a. Percentages are of the server's cycles.
+(70%), 2026-10-22 at 7619eef. Percentages are of the server's cycles.
 
 | Job | Allocations a request | Slow paths a request | Mostly | Slow paths and maintenance | jemalloc's slow paths |
 |---|---:|---:|---|---:|---:|

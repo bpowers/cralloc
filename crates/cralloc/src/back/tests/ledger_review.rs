@@ -1,5 +1,5 @@
 //! Evidence for the ledger review of `back/class.rs`, `back/host.rs` and `back/region.rs` at
-//! `d36e0cb`, and the tests of its fix, the published tag (`back::tags`).
+//! `0fd0853`, and the tests of its fix, the published tag (`back::tags`).
 //!
 //! The finding: the walks that find regions by their number (`Back::hold_region`, the hold's
 //! plan, `Back::lower_walked`, `Back::raise_marked`, `Back::inspect`) read a region's class

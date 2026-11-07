@@ -9,7 +9,7 @@
 # as built (per-thread caches, because glibc owns the rseq area) and with glibc's rseq turned
 # off so that its per-CPU caches engage; the stand-ins need glibc's rseq and cannot run there.
 # cralloc-cxx is the same with the C++ operators exported, CRALLOC_CXX_LIB (a release build of
-# crates/cralloc-preload/tests/programs/cxx_exports as of commit 58bf936, the last with them). cralloc is the real library, CRALLOC_LIB (default: this checkout's release build of
+# crates/cralloc-preload/tests/programs/cxx_exports as of commit d12eacf, the last with them). cralloc is the real library, CRALLOC_LIB (default: this checkout's release build of
 # libcralloc_preload.so). Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt
 # (call through the GOT), and cloop-static, which links cralloc in and calls its routines
 # directly; it runs only as cralloc, with nothing preloaded.

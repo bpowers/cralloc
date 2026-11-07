@@ -1,5 +1,5 @@
 //! Evidence for the check of the fix to the growth-headroom review's last-region finding (main
-//! `9a076f4`): `Back::assign` commits a large class's first slot before it takes a region,
+//! `39b9d59`): `Back::assign` commits a large class's first slot before it takes a region,
 //! writes the commit into the region's grow word once it holds the tag, and clears that word
 //! (`unprepare`) when it loses the race for the class's carving word and gives the region up.
 //!
