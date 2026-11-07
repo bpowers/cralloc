@@ -7,9 +7,12 @@ resolver = "3"
 name = "app-sozu"
 version = "0.0.0"
 edition = "2024"
-# src/worker.rs is copied from Sōzu, whose binary is AGPL-3.0.
-license = "AGPL-3.0"
+# This package is the driver, and holds none of Sōzu's code. The binary it builds links `sozu`
+# and `sozu-lib` (AGPL-3.0) and `sozu-command-lib` (LGPL-3.0), and compiles one file of `sozu`
+# (build.rs); those licences cover the binary, which we never distribute.
+license = "Apache-2.0 OR BSD-3-Clause"
 publish = false
+build = "build.rs"
 
 [[bin]]
 name = "sozu"
@@ -34,13 +37,15 @@ bench-app = { path = "../common" }
 # The release, without its default jemalloc (the allocator is the suite's) and with its
 # default TLS backend.
 sozu = { version = "=2.3.3", default-features = false, features = ["crypto-ring"] }
-# The versions Sōzu 2.3.3 locks, for the worker entry copied into src/worker.rs.
+# What the `sozu` crate's worker module uses, which this package compiles (build.rs), at the
+# versions Sōzu 2.3.3 locks.
 sozu-lib = "=2.3.3"
 sozu-command-lib = "=2.3.3"
 mio = "1"
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.31", features = ["signal", "process"] }
 libc = "0.2"
 log = "0.4"
+tempfile = "3"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 
