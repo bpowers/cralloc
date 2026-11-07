@@ -7,17 +7,17 @@ later access to the objects. This note is about the second.
   cralloc, jemalloc's and tcmalloc's cycles rise with their instructions while cycles per
   instruction stay level or fall. The program's own code runs about the same under cralloc and
   jemalloc, with level misses on heap memory.
-- **Placement shows when an allocator gets it badly wrong.** glibc's cycles per instruction are 14
-  to 20% higher on the order service: it fills a third more lines a request, and 2.5 to 3 times as
-  many from beyond L2.
+- **Stalls appear when an allocator gets it badly wrong.** glibc's cycles per instruction are 14 to
+  20% higher on the order service: it fills a third more lines a request, and 2.5 to 3 times as many
+  from beyond L2. Some of that may be lock waits, which we have not separated from misses.
 - **Where placement matters, it is a few lines or one shape of program.** False sharing of a few
   sibling objects cost a tokio spawn loop 8 to 14%. A magazine order that reversed every 254
   objects made a tree walk 2.5 times slower. Neither moved a server.
 - **The fix is usually order, not spacing.** Handing objects out apart everywhere costs what
   adjacency was buying (a tree's build and walk lost 47%). Our rules act on a small, bounded part
   of what is handed out and keep the rest dense and ascending.
-- **Where the program's code lands moves a server by 2.5 to 5%**, more than most differences
-  between allocators, and the allocator's own size decides where it lands.
+- **Where the program's code lands moves a server by 1 to 7%, by job**, as much as most differences
+  between good allocators, and the allocator's own size decides where it lands.
 - **We have not measured** what share of a server's cross-core misses is false sharing, or how
   many cache lines a request touches under each allocator. See
   ["Not yet measured"](#not-yet-measured).
@@ -45,7 +45,9 @@ is within 1.2% of cralloc on them; with them in, the cycles column reads 1.046, 
 
 Read it with one caution. A CPI ratio under 1 does not show better placement: instructions an
 allocator adds can run faster than the program's average, which pulls its CPI down. What the table
-does show is that no stall penalty is visible for jemalloc or tcmalloc on top of their extra work.
+does show is that no stall penalty is visible for jemalloc or tcmalloc on top of their extra work:
+their extra instructions cost 0.43 and 0.45 cycles each, no worse than the code around them
+([servers.md](servers.md)).
 
 The gaps have different shapes by program. CPI against cralloc, per job:
 
@@ -57,11 +59,13 @@ The gaps have different shapes by program. CPI against cralloc, per job:
 | Order service, axum, HTTP/2 | 0.991 | 0.965 | 0.998 | 1.203 |
 | Order service, actix | 0.978 | 0.968 | 1.036 | 1.135 |
 
-- **glibc on the order service is the clear placement case.** On axum it fills 810 lines a request
-  against cralloc's 612, 231 of them from beyond L2 against 94; on HTTP/2, 1,244 against 912, and
-  250 against 88. The order service caches orders that another worker later evicts, so 20% of the
-  blocks followed by address are freed on another CPU. We have not split glibc's fills between its
-  own chunk headers and the program's objects. (2026-10-21, `f9ee162`, one to three rounds.)
+- **glibc on the order service is where stalls show.** On axum it fills 810 lines a request against
+  cralloc's 612, 231 of them from beyond L2 against 94; on HTTP/2, 1,244 against 912, and 250 against
+  88. The order service caches orders that another worker later evicts, so 20% of the blocks followed
+  by address are freed on another CPU. We have not split glibc's fills between its own chunk headers,
+  the program's objects and lines that move while threads contend for its locks: at 70% load its CPUs
+  are busier than cralloc's and at saturation it has many times the context switches.
+  (2026-10-21, `f9ee162`, one to three rounds.)
 - **mimalloc on the store** runs 11.6% more instructions and 21.4% more cycles. Its stalls were not
   attributed.
 - **On the Connect log jobs glibc's gap is all instructions.** On the gRPC job, the one followed by
@@ -289,13 +293,15 @@ becomes a target. (2026-10-19, `515412e`; tag `repro/exp-domain-regions`.)
 
 ## The allocator moves the program's code
 
-**A server's time moves by 2.5 to 5% with where its code lands, and the allocator's size decides that.** Builds
-identical except for a padding function of N bytes ahead of everything moved all later code by exactly N. On
-the Connect log gRPC job: N = 0, 16, 32, 48 ran 126.9, 127.1, 130.5 and 132.2 k cycles a request, instructions
-level. Over 90% of the difference in sampled op-cache misses and decoder-delivered ops falls in the service's
-protobuf decoder, not in allocator code. A whole-line shift is as bad as the worst sub-line one by another route, so
-no single alignment decides it. The sensitive code is not ours and there is nothing to pin. The order service
-moves too: 3.3% across pads under cralloc, 1.2% under jemalloc. (2026-10-22.)
+**A server's time moves with where its code lands, and the allocator's size decides that.** Builds identical
+except for a padding function of N bytes ahead of everything moved all later code by exactly N. On the Connect
+log gRPC job: N = 0, 16, 32, 48 ran 126.9, 127.1, 130.5 and 132.2 k cycles a request, instructions level. Over 90%
+of the difference in sampled op-cache misses and decoder-delivered ops falls in the service's protobuf decoder, not
+in allocator code. A whole-line shift is as bad as the worst sub-line one by another route, so no single alignment
+decides it. The sensitive code is not ours and there is nothing to pin. (2026-10-22.)
+
+Over five placements on 2026-10-28, the spread is 5.0 to 6.4% on the Connect log jobs and 1.7 to 3.1% on the order
+service, median of five allocators, and it differs by allocator: cralloc's own is 3.1 to 3.7% and 1.2 to 2.7%.
 
 This changes how to read every number here: see [measuring.md](measuring.md).
 
