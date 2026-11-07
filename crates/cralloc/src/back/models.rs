@@ -2134,11 +2134,11 @@ fn stale_bits_setup() -> Host8 {
     host
 }
 
-/// Review of the direct path (`Look` against clears that go up the tree). A scattered launder
-/// frees into words that are empty under set summary bits, so at every level it reads a bit
-/// that is set and writes nothing, while searches from the top find those words empty, clear
-/// their bits level by level, and read each word again. `Summary_look_deep.cfg` with the
-/// stale bits of `Summary_keep_deep.cfg`, on the production code.
+/// The direct path (`Look` against clears that go up the tree). A scattered launder frees into
+/// words that are empty under set summary bits, so at every level it reads a bit that is set and
+/// writes nothing, while searches from the top find those words empty, clear their bits level by
+/// level, and read each word again. `Summary_look_deep.cfg` with the stale bits of
+/// `Summary_keep_deep.cfg`, on the production code.
 fn direct_frees_under_stale_bits_race_clears(preemptions: usize, wide: bool) {
     explore(
         Config {
@@ -2168,7 +2168,7 @@ fn direct_frees_under_stale_bits_race_clears(preemptions: usize, wide: bool) {
 }
 
 /// One preemption, which takes most of a minute for this scenario and the next together. Two
-/// take about twelve minutes, and passed when the direct path was reviewed.
+/// take about twelve minutes.
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_under_stale_bits_race_clears_fully() {
@@ -2234,15 +2234,14 @@ fn wide_direct_frees_heal_what_a_fork_left_fully() {
     direct_frees_heal_what_a_fork_left(1, true);
 }
 
-/// Review of the single free that looks at every level (`tree::release_one`, main `cc154bd`).
-/// The step it takes that `Up` in `tla/Summary.tla` does not: its OR of a level-1 bit finds
-/// the level-1 word empty, and it still reads the level-2 bit before setting it, while the
-/// thread that emptied that word is clearing the same bit on its way up
-/// (`tla/SummaryLookUp.tla`). Two summary levels and the class's two; the claim is a purge's
-/// (`claim_exact`), which clears and reads again at every level. With `alone`, nothing else
-/// in the class is free, so the clears go on through the class word to its top word and the
-/// free looks at each of those behind an OR that found the word below empty. Every schedule,
-/// or those with at most `preemptions` preemptions.
+/// The single free that looks at every level (`tree::release_one`). The step it takes that `Up` in
+/// `tla/Summary.tla` does not: its OR of a level-1 bit finds the level-1 word empty, and it still
+/// reads the level-2 bit before setting it, while the thread that emptied that word is clearing the
+/// same bit on its way up (`tla/SummaryLookUp.tla`). Two summary levels and the class's two; the
+/// claim is a purge's (`claim_exact`), which clears and reads again at every level. With `alone`,
+/// nothing else in the class is free, so the clears go on through the class word to its top word
+/// and the free looks at each of those behind an OR that found the word below empty. Every
+/// schedule, or those with at most `preemptions` preemptions.
 fn a_single_free_looks_above_a_word_it_found_empty(alone: bool, preemptions: Option<usize>) {
     explore(
         Config {

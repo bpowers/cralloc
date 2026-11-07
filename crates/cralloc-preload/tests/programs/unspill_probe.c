@@ -1,14 +1,12 @@
 // What an in-place growth of a staggered large block costs, call by call: the faults, huge-page
 // faults and TSC ticks inside realloc, the resident memory it adds before the program writes a
-// byte, and the same for the program's fill of the new room. (Review of Back::unspill, main
-// 960cc3e.) A buffer is grown by doubling from 1 MiB to the top size, filled as it grows, and
-// freed, over and over; a second buffer holds slot 0 of the class, which has no stagger, so the
-// one measured sits in slot 1. Every byte is checked after each realloc.
+// byte, and the same for the program's fill of the new room (Back::unspill). A buffer is grown
+// by doubling from 1 MiB to the top size, filled as it grows, and freed, over and over; a second
+// buffer holds slot 0 of the class, which has no stagger, so the one measured sits in slot 1.
+// Every byte is checked after each realloc.
 //
-// When this was written a grown block's slot was kept resident at its free, within a budget,
-// and repetitions after the first showed what unspill does to memory that is already resident.
-// Since the free of a block advised for huge pages returns its slot whole, every repetition is
-// a fresh one; the resident case is a slot a move kept (back/tests/unspill_review.rs).
+// The free of a block advised for huge pages returns its slot whole, so every repetition is a
+// fresh one; the resident case is a slot a move kept (back/tests/unspill.rs).
 //
 // Run by hand; it is in no test. Fault counts are exact; ticks are only as good as the core
 // is quiet.

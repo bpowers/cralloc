@@ -753,7 +753,7 @@ impl<O: Os> Back<'_, O> {
         // the program runs, and in a silence the shorter one that returns a quiet program's
         // held slots at the thread's second round. A heartbeat's look, taken by the thread
         // between the steps of its round, would take each fine step's one look first with the
-        // whole hold, and the round's would never apply (review finding 5).
+        // whole hold, and the round's would never apply.
         let hold = if size.heartbeat {
             self.hold_beat(time)
         } else {

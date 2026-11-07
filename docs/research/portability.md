@@ -203,7 +203,7 @@ CPU hours. A rerun of the slowest 47 after the last two changes: 17 passed, 26 o
   `a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own`,
   `a_class_opens_one_run_at_start_whatever_the_clock_reads`,
   `large_allocations_and_frees_run_the_heartbeat` and
-  `review_lean_realloc::a_simulated_heap_gives_back_the_blocks_a_resize_leaves`. Each asserts a heap
+  `lean_realloc::a_simulated_heap_gives_back_the_blocks_a_resize_leaves`. Each asserts a heap
   policy, none is undefined behaviour, and none had finished under Miri before. Preemption,
   weak-memory emulation and isolation do not matter, and every Miri-only setting forced natively
   passes. Until they are explained and the 26 are scaled, `scripts/miri` exits non-zero.

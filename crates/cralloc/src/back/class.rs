@@ -762,10 +762,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// slot or a run, or if `size` exceeds the slot or run. Small slots record no size, so for
     /// them this does nothing.
     ///
-    /// The heap no longer calls it: it claims a block with headroom for the size it uses
+    /// The heap does not call it: it claims a block with headroom for the size it uses
     /// (`Heap::alloc_large_using`) and resizes with [`Back::resize_in_place`]. The back end's
-    /// tests and the review's random runs use it to record a size apart from a claim, which is
-    /// a case the clean bits must survive (`region::cover` keeps them true).
+    /// tests use it to record a size apart from a claim, which is a case the clean bits must
+    /// survive (`region::cover` keeps them true).
     pub fn resize(&self, ptr: NonNull<u8>, size: usize) {
         match self.lookup(ptr.as_ptr()) {
             Some(Kind::Slot(class)) if class.is_small() => {}

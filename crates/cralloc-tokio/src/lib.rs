@@ -121,8 +121,8 @@ mod tests {
         });
     }
 
-    /// Review of `burst-start`: on a runtime built without its timer (`enable_time`), the call
-    /// must refuse, not hand back a task that dies at its first poll.
+    /// On a runtime built without its timer (`enable_time`), the call must refuse, not hand back a
+    /// task that dies at its first poll.
     #[test]
     fn a_runtime_without_a_timer_is_refused_at_the_call_not_silently_in_the_task() {
         let runtime = tokio::runtime::Builder::new_current_thread()

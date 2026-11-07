@@ -1,8 +1,6 @@
-//! Evidence for the adversarial review of the growth headroom rule (`8734aac..26c1a7b`), and
-//! for the check of its fix (main `39b9d59`): a large block that outgrows its slot moves into
-//! one with sixteen times its room while that is at most a sixteenth of a region, four times
-//! while that fits a region, and falls back from sixteen to four to its size when the larger
-//! slot cannot be had.
+//! The growth headroom rule: a large block that outgrows its slot moves into one with sixteen
+//! times its room while that is at most a sixteenth of a region, four times while that fits a
+//! region, and falls back from sixteen to four to its size when the larger slot cannot be had.
 //!
 //! The simulator's native shape has regions of a megabyte, where no large block is small
 //! enough for sixteen times the room, so the parent module's random runs never make a slot
@@ -13,9 +11,6 @@
 //! to zero), and one more: every page of a slot past what its tenants were given is clean, so
 //! the room nobody wrote is in no count. They run also with commits failing, so that growth
 //! takes its fallbacks.
-//!
-//! Two tests were findings: they failed on the code as reviewed, and pass since the fix. A
-//! third is a finding of the check of the fix, and is ignored because it fails.
 
 use super::*;
 use crate::classes::MagazineSize;
@@ -79,7 +74,7 @@ fn c_realloc_in<S: Shape>(sim: &SimHeap<S>, old: NonNull<u8>, size: usize) -> Op
     Some(new)
 }
 
-/// What a run met, so that a pass is known to have exercised the rule under review.
+/// What a run met, so that a pass is known to have exercised the rule.
 #[derive(Default, Debug, Clone, Copy)]
 struct Seen {
     met: Met,
@@ -592,19 +587,18 @@ fn layout_of(size: usize) -> Layout {
     Layout::from_size_align(size, 8).unwrap()
 }
 
-/// Finding regions-used-up, as reviewed (`26c1a7b`). A room past half a region is a slot of a
-/// whole region, and a region is never unassigned, so every buffer that grew past a
-/// thirty-second of a region took a region for good, and when the regions were gone every
-/// class that needed one failed, small classes too. In the native shape (247 regions of a
-/// megabyte) that was every buffer grown to 64 KiB. Six hundred of them, 38 MiB of data in a
-/// 247 MiB heap, fit at four times the room (three slots to a region, 202 regions); at sixteen
-/// the 247th could not grow and nothing of a new class could be allocated.
+/// A block gets sixteen times its room only while that is at most a sixteenth of a region. A room
+/// past half a region is a slot of a whole region, and a region is never unassigned, so at sixteen
+/// every buffer that grew past a thirty-second of a region would take a region for good, and when
+/// the regions were gone every class that needed one would fail, small classes too. In the native
+/// shape (247 regions of a megabyte) that is every buffer grown to 64 KiB. Six hundred of them,
+/// 38 MiB of data in a 247 MiB heap, fit at four times the room (three slots to a region, 202
+/// regions); at sixteen the 247th could not grow and nothing of a new class could be allocated.
 ///
-/// The process's heap was the same under an address-space limit, which shrinks its regions:
-/// under `prlimit --as` of 16 GiB (regions of 2 MiB) 3,939 buffers grown from 40 to 64 KiB,
-/// 246 MiB of data, used every region, where `8734aac` fits 23,634; after that `malloc(256)`
-/// returned null. Since the fix a block gets sixteen times its room only while that is at most
-/// a sixteenth of a region, and the native shape and that limit fit what `8734aac` fits.
+/// The process's heap is the same under an address-space limit, which shrinks its regions: under
+/// `prlimit --as` of 16 GiB (regions of 2 MiB), at sixteen times the room, 3,939 buffers grown
+/// from 40 to 64 KiB, 246 MiB of data, use every region, where four times the room fits 23,634;
+/// after that `malloc(256)` returns null.
 #[test]
 fn six_hundred_buffers_grown_to_64_kib_leave_room_for_another_class() {
     let sim = SimHeap::<Native>::new();
@@ -659,16 +653,14 @@ fn all_but_one_region_assigned() -> Box<SimHeap<Native>> {
     sim
 }
 
-/// Finding last-region, as reviewed (`26c1a7b`). The fallback's promise is that a growth fails
-/// only where a plain allocation of its size fails. A refused attempt was not free, though:
-/// the attempt at the larger slot assigned a region to that slot's class before it committed
-/// the slot (`Back::assign`, then `region::carve`), and a region is never unassigned. So when
-/// the OS refused that commit, as strict overcommit and a data-segment limit refuse the
-/// largest request first, and the region was the last one, the smaller rooms and the size
-/// itself had no region to take, and the growth failed where a plain allocation of its size,
-/// tried first, is served. `8734aac` failed this too, with its one attempt at four times the
-/// room. Since the fix a large class commits its first slot before it takes a region
-/// (`region::commit_first`).
+/// The fallback's promise is that a growth fails only where a plain allocation of its size fails,
+/// so a refused attempt must cost nothing: a large class commits its first slot before it takes a
+/// region (`region::commit_first`). An attempt at the larger slot that assigned a region to that
+/// slot's class before it committed the slot would keep the region for good, since a region is
+/// never unassigned. When the OS refused that commit, as strict overcommit and a data-segment limit
+/// refuse the largest request first, and the region was the last one, the smaller rooms and the
+/// size itself would have no region to take, and the growth would fail where a plain allocation of
+/// its size, tried first, is served.
 #[test]
 fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region() {
     let size = 40 << 10;
@@ -696,10 +688,9 @@ fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region(
     );
 }
 
-/// The fix to last-region where the rule has both rooms. On [`Roomy`] a block growing to
-/// 40 KiB tries a slot with sixteen times its room, then one with four. When the OS refuses to
-/// commit the first, no region is taken for its class, and the second takes the region the
-/// first would have had.
+/// The same where the rule has both rooms. On [`Roomy`] a block growing to 40 KiB tries a slot with
+/// sixteen times its room, then one with four. When the OS refuses to commit the first, no region
+/// is taken for its class, and the second takes the region the first would have had.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
@@ -744,20 +735,19 @@ fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
     }
 }
 
-/// Finding shrunk-blocks-hold-regions, found in the check of the fix (main `39b9d59`). The
-/// shrink threshold is tied to sixteen times the room (`SHRINK_MOVES_BELOW`, a thirty-second
-/// of the slot) for every large block, also where no block gets that room: a plain block, a
-/// run, and every block of a heap whose regions are too small for it. So a buffer allocated
-/// big and cut to between a thirty-second and an eighth of its slot, as one that is read into
-/// and then shrunk to fit is, keeps its slot where at `8734aac` it moved to a slot of its
-/// size. In the native shape a 512 KiB buffer has a region to itself; three hundred of them,
-/// each cut to 40 KiB before the next is allocated, are 12 MiB of data in a 247 MiB heap,
-/// and after 247 of them no region is left. At `8734aac` each moves out of the one region
-/// they are all allocated in, and together they take sixteen.
+/// The shrink threshold follows the headroom a block growing into the slot would get
+/// (`shrink_moves_below_for`). Tied to sixteen times the room (a thirty-second of the slot) for
+/// every large block, also where no block gets that room (a plain block, a run, and every block of
+/// a heap whose regions are too small for it), a buffer allocated big and cut to between a
+/// thirty-second and an eighth of its slot, as one that is read into and then shrunk to fit is,
+/// would keep its slot and not move to a slot of its size. In the native shape a 512 KiB buffer
+/// has a region to itself; three hundred of them, each cut to 40 KiB before the next is allocated,
+/// are 12 MiB of data in a 247 MiB heap, and after 247 of them no region would be left. Each moves
+/// out of the one region they are all allocated in, and together they take sixteen.
 ///
-/// The process's heap is the same under an address-space limit: under `prlimit --as` of 16 GiB
-/// 3,940 buffers allocated at 1 MiB and cut to 100 KiB, 384 MiB of data, use every region,
-/// where `8734aac` fits 70,902; after that `malloc(256)` returns null.
+/// The process's heap is the same under an address-space limit: under `prlimit --as` of 16 GiB,
+/// with that threshold, 3,940 buffers allocated at 1 MiB and cut to 100 KiB, 384 MiB of data, use
+/// every region, where moving them fits 70,902; after that `malloc(256)` returns null.
 #[test]
 fn three_hundred_buffers_cut_to_40_kib_leave_their_regions() {
     let sim = SimHeap::<Native>::new();

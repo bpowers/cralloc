@@ -1,6 +1,8 @@
-//! Adversarial review of the huge-page tail (`back::tail`, branch `huge-tail-rule` at
-//! `22d669e`). Each test states what the rule promises and fails where the code does not keep
-//! it; the review's report says which fail and why.
+//! The huge-page tail at its edges (`back::tail`): each test states what the rule promises where
+//! a step resumes inside a huge page, the kernel refuses a call, an owner does not run, or
+//! khugepaged rebuilds what was returned, and fails where the code does not keep it. `kernel`
+//! asks the host's kernel what the rule relies on, and `protocol` runs `tla/Tail.tla`'s properties
+//! on the code.
 
 use super::super::layout::{Grow, Hints};
 use super::super::policy::TAIL_HEADROOM_HUGE_PAGES;
@@ -74,9 +76,8 @@ fn huge_from<'a>(back: &Back<'a, Sim>, region: RegionId) -> u32 {
 /// "A step that only counts ... splits nothing, returns nothing" (`purge`, "The tail"; "The
 /// floor": a pass held to nothing purges nothing). A step that returns part of a huge page
 /// ends with the region's cursor inside it (every split on a slow path ends the step there).
-/// The next step that resumes from that cursor skips the test of `may_return`, which
-/// `tail_step` makes only at the top of a huge page, so a counting step splits and returns the
-/// rest of the huge page.
+/// A counting step that resumes from that cursor, past the top of the huge page where the look is
+/// taken, must pass the rest of the huge page and not split or return it.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_counting_step_that_resumes_inside_a_huge_page_returns_nothing() {
@@ -162,8 +163,8 @@ fn a_step_past_its_limit_returns_no_more_than_a_run_over() {
 
 /// "On a request's slow path a split counts as a whole step, so such a step makes one at
 /// most." A split the kernel refuses is a system call all the same (`MADV_COLD` is refused
-/// with `EINVAL` over a locked mapping, so in a program that called `mlockall` every one is),
-/// and it is not counted: one heartbeat asks once for every run its budget reaches.
+/// with `EINVAL` over a locked mapping, so in a program that called `mlockall` every one is), so
+/// it counts: uncounted, one heartbeat would ask once for every run its budget reaches.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heartbeat_asks_for_at_most_one_split_when_the_kernel_refuses() {
@@ -185,10 +186,10 @@ fn a_heartbeat_asks_for_at_most_one_split_when_the_kernel_refuses() {
 
 /// "Nothing waits or loops" and the thread sleeps in a quiet program. A region whose word
 /// carries a claim's mark and an owner bit whose owner does not run (a thread a fork left
-/// behind, or one stopped mid-change) is marked again by every look (`raise_marked`), and
-/// `purge_due` is true while any region is marked, so the background thread never sleeps: its
-/// steps do not count intervals, so in a program whose slow paths have gone quiet the owner
-/// never goes stale either.
+/// behind, or one stopped mid-change) keeps its mark and does not set the flag (`raise_marked`):
+/// `purge_due` is true while the flag is set, and the thread's steps do not count intervals, so in
+/// a program whose slow paths have gone quiet the owner would never go stale and the thread would
+/// never sleep.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_thread_sleeps_though_an_owner_that_does_not_run_holds_a_marked_region() {
@@ -232,9 +233,8 @@ fn the_thread_sleeps_though_an_owner_that_does_not_run_holds_a_marked_region() {
 }
 
 /// `tla/Tail.tla`, `Call`: a refused lowering keeps the noted huge page (`!.low = m.low`), so
-/// that the advice comes off there once the kernel takes the call. The code drops it (`lower`
-/// gives back `low: None` with the repair bit) when the lowering call itself is the one
-/// refused, and nothing notes that huge page again, since its free pages have gone back.
+/// that the advice comes off there once the kernel takes the call. Dropped, nothing would note
+/// that huge page again, since its free pages have gone back.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_refused_lowering_leaves_the_noted_huge_page_in_the_word() {
@@ -242,7 +242,7 @@ fn a_refused_lowering_leaves_the_noted_huge_page_in_the_word() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let (kept, _) = stranded(&back);
-    // The frontier aged: the advice may come off above it only (fix of finding 7).
+    // The frontier aged: the advice may come off above it only.
     forget_reuse(&back);
     let region = region_of(&back, kept[kept.len() - 1]);
     let host = back.host(class().class()).unwrap();
@@ -260,16 +260,15 @@ fn a_refused_lowering_leaves_the_noted_huge_page_in_the_word() {
 }
 
 /// `tla/Tail.tla`, `Give`: a raise to the region's end keeps a huge page noted below the old
-/// boundary (`low1` drops it only when `n.from # 0 /\ low0 >= n.from`). The code's raise
-/// filters with `next.from != 0 && low < next.from`, which drops every note when the boundary
-/// goes away.
+/// boundary (`low1` drops it only when `n.from # 0 /\ low0 >= n.from`), where a filter of
+/// `next.from != 0 && low < next.from` would drop every note when the boundary goes away.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_raise_to_the_end_keeps_a_note_below_the_old_boundary() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let (kept, _) = stranded(&back);
-    // The frontier aged: the advice may come off above it only (fix of finding 7).
+    // The frontier aged: the advice may come off above it only.
     forget_reuse(&back);
     let epoch = back.epoch();
     let region = region_of(&back, kept[kept.len() - 1]);
@@ -301,10 +300,9 @@ fn a_raise_to_the_end_keeps_a_note_below_the_old_boundary() {
 }
 
 /// An owner is taken over only when its bit is stale. A thread whose reading of the interval
-/// is one behind the owner's (it read the count, the count stepped, the owner took the bit:
-/// `raise_marked` reads the count once for all its regions and makes system calls between)
-/// computes an age of minus one, which the unsigned comparison takes for a very old bit, and
-/// takes over an owner that took the bit a moment ago.
+/// is one behind the owner's (it read the count, the count stepped, the owner took the bit)
+/// computes an age of minus one, which an unsigned comparison would take for a very old bit,
+/// taking over an owner that took the bit a moment ago.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_fresh_owner_is_not_taken_over_by_a_thread_with_an_older_interval() {
@@ -337,9 +335,10 @@ fn a_fresh_owner_is_not_taken_over_by_a_thread_with_an_older_interval() {
 }
 
 /// A change the kernel refuses is tried again by "the pass after", not at the rate of the
-/// program's fills. With the kernel refusing advice (out of mappings, `vm.max_map_count`),
-/// every fill that reaches above the boundary marks the region again, since the refused raise
-/// cleared the mark, and every heartbeat then makes the refused calls again.
+/// program's fills. With the kernel refusing advice (out of mappings, `vm.max_map_count`), the
+/// region keeps its mark and no raise is tried before the next interval (`raise_marked`):
+/// otherwise every fill that reached above the boundary would have the next heartbeat make the
+/// refused calls again.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_refused_raise_is_not_tried_again_on_every_fill() {
@@ -364,9 +363,9 @@ fn a_refused_raise_is_not_tried_again_on_every_fill() {
     );
 }
 
-/// "On a request's slow path" the work is bounded: a step, or a split. The raises a heartbeat
-/// makes where there is no thread are not: one heartbeat changes the advice of every marked
-/// region, each a call (three with a repair) that takes the address-space lock for writing.
+/// "On a request's slow path" the work is bounded: a step, or a split. So are the raises a
+/// heartbeat makes where there is no thread: one heartbeat changes the advice of one marked
+/// region, a call (three with a repair) that takes the address-space lock for writing.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heartbeat_raises_a_bounded_number_of_regions() {
@@ -411,9 +410,9 @@ fn a_heartbeat_raises_a_bounded_number_of_regions() {
 
 /// What a raise puts back under the advice, khugepaged rebuilds if it holds one page, and the
 /// headroom is by design huge pages that fills have not reached. Their returned pages are
-/// resident and charged again, but their clean bits still say returned, so the retained count
-/// does not hold them, the look calls them dense, and no pass returns them until the huge page
-/// is wholly free. The test shows the memory coming back and staying.
+/// resident and charged again though their clean bits still say returned. Under the advice the
+/// walk does not believe those bits (`Back::tail_step`), so the passes return the pages again and
+/// the memory does not stay until the huge page is wholly free.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
@@ -430,7 +429,7 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
         assert!(!more.is_empty());
         again.extend(more);
     }
-    // A request's heartbeat raises one region a step (finding 3): as many as it takes.
+    // A request's heartbeat raises one region a step: as many as it takes.
     for _ in 0..8 {
         if back.state.marks.load() == 0 {
             break;
@@ -455,8 +454,8 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
 /// The headroom of a raise: the advice goes back on up to the frontier and
 /// `TAIL_HEADROOM_HUGE_PAGES` beyond, "never further". The standard shape's regions are four
 /// huge pages, fewer than the headroom, so no other test reaches a raise that stops short of
-/// the region's end. This one holds on the branch; it is here because nothing else fails when
-/// the headroom, or the boundary a partial raise writes, is wrong.
+/// the region's end. It is here because nothing else fails when the headroom, or the boundary a
+/// partial raise writes, is wrong.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_raise_stops_at_the_frontier_and_the_headroom() {
@@ -486,7 +485,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
         first + 2 + TAIL_HEADROOM_HUGE_PAGES < units.min(top.div_ceil(hp)),
         "the region is too short for a partial raise: {first} of {units}, carved to {top}"
     );
-    // The frontier aged: the advice may come off above it only (fix of finding 7).
+    // The frontier aged: the advice may come off above it only.
     tick(&back, 2);
     let epoch = back.epoch();
     tail::note(&host, region, first + 1);
@@ -584,13 +583,12 @@ mod kernel {
         fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
     }
 
-    /// Fifth round: what the walk's question (`mincore`) answers on the kernel itself, at each
-    /// state the tail rule passes through. Pages returned from a split huge page are not
-    /// resident; once the huge page is rebuilt (`MADV_COLLAPSE` here, khugepaged in life) they
-    /// are; and after the rebuilt huge page is split again by the walk's own `MADV_COLD`, the
-    /// pages it did not return are still reported resident, which the simulator's answer (a
-    /// page is resident if its huge page is mapped whole or it holds a nonzero byte) does not
-    /// say of a page that reads as zero.
+    /// What the walk's question (`mincore`) answers on the kernel itself, at each state the tail
+    /// rule passes through. Pages returned from a split huge page are not resident; once the huge
+    /// page is rebuilt (`MADV_COLLAPSE` here, khugepaged in life) they are; and after the rebuilt
+    /// huge page is split again by the walk's own `MADV_COLD`, the pages it did not return are
+    /// still reported resident, which the simulator's answer (a page is resident if its huge page
+    /// is mapped whole or it holds a nonzero byte) does not say of a page that reads as zero.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn mincore_follows_a_return_a_rebuild_and_a_split() {
@@ -679,7 +677,8 @@ fn sampled(unit: super::super::layout::Unit, salt: u32) -> Vec<u32> {
 /// the count of intervals in which a heartbeat ran, which stands still through a silence: the
 /// time when the background thread's rounds return a quiet program's memory. A huge page
 /// above the frontier with half its pages free, none of them where this interval's samples
-/// fall, is called dense by every lap of the silence and keeps all of it.
+/// fall, must still go back in the silence, or every lap would call it dense and it would keep
+/// all of it.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_huge_page_misjudged_once_is_judged_again_in_a_silence() {
@@ -769,8 +768,7 @@ fn every_class_with_huge_pages_starts_past_the_first_page() {
 /// A kernel that refuses every change of advice, from the region's first (no huge pages
 /// built in, or out of mappings throughout): the rule still returns the free pages, nothing
 /// is lost, the word asks for a repair and never names a boundary, no claim marks a region,
-/// and the refused calls are at most the reconcile's, once a region a pass. This holds on
-/// the branch.
+/// and the refused calls are at most the reconcile's, once a region a pass.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_kernel_that_refuses_all_advice_costs_a_call_a_region_a_pass() {
@@ -819,9 +817,8 @@ fn a_kernel_that_refuses_all_advice_costs_a_call_a_region_a_pass() {
 
 /// `tla/Tail.tla`'s properties on the code itself, under the interleaving explorer
 /// (`back::explore`): `tail`'s functions unchanged, every operation on the tail word a step,
-/// over a kernel that records the advice of each huge page. The branch's own tests of the
-/// protocol are one randomized race and the model, and nothing ties the model to the code:
-/// the mutants of the take-over and of the give-back's merges all pass them.
+/// over a kernel that records the advice of each huge page. This is what ties the model to the
+/// code: a wrong take-over or wrong merges in the give-back pass a randomized race and the model.
 mod protocol {
     use super::super::super::explore::{Config, Outcome, TWord, explore};
     use super::super::super::layout::Layout;
@@ -1118,11 +1115,11 @@ mod protocol {
         );
     }
 
-    /// Second round, on the fixes (`67ee2f4`). `MarkVisible`: once nobody is at work, a word
-    /// that carries a mark has the flag set. The model's take is one step; the code's raise
-    /// loads the word and then takes the bit with a compare-and-swap, which a walker's note in
-    /// between makes fail. The look has cleared the flag, no owner exists to set it again, and
-    /// the mark stays where no look finds it until some later lowering of the region gives
+    /// `MarkVisible`: once nobody is at work, a word that carries a mark has the flag set. The
+    /// model's take is one step; the code's raise loads the word and then takes the bit with a
+    /// compare-and-swap, which a walker's note in between makes fail, so it tries again. The look
+    /// has cleared the flag and no owner exists to set it again, so a raise that gave up there
+    /// would leave the mark where no look finds it until some later lowering of the region gave
     /// the bit back.
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -1162,11 +1159,11 @@ mod protocol {
         );
     }
 
-    /// The lowering "never below the frontier" drops a note the frontier has passed. The
-    /// word keeps only the lowest huge page noted, so the drop also forgets every huge page
-    /// above the frontier that the walk returned part of since the last lowering: their
-    /// advice stays on. Lowering at the frontier instead keeps `OffOnlyReturned` (the
-    /// frontier is above the noted huge page) and takes the advice off where it should.
+    /// The lowering is "never below the frontier", and the word keeps only the lowest huge page
+    /// noted. Dropping a note the frontier has passed would also forget every huge page above the
+    /// frontier that the walk returned part of since the last lowering, and their advice would
+    /// stay on. Lowering at the frontier keeps `OffOnlyReturned` (the frontier is above the noted
+    /// huge page) and takes the advice off where it should.
     #[test]
     fn a_note_the_frontier_passed_still_lowers_what_lies_above_the_frontier() {
         let kernel = Kernel::new();
@@ -1189,10 +1186,9 @@ mod protocol {
     }
 }
 
-/// Second round. The cut (`TAIL_SPLIT_SHARE`) protects a huge page's mapping, but it is
-/// applied to huge pages that are already split and whose advice is off: once a pass has
-/// returned the long runs of one, what is left is under a quarter, and the pass that takes
-/// runs of any length never takes it. Before the cut those pages went back at that pass.
+/// The cut (`TAIL_SPLIT_SHARE`) protects a huge page's mapping, so a huge page already split with
+/// its advice off has nothing for it to protect: once a pass has returned the long runs of one,
+/// what is left is under a quarter, and the pass that takes runs of any length must still take it.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_short_runs_of_a_split_huge_page_go_back_at_the_pass_for_short_runs() {
@@ -1237,12 +1233,11 @@ fn the_short_runs_of_a_split_huge_page_go_back_at_the_pass_for_short_runs() {
     );
 }
 
-/// Third round, on the accounting (`460c742`). A raise counts every clean page of the
-/// non-empty huge pages it puts back under the advice as resident, whether or not the kernel
-/// has rebuilt anything (khugepaged takes minutes). The cap acts on that count: a burst that
-/// reaches a little above the boundary in many classes at once puts the count over the cap
-/// with memory that is not there, and the next class to grow pays for it by returning pages
-/// another class freed a moment ago and is about to reuse.
+/// A raise does not count the clean pages of the huge pages it puts back under the advice as
+/// resident, since the kernel may have rebuilt nothing (khugepaged takes minutes). The cap acts on
+/// the count: counted, a burst that reaches a little above the boundary in many classes at once
+/// would put it over the cap with memory that is not there, and the next class to grow would pay
+/// for it by returning pages another class freed a moment ago and is about to reuse.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
@@ -1327,11 +1322,11 @@ fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
     );
 }
 
-/// Fourth round, on the accounting by distrust (`a787c9a`). Below the boundary the walk
-/// returns a non-empty huge page's clean runs again, once, and the lowering that follows makes
-/// the bits trusted. Where the kernel refuses the lowering (out of mappings, or a kernel that
-/// takes no advice) the boundary never comes down, so every lap asks for the splits and
-/// returns the same clean runs again, for as long as the tail stands.
+/// Below the boundary the walk returns a non-empty huge page's clean runs again, once, and the
+/// lowering that follows makes the bits trusted. Where the kernel refuses the lowering (out of
+/// mappings, or a kernel that takes no advice) the boundary never comes down, so the bits are
+/// believed until the clock moves (`Back::tail_step`): otherwise every lap would ask for the splits
+/// and return the same clean runs again, for as long as the tail stands.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_refused_lowering_does_not_return_the_same_clean_runs_every_lap() {

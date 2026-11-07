@@ -1014,16 +1014,14 @@ fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
     rig.slabs().cpu(0).unwrap()
 }
 
-/// Review: how long a quiet domain's stacks take to go back grows with how many stacks the other
+/// How long a quiet domain's stacks take to go back grows with how many stacks the other
 /// domains hold, because each look visits one of them and a stack needs two looks in different
 /// intervals before it owes anything. The test of 2, 8 and 64 domains above looks on every slow
 /// path, sixteen times the allocator's rate. At the allocator's rate and the same pace (640
 /// slow paths an interval on the one busy CPU), 63 quiet domains holding five classes each take
-/// 16 intervals to empty and with two classes 7; at e0e2611, where a look read one class in
-/// every domain, both took 3.
+/// 16 intervals to empty and with two classes 7.
 #[test]
-
-fn stock_review_quiet_domains_go_back_at_the_allocators_look_rate() {
+fn quiet_domains_go_back_at_the_allocators_look_rate() {
     let mut slowest = 0;
     let (half, eighth) = (CPUS as u32 / 2, CPUS as u32 / 8);
     for (width, held) in [(half, 2), (eighth, 2), (eighth, 5), (1, 2), (1, 5)] {
@@ -1085,16 +1083,14 @@ fn shared_depth_after_drains(shed_unused: bool, intervals: usize) -> (Vec<usize>
     (after_each, target)
 }
 
-/// Review: the heartbeat looks at a shared stack's target only in a slow path that pushed on
-/// it, and before that slow path's own sweep and drain. What a drain parks there (and the rest
-/// of a swept spare stack) is therefore never checked. With nothing else pushing the class, the
-/// stack stays over its target until the low-water rule sheds the whole of it, an interval or
-/// two later, and for good where that rule is off. The design says the heartbeat launders the
-/// shared stack while it is over its target, and that a class parks at most the domains' caps
-/// and the shared target.
+/// The design says the heartbeat launders the shared stack while it is over its target, and that
+/// a class parks at most the domains' caps and the shared target. That covers what a drain parks
+/// there and the rest of a swept spare stack, with nothing else pushing the class. A look at the
+/// target only in a slow path that pushed on the stack, before its own sweep and drain, would
+/// never check them: the stack would stay over its target until the low-water rule shed the whole
+/// of it, an interval or two later, and for good where that rule is off.
 #[test]
-
-fn stock_review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
+fn a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
     let magazine = tiny(0).magazine().capacity();
     let (with_shed, target) = shared_depth_after_drains(true, 5);
     let (without, _) = shared_depth_after_drains(false, 5);
@@ -1313,9 +1309,9 @@ fn stock_unused_for_an_interval_goes_back() {
     rig.census(&[], false);
 }
 
-// Findings of the adversarial review of stock (`stock.rs`, commit bc301e8). Each test below
-// fails as the code stands and is ignored so that the gate stays green; each names what it
-// shows. Run them with `cargo test -p cralloc --lib stock_review_ -- --ignored`.
+// Stock's limits (`stock.rs`) where its stacks run deep or a thread moves between CPUs in the
+// middle of a slow path: what `collect` reaches, what one call launders, and that what a move
+// leaves behind goes back.
 
 use crate::front::Spare;
 use crate::os::{Aborted, Machine, Step};
@@ -1373,12 +1369,11 @@ fn round_trip<M: Machine>(
     }
 }
 
-/// Finding: `collect` (and so `malloc_trim`) empties the caller's own slab by popping at most
-/// 64 magazines from each spare stack (`collect.rs`, `SPARE_POPS`, "spare stacks hold at most
-/// a few"). With stock a stack holds up to its fixed limit plus the room in magazines, 450 for
-/// the 8-byte class with the allocator's limits, so the caller's own CPU keeps the rest.
+/// `collect` (and so `malloc_trim`) empties the caller's own slab however deep its spare stacks
+/// are (`collect.rs`): with stock a stack holds up to its fixed limit plus the room in magazines,
+/// 450 for the 8-byte class with the allocator's limits.
 #[test]
-fn stock_review_collect_empties_the_callers_stock() {
+fn collect_empties_the_callers_stock() {
     let class = tiny(0);
     let tuning = Tuning {
         stock: true,
@@ -1399,17 +1394,14 @@ fn stock_review_collect_empties_the_callers_stock() {
     rig.census(&[], false);
 }
 
-/// Finding: the per-CPU count of stock bytes is added to whatever CPU the thread is on after
-/// the push routine returns (`spare_push`, then `note_stock_push`, each reading the CPU
-/// number), so a thread moved between the two counts the magazine on a CPU that does not hold
-/// it. A count above what the CPU holds is never put right while the CPU stays busy: pops and
-/// the sweep take off only what they find, and only the idle drain clears the count. `stock.rs`
-/// says "the next drain or sweep puts it right". Each such move (and each lost update between
-/// the count's load and its store, and each pop followed by a move, which leaves the count
-/// behind on the CPU popped from) takes a magazine's weight off that CPU's room for good, so a
-/// CPU that never idles drifts towards keeping no stock.
+/// What a CPU holds as stock is read from its stacks (`stock.rs`, "Depth"), so a thread moved
+/// right after a push routine's commit counts the magazine on no CPU that does not hold it. A
+/// count kept beside the stacks and added to whatever CPU the thread is on after the routine
+/// returned would be misplaced by such a move, and put right only by an idle drain: each move
+/// would take a magazine's weight off that CPU's room for good, and a CPU that never idled would
+/// drift towards keeping no stock.
 #[test]
-fn stock_review_a_sweep_puts_a_misplaced_count_right() {
+fn a_thread_moved_after_a_push_misplaces_no_stock_count() {
     let (bursty, busy) = (tiny(0), tiny(1));
     let tuning = Tuning {
         stock: true,
@@ -1460,16 +1452,15 @@ fn stock_review_a_sweep_puts_a_misplaced_count_right() {
     rig.census(&[], false);
 }
 
-/// Finding: the sweep's step for a class takes its whole stack of full spares, stock and all,
-/// and sends all but the top magazine to the depot in one heartbeat; what the domain's stack
-/// and the shared stack's target do not take, the same heartbeat's launder over target sends
-/// back to the source. With the allocator's limits that is up to 885 KiB of one class's objects
-/// less the 128 KiB the depot keeps, some 370 magazines of the 8-byte class, laundered inside
-/// one call to `malloc` or `free`, once an interval for each class a CPU keeps stock of, in
-/// use or not. `heartbeat.rs`, "Bounded work", says one slow path launders at most four
-/// magazines and that a sweep step pushes "at most a few".
+/// The sweep takes stock back a magazine a heartbeat, so one call launders a few magazines at most
+/// (`heartbeat.rs`, "Bounded work"). A step that sent a class's whole stack of full spares to the
+/// depot in one heartbeat, stock and all, would have the same heartbeat's launder over target send
+/// what the domain's stack and the shared stack's target did not take back to the source: with the
+/// allocator's limits up to 885 KiB of one class's objects less the 128 KiB the depot keeps, some
+/// 370 magazines of the 8-byte class, inside one call to `malloc` or `free`, once an interval for
+/// each class a CPU keeps stock of, in use or not.
 #[test]
-fn stock_review_one_call_launders_a_few_magazines() {
+fn one_call_launders_a_few_magazines() {
     let (bursty, busy) = (tiny(0), tiny(1));
     // The depot's limits against the stock as the allocator's are against its room: a
     // fraction of it.
@@ -1520,15 +1511,14 @@ fn stock_review_one_call_launders_a_few_magazines() {
     rig.census(&[], false);
 }
 
-/// Finding: the sweep settles the stock word of the CPU its slow path began on, but returns
-/// the empty spares past the new limit by popping the stack of the CPU the thread is on by
-/// then (`settle_stock`: `spare_depth` and `spare_pop` read the CPU again). A thread moved in
-/// between takes the credit from one CPU and the magazines from another, and the first CPU's
-/// empties stay: later sweeps pop only as many as the credit they take off, and with no credit
-/// left that is none. They are counted against that CPU's room for empty stock until the class
-/// is freed there again or the CPU idles.
+/// A thread no longer on the CPU its slow path began on does nothing for that CPU's stock in its
+/// sweep (`sweep_stock`), and the CPU's own next heartbeat carries on. A sweep that settled the
+/// stock word of the first CPU and popped the stack of the CPU the thread was on by then would
+/// take the credit from one CPU and the magazines from another, and the first CPU's empties would
+/// stay, counted against its room for empty stock until the class was freed there again or the CPU
+/// idled.
 #[test]
-fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
+fn empty_stock_a_moved_thread_swept_goes_back() {
     let (bursty, busy) = (tiny(0), tiny(1));
     let tuning = Tuning {
         stock: true,
@@ -1569,9 +1559,6 @@ fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
     rig.census(&held, false);
 }
 
-// Tests the review added for rules that no test held (each mutation named was not noticed by
-// the suite at bc301e8). They pass.
-
 /// Gives the rig's CPU 0 forty magazines of full stock of `bursty`, for the tests below.
 fn stock_up(rig: &TestRig, bursty: SmallClass, busy: SmallClass) {
     let machine = SimCpu::new(0);
@@ -1584,8 +1571,7 @@ fn stock_up(rig: &TestRig, bursty: SmallClass, busy: SmallClass) {
 }
 
 /// The sweep takes what it takes off the CPU's count of stock, and so does a drain: a count
-/// left behind would be room the CPU never gets back. (Not taking the sweep's magazines off
-/// the count, or not clearing it in the drain, went unnoticed.)
+/// left behind would be room the CPU never gets back.
 #[test]
 fn the_sweep_and_the_drain_take_stock_off_the_count() {
     let tuning = Tuning {
@@ -1618,8 +1604,7 @@ fn the_sweep_and_the_drain_take_stock_off_the_count() {
     rig.census(&[], false);
 }
 
-/// Empty stock that an interval does not use goes back to the depot with its credit. (A sweep
-/// that returned no empty spares went unnoticed.)
+/// Empty stock that an interval does not use goes back to the depot with its credit.
 #[test]
 fn empty_stock_unused_for_an_interval_goes_back() {
     let tuning = Tuning {
@@ -1657,8 +1642,7 @@ fn empty_stock_unused_for_an_interval_goes_back() {
 /// empty ones. With credit for empty stock and none for full it keeps no empty stock: an empty
 /// kept is room for a full one freed there, and nothing is. (`a_cpu_that_only_allocates_keeps_
 /// no_empty_stock` fills from the source, where each slow path pops the empty spare it pushed,
-/// so its stack never passes one with or without the rule, and dropping the rule went
-/// unnoticed.)
+/// so its stack never passes one with or without the rule: this is the test that holds it.)
 #[test]
 fn empty_stock_needs_credit_for_full_stock() {
     let class = tiny(0);
@@ -1690,7 +1674,7 @@ fn empty_stock_needs_credit_for_full_stock() {
 }
 
 /// A round trip earns credit for the kind of spare that made it, and no more than the room
-/// holds of the class. (Crediting the other kind, or dropping the cap, went unnoticed.)
+/// holds of the class.
 #[test]
 fn credit_goes_to_the_kind_that_round_tripped_up_to_the_room() {
     use super::stock::{Stock, room};
@@ -1775,18 +1759,16 @@ fn the_bottom_spares_are_taken(stock: bool) -> bool {
     taken
 }
 
-/// Finding (check of the fix, db0ba83): a class with credit whose stock is in use by the
-/// low-water rule keeps its fixed full spares out of the sweep, on the argument that "the pops
-/// that use the stock reach them, or the low-water mark shrinks the stock until they do"
-/// (`stock.rs`, "Disuse"). The mark shrinks the stock only down to the fixed limit: pops that
-/// leave the stack at or below its limit take nothing off the credit, so a class that swaps
-/// the top of its stack keeps one credit for good, and the magazines under the top are never
-/// popped, never swept and never refreshed: up to the fixed limit of each class, 139 KiB of
-/// objects a CPU with the allocator's limits, parked for as long as the class stays busy
-/// there. Without stock the sweep takes them once an interval, which is the rule the design's
-/// table gives for a CPU's full spares.
+/// A class with credit whose stock is in use by the low-water rule has its fixed full spares swept
+/// all the same (`stock.rs`, "Disuse"). The mark shrinks the stock only down to the fixed limit:
+/// pops that leave the stack at or below its limit take nothing off the credit, so a class that
+/// swaps the top of its stack keeps one credit for good, and unswept the magazines under the top
+/// would never be popped or refreshed: up to the fixed limit of each class, 139 KiB of objects a
+/// CPU with the allocator's limits, parked for as long as the class stays busy there. Without
+/// stock the sweep takes them once an interval, which is the rule the design's table gives for a
+/// CPU's full spares.
 #[test]
-fn stock_review_fixed_spares_under_stock_in_use_are_swept() {
+fn fixed_spares_under_stock_in_use_are_swept() {
     assert!(the_bottom_spares_are_taken(false), "without stock");
     assert!(the_bottom_spares_are_taken(true), "with one credit");
 }
@@ -2039,18 +2021,17 @@ fn idle_magazine_left_loaded(ahead: bool) -> (bool, bool) {
     (loaded_on(&rig, 0, idle), swept)
 }
 
-/// Review of the launder budget: a CPU whose every slow path pushed a magazine on a shared
-/// stack set the magazine's objects aside from the budget, over target or not, so its age limit
-/// never had room for a magazine of the smallest class, and one it had stopped using stayed
-/// loaded for good. Now only a push that leaves the stack over its target is set aside.
+/// Only a push that leaves a shared stack over its target is set aside from the launder budget.
+/// A CPU whose every slow path pushed a magazine, set aside over target or not, would never have
+/// room in its age limit for a magazine of the smallest class, and one it had stopped using would
+/// stay loaded for good.
 #[test]
 fn a_cpu_whose_pushes_stay_under_target_still_takes_back_an_idle_magazine() {
     assert_eq!(idle_magazine_left_loaded(false), (false, true));
 }
 
-/// Review of the launder budget: where every push does leave the shared stack over its target,
-/// the age limit finds the old magazine and no room on every slow path; the next slow path then
-/// gives it the budget first.
+/// Where every push does leave the shared stack over its target, the age limit finds the old
+/// magazine and no room on every slow path; the next slow path then gives it the budget first.
 #[test]
 fn a_cpu_whose_pushes_overflow_still_takes_back_an_idle_magazine() {
     assert_eq!(idle_magazine_left_loaded(true), (false, true));
@@ -2094,13 +2075,12 @@ fn in_pool_roomy<const N: usize>(
         .count(cache.area(), class.magazine()) as usize
 }
 
-/// Review of the launder budget: on a CPU that only frees, every exchange pushes past the
-/// shared stack's target, and each call that ran a rule the budget had turned away skipped its
-/// own launder over target, which takes one magazine a push and so never caught up: the stack
-/// levelled at three to five times its target. A call launders its own push even after such a
-/// rule. The 16-byte stack then stays at its target; the 8-byte one, whose CPU keeps two full
-/// spares, also holds what the sweep sends on from them, within its budget, until the shed
-/// takes it back.
+/// On a CPU that only frees, every exchange pushes past the shared stack's target. A call launders
+/// its own push even after running a rule the budget had turned away: the launder over target
+/// takes one magazine a push, so skipping it would never catch up, and the stack would level at
+/// three to five times its target. The 16-byte stack stays at its target; the 8-byte one, whose
+/// CPU keeps two full spares, also holds what the sweep sends on from them, within its budget,
+/// until the shed takes it back.
 #[test]
 fn a_free_only_phase_keeps_the_shared_stack_at_its_target() {
     for ordinal in [0, 1] {
@@ -2350,10 +2330,10 @@ fn compound_within(class: SmallClass, pattern: &[(usize, usize)], percent: usize
     );
 }
 
-/// Two swings of different sizes in each repetition, the review of 5dceb66's worst cases
-/// (1,024-byte class, magazines of 62): while a run after a half-full swap counted as absorbed,
-/// the rule retried them every repetition. From a single starting level they also measured the
-/// luck of its phase (`compound_over_phases`).
+/// Two swings of different sizes in each repetition, the rule's worst cases (1,024-byte class,
+/// magazines of 62): were a run after a half-full swap counted as absorbed, the rule would retry
+/// them every repetition. From a single starting level they would also measure the luck of its
+/// phase (`compound_over_phases`).
 #[test]
 #[cfg(not(debug_assertions))]
 #[ignore = "slow: run with scripts/gate --all, optimized"]
@@ -2372,15 +2352,15 @@ fn the_swing_rule_pays_for_itself_on_two_sizes() {
         compound_within(class, pattern, 2);
     }
     // Above the bar, at 3.4%: the rule's retries, one in 65 lock swaps, each move the phase,
-    // and this pattern's are not paid back (reported with the change, not special-cased).
+    // and this pattern's are not paid back.
     compound_within(class, &[(34, 34), (68, 68)], 4);
 }
 
-/// The review's wide sweep over phases: amplitudes from a sixteenth of a magazine to three
-/// magazines, one size and three two-size patterns. 185 of the 192 are within 2%; seven, a
-/// swing near half a magazine with one twice its size (31/62, 34/68, 38/76) or a swing near a
-/// magazine with one a third its size (62/20 to 73/24), are 2.1 to 3.4% over, the cost of the
-/// rule's retries moving the phase. They are held here at 4%.
+/// A wide sweep over phases: amplitudes from a sixteenth of a magazine to three magazines, one size
+/// and three two-size patterns. 185 of the 192 are within 2%; seven, a swing near half a magazine
+/// with one twice its size (31/62, 34/68, 38/76) or a swing near a magazine with one a third its
+/// size (62/20 to 73/24), are 2.1 to 3.4% over, the cost of the rule's retries moving the phase.
+/// They are held here at 4%.
 #[test]
 #[cfg(not(debug_assertions))]
 #[ignore = "slow: run with scripts/gate --all, optimized"]

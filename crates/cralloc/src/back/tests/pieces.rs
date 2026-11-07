@@ -119,8 +119,8 @@ fn a_slot_taken_between_pieces_is_not_handed_out_zeroed() {
     back.free(high, class);
 }
 
-/// A heartbeat's step of the clocked pass returns at most `PURGE_STEP_PAGES` pages, where it
-/// used to be bounded only by the bitmap it read.
+/// A heartbeat's step of the clocked pass returns at most `PURGE_STEP_PAGES` pages, whatever the
+/// bitmap it reads holds.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_heartbeats_step_of_the_clocked_pass_is_capped_in_pages() {
@@ -217,7 +217,7 @@ fn a_growth_payment_returns_at_most_a_steps_pages() {
 }
 
 /// The words a walk reads to get past live large slots when the step has one
-/// page left to return. A live slot used to cost one word.
+/// page left to return.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_walk_passes_a_live_slot_at_a_look() {

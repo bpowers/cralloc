@@ -1,13 +1,12 @@
-//! Tests from the review of `burst-start` (counted intervals, purging by runs, `maintain`
-//! limiting its own rate) and of its fixes: when a clocked pass is due, its steps, and the
-//! floor of the allowance.
+//! When a clocked pass is due, its steps, and the floor of the allowance: counted intervals,
+//! purging by runs, and `maintain` limiting its own rate.
 //!
 //! The first two model a process in which `maintain` is the only thing that runs: a caller
 //! every half interval, as the background thread and the tokio task are, with the round's own
 //! work taking half a millisecond of the clock between its one clock read
 //! (`depot::heartbeat::Clock` caches it) and the end of its purge pass, which stamps the decay
-//! word with a fresh read. The simulated clock does not move by itself, which is why the tests
-//! that run `maintain` over the simulated heap did not see it.
+//! word with a fresh read. The simulated clock does not move by itself, so a test that only runs
+//! `maintain` over the simulated heap does not show this.
 
 use super::*;
 use core::sync::atomic::Ordering::Relaxed;
@@ -31,10 +30,10 @@ fn maintain_call(state: &State<Sim>, back: &Back<'_, Sim>) -> (bool, bool) {
     (true, state.decay.word.load(Relaxed) != before)
 }
 
-/// With `maintain` alone running, each round runs the clocked pass: a pass an interval. As
-/// built, a round runs at the count's step and the last pass ended a little after the step
-/// before, so the decay word is never an interval old at the next round, and no later call in
-/// that interval is let in: a pass every other interval.
+/// With `maintain` alone running, each round runs the clocked pass: a pass an interval. A round
+/// runs at the count's step and the last pass ended a little after the step before, so a pass
+/// due by the decay word's age would not yet be due at the next round, and no later call in that
+/// interval is let in: a pass every other interval.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn maintain_alone_runs_a_pass_every_interval() {
@@ -65,10 +64,9 @@ fn maintain_alone_runs_a_pass_every_interval() {
 }
 
 /// Single free pages go back within a few times `PURGE_ANY_RUN_EVERY` intervals whenever the
-/// program went quiet. As built, the pass that takes any run is the one that starts in an
-/// interval whose number divides by it, and passes that come every other interval (above)
-/// start only in odd intervals or only in even ones: begun on the wrong one, they never take a
-/// short run.
+/// program went quiet. The pass that takes any run is the one that starts in an interval whose
+/// number divides by it, so passes that came every other interval would start only in odd
+/// intervals or only in even ones and, begun on the wrong one, would never take a short run.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn maintain_alone_returns_single_free_pages_whenever_it_began() {
@@ -112,8 +110,7 @@ fn maintain_alone_returns_single_free_pages_whenever_it_began() {
 
 /// Heartbeats an interval or two apart, each a short run of them as a slow path makes, start a
 /// pass at each run of them: with passes due by the interval's number, a pass that ended a
-/// little after its interval began does not hold the next one back. As first built, beats an
-/// interval apart started a pass every other time.
+/// little after its interval began does not hold the next one back.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn heartbeats_an_interval_or_two_apart_start_a_pass_each_time() {
@@ -276,11 +273,11 @@ fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
     assert_eq!(back.retained(), 0, "trim left memory the floor would keep");
 }
 
-/// Second review. A pass whose goal has one to three pages left must still take them from a
-/// long run, or stop. As built, a run is cut to what the goal has left before the test for
-/// short runs, so every run the walk meets from then on is cut to under
-/// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over: the pass walks the rest of
-/// its lap past long free runs, purging nothing, and ends only when it has gone round.
+/// A pass whose goal has one to three pages left must still take them from a long run, or stop.
+/// A run cut to what the goal has left before the test for short runs would be under
+/// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over, every run the walk met from
+/// then on: the pass would walk the rest of its lap past long free runs, purging nothing, and
+/// end only when it had gone round.
 ///
 /// A pass's goal is everything the last lap counted (`policy::decay_goal`), so its remaining
 /// goal is short of a long run when the count is short of what is free now: memory freed after

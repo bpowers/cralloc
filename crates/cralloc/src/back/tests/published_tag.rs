@@ -1,17 +1,16 @@
-//! Evidence for the ledger review of `back/class.rs`, `back/host.rs` and `back/region.rs` at
-//! `0fd0853`, and the tests of its fix, the published tag (`back::tags`).
+//! The published tag (`back::tags`): the walks that find regions by their number
+//! (`Back::hold_region`, the hold's plan, `Back::lower_walked`, `Back::raise_marked`,
+//! `Back::inspect`) take a region's class from it, and only the thread whose carving swing named
+//! the region writes it, after the swing.
 //!
-//! The finding: the walks that find regions by their number (`Back::hold_region`, the hold's
-//! plan, `Back::lower_walked`, `Back::raise_marked`, `Back::inspect`) read a region's class
-//! from the table, and could read it while a thread that lost the race for its class's carving
-//! word held the region, before it gave the region back. A walk descheduled from there until
-//! another class had the region went on with the first class's host and layout.
+//! A walk that read the class from the table could read it while a thread that lost the race for
+//! its class's carving word held the region, before it gave the region back. Descheduled from
+//! there until another class had the region, it would go on with the first class's host and
+//! layout.
 //!
-//! The walks now take a region's class from the published tag, which only the thread whose
-//! carving swing named the region writes, after the swing. No test can put a thread between
-//! two loads of a walk, so the tests play the steps by hand: the loser's as `Back::assign`
-//! makes them, and the walk's read of the class, then the walk itself once another class has
-//! the region.
+//! No test can put a thread between two loads of a walk, so the tests play the steps by hand: the
+//! loser's as `Back::assign` makes them, and the walk's read of the class, then the walk itself
+//! once another class has the region.
 
 use super::super::hold::{Reach, held_for};
 use super::super::policy::{FINE_TICKS, HOLD_STEPS};
@@ -46,17 +45,16 @@ fn lose_a_region<O: Os>(back: &Back<'_, O>, class: Class) -> RegionId {
     region
 }
 
-/// A look of the hold reads a region's class while a thread that lost the race for its
-/// class's carving word still holds the region. Before the fix it read the table, found the
-/// loser's class, and ran again once another large class had taken the region, allocated from
-/// it and freed a slot: two large classes with a leaf word each keep their bitmaps and size
-/// words at the same offsets, so it took the second class's free slot 1 for the first class's
-/// and returned the first class's slot 1, the pages of the second class's live slots 2 and 3.
-/// Now it finds no class for the region, and the hold's look, run once the other class has the
-/// region, walks it as that class's.
+/// A look of the hold reads a region's class while a thread that lost the race for its class's
+/// carving word still holds the region. It finds no class for the region, and the hold's look, run
+/// once another large class has the region, walks it as that class's. A look that read the table
+/// would find the loser's class and run again once the other class had taken the region, allocated
+/// from it and freed a slot: two large classes with a leaf word each keep their bitmaps and size
+/// words at the same offsets, so it would take the second class's free slot 1 for the first
+/// class's and return the first class's slot 1, the pages of the second class's live slots 2 and 3.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_look_that_read_the_tag_of_a_region_given_back_returns_another_classes_live_slots() {
+fn a_look_at_a_region_given_back_returns_none_of_the_next_classes_live_slots() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -215,13 +213,13 @@ fn a_fork_child_publishes_the_regions_named_and_not_published() {
     assert_eq!(back.state.tags.published(named), Some(class));
 }
 
-/// The fork child's repair beside a thread of the child's own that loses an assignment (the
-/// review of the published tag, `tla/Assign.tla`, `Assign_repair`): the repair reads the
-/// loser's tag, and by the time it asks whether the region was carved from, another class has
-/// named the region and carved, and its namer has not yet published. Read through the first
-/// class's host, the carve is seen: two small classes share the region's header, and a large
-/// class's header is where a small class's top summary word sits, set once one of its slots
-/// is released. The repair reads the tag again and publishes nothing for the first class.
+/// The fork child's repair beside a thread of the child's own that loses an assignment
+/// (`tla/Assign.tla`, `Assign_repair`): the repair reads the loser's tag, and by the time it asks
+/// whether the region was carved from, another class has named the region and carved, and its namer
+/// has not yet published. Read through the first class's host, the carve is seen: two small classes
+/// share the region's header, and a large class's header is where a small class's top summary word
+/// sits, set once one of its slots is released. The repair reads the tag again and publishes
+/// nothing for the first class.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_repair_does_not_publish_a_region_for_a_class_whose_tag_it_read_stale() {

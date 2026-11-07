@@ -141,7 +141,7 @@ create one of its own (`tests/fork_loader_lock.rs`). A limit remains, the same a
 thread, once per process, deadlocks if it runs inside a `dl_iterate_phdr` callback, which
 holds `dl_load_write_lock` (std's backtrace symbolizer allocates in one), while another
 thread is inside `dlopen` or `dlclose` (reproduced by the reviewer; the case
-`a_free_in_a_callback_returns_beside_a_dlopen`, run with `CRALLOC_REVIEW_KNOWN_FAILURES=1`).
+`a_free_in_a_callback_returns_beside_a_dlopen`, run with `CRALLOC_TEST_KNOWN_FAILURES=1`).
 No cheap and sound test tells a slow path that its thread holds the loader's lock: the lock
 is private to glibc. On musl, `dl_iterate_phdr` holds no lock while its callback runs (read in
 source: it takes its read lock only to step to the next module).

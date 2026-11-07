@@ -1,7 +1,7 @@
 //! The background thread's stack, in a program whose static thread-local data is 252,000
-//! bytes. With a fixed request of 256 KiB, glibc gave the thread about 5 KiB below that data,
-//! and its first round of work ran into its guard page. The thread now takes the C library's
-//! default stack, which the library sizes against its own thread-local data.
+//! bytes. With a fixed request of 256 KiB, glibc would give the thread about 5 KiB below that
+//! data, and its first round of work would run into its guard page. So the thread takes the C
+//! library's default stack, which the library sizes against its own thread-local data.
 //!
 //! The test runs the thread through its paths (a burst freed, a fragmented heap, growth over
 //! the cap, parking, a wake), in the process and again in a child forked from it, and
@@ -30,7 +30,7 @@ use std::time::Duration;
 #[global_allocator]
 static ALLOCATOR: Cralloc = Cralloc;
 
-/// Static thread-local data that left the old fixed request about 5 KiB of stack.
+/// Static thread-local data that would leave a fixed request of 256 KiB about 5 KiB of stack.
 const TLS: usize = 252_000;
 
 /// How deep below the top of its stack the thread may go in this test: the thread-local

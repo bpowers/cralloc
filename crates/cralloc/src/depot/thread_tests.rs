@@ -86,8 +86,8 @@ fn work_or_a_slow_path_starts_the_count_of_quiet_rounds_again() {
 /// The thread at its real cadence (it sleeps half an interval or less, so most of its calls
 /// find the round of their interval done) parks only after `QUIET_ROUNDS` rounds that ran, not
 /// calls, and only once the depot has shed everything the drain left: every object is back.
-/// Review finding 5: the thread parked before the round that would have shed the depot, at two
-/// and four calls an interval.
+/// Counted in calls, at two and four an interval, it would park before the round that sheds the
+/// depot.
 #[test]
 fn the_thread_parks_after_quiet_rounds_with_the_depot_shed_at_any_cadence() {
     for per_interval in [1, 2, 4] {
@@ -419,7 +419,7 @@ fn a_child_that_shares_memory_is_not_a_new_process() {
 
 /// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key, and
 /// its generation's draw makes the word its own `NONE`: its crossings still ask for a look,
-/// and a thread of its own then wants one (second review).
+/// and a thread of its own then wants one.
 #[test]
 fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     let rig = rig(12, TIGHT);
