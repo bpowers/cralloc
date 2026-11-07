@@ -5,7 +5,7 @@
 //! on the code.
 
 use super::super::layout::{Grow, Hints};
-use super::super::policy::TAIL_HEADROOM_HUGE_PAGES;
+use super::super::policy::tail_headroom;
 use super::super::purge::Scope;
 use super::super::tail::{self, Change, Tail};
 use super::super::tree::Host;
@@ -98,7 +98,7 @@ fn a_counting_step_that_resumes_inside_a_huge_page_returns_nothing() {
         true,
         Scope::Idle,
         false,
-        true,
+        crate::back::purge::Splits::One,
     );
     assert!(purged != 0 && !done);
     assert_eq!(os.calls(Call::SplitHuge), 1);
@@ -117,7 +117,7 @@ fn a_counting_step_that_resumes_inside_a_huge_page_returns_nothing() {
         true,
         Scope::Idle,
         true,
-        true,
+        crate::back::purge::Splits::One,
     );
     assert_eq!(
         (
@@ -150,12 +150,12 @@ fn a_step_past_its_limit_returns_no_more_than_a_run_over() {
         true,
         Scope::IdleAnyRun,
         true,
-        false,
+        crate::back::purge::Splits::Any,
     );
     // It may finish the run it is on: one run of the goal's length, rounded to the shortest
     // run a pass takes.
     assert!(
-        purged <= super::super::policy::PURGE_MIN_RUN_PAGES as usize * page(),
+        purged <= super::super::policy::PURGE_MIN_RUN_PAGE_UNITS as usize * page(),
         "a step with a goal of one page returned {} pages",
         purged / page()
     );
@@ -452,7 +452,7 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
 }
 
 /// The headroom of a raise: the advice goes back on up to the frontier and
-/// `TAIL_HEADROOM_HUGE_PAGES` beyond, "never further". The standard shape's regions are four
+/// `tail_headroom` beyond, "never further". The standard shape's regions are four
 /// huge pages, fewer than the headroom, so no other test reaches a raise that stops short of
 /// the region's end. It is here because nothing else fails when the headroom, or the boundary a
 /// partial raise writes, is wrong.
@@ -482,7 +482,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
     let from = Hints::unpack(host.hints(region).load()).huge_from.unwrap();
     let first = from / hp;
     assert!(
-        first + 2 + TAIL_HEADROOM_HUGE_PAGES < units.min(top.div_ceil(hp)),
+        first + 2 + tail_headroom(Standard::GEOMETRY) < units.min(top.div_ceil(hp)),
         "the region is too short for a partial raise: {first} of {units}, carved to {top}"
     );
     // The frontier aged: the advice may come off above it only.
@@ -497,7 +497,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
         Change::Done
     );
     let word = Tail::unpack(host.tail(region).load());
-    let to = first + 2 + TAIL_HEADROOM_HUGE_PAGES;
+    let to = first + 2 + tail_headroom(Standard::GEOMETRY);
     assert_eq!(word.from, to, "{word:?}");
     let region_base = back.space().region(region);
     for unit in first..units {
@@ -760,7 +760,7 @@ fn every_class_with_huge_pages_starts_past_the_first_page() {
     for geometry in [crate::space::Geometry::DESIGN] {
         let plan = geometry.largest_plan();
         for class in crate::classes::SmallClass::all() {
-            if !super::super::policy::wants_huge(class.size(), geometry.page_size()) {
+            if !super::super::policy::wants_huge(class.size(), geometry) {
                 continue;
             }
             assert!(
@@ -896,6 +896,9 @@ mod protocol {
 
         fn layout(&self) -> &Layout {
             self.host.layout()
+        }
+        fn geometry(&self) -> crate::space::Geometry {
+            self.host.geometry()
         }
         fn region(&self, index: usize) -> Option<RegionId> {
             self.host.region(index)

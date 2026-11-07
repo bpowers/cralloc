@@ -2,7 +2,7 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_outgrown,
+    DECAY_TICKS, STAGGER_LINES, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_outgrown,
     move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
@@ -1516,7 +1516,7 @@ fn the_clocked_pass_spares_what_fills_reuse() {
         beat(&back);
     }
     let page = Standard::GEOMETRY.page_size();
-    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGES as usize * page);
+    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGE_UNITS as usize * page);
     for _ in 0..super::policy::PURGE_ANY_RUN_EVERY {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
@@ -1558,11 +1558,11 @@ fn the_clocked_pass_returns_a_run_of_free_pages_in_one_call() {
 }
 
 /// A run of free pages a little longer than `PURGE_MAX_RUN_PAGES` goes back whole in the first
-/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGES`, and the
+/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGE_UNITS`, and the
 /// tail, directly below a run just purged, does not wait for the pass that takes any run.
 #[test]
 fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
-    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES};
+    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGE_UNITS};
     use crate::classes::MagazineSize;
     use crate::os::sim::Shape;
     use crate::space::Geometry;
@@ -1579,7 +1579,7 @@ fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
     let class = small(1024);
     let per_page = Wide::GEOMETRY.page_size() / 1024;
     let pages = small_part(&back, class) / per_page;
-    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGES / 2) as usize;
+    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGE_UNITS / 2) as usize;
     assert!(pages > run + 2);
     let slots = fill(&back, class, pages * per_page);
     for &p in &slots {
@@ -3413,20 +3413,20 @@ fn staggered_blocks_start_at_different_cache_lines_and_free_by_address() {
     let back = state.get_or_reserve().unwrap();
     let page = Native::GEOMETRY.page_size();
     let class = large(64 << 10);
-    let size = class.size() - STAGGER_ROOM;
+    let size = class.size() - STAGGER_LINES;
     let blocks: Vec<_> = (0..8)
         .map(|_| back.alloc_staggered(class, size).unwrap().ptr)
         .collect();
     let mut offsets: Vec<usize> = blocks
         .iter()
-        .map(|b| b.addr().get() % STAGGER_ROOM)
+        .map(|b| b.addr().get() % STAGGER_LINES)
         .collect();
     assert!(offsets.iter().all(|o| o % STAGGER_STEP == 0));
     offsets.sort_unstable();
     offsets.dedup();
     assert_eq!(offsets.len(), blocks.len(), "each slot its own stagger");
     for &b in &blocks {
-        let into = b.addr().get() % STAGGER_ROOM;
+        let into = b.addr().get() % STAGGER_LINES;
         assert_eq!(back.lookup(b.as_ptr()), Some(Kind::Slot(class)));
         assert_eq!(back.size(b.as_ptr()), Some(size));
         assert_eq!(back.room(b.as_ptr()), Some(class.size() - into));
@@ -3561,7 +3561,7 @@ fn a_staggered_block_moves_and_returns_its_whole_slot() {
     for sparse in [false, true] {
         // Take a slot first, so the next ones are staggered.
         let skip = back.alloc_staggered(old_class, 1 << 10).unwrap().ptr;
-        let len = old_class.size() - STAGGER_ROOM;
+        let len = old_class.size() - STAGGER_LINES;
         let old = back.alloc_staggered(old_class, len).unwrap().ptr;
         assert_ne!(old.addr().get() % Native::GEOMETRY.page_size(), 0);
         if sparse {

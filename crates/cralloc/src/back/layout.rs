@@ -44,7 +44,7 @@
 //! With the header in the back end's state and the leaf bitmap after the sizes, each large
 //! allocation and free touched two more lines than this, 1.5% on a pipeline of large objects.
 
-use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
+use super::policy::{PAGE_STAGGER, STAGGER_SLOTS, STAGGER_STEP, stagger_pages};
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
 use crate::space::{Plan, slot_from};
@@ -88,11 +88,12 @@ pub(crate) struct Layout {
     sizes: u32,
     page_shift: u8,
     huge_shift: u8,
+    /// How many whole pages a slot's stagger goes over (`policy::stagger_pages`), zero for none.
+    stagger_pages: u8,
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields (the total derivable and not read back) and
-/// three bytes.
+/// come from the class, as sixteen 32-bit fields and four bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.
@@ -584,6 +585,11 @@ impl Layout {
             sizes,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
+            stagger_pages: if class.is_small() {
+                0
+            } else {
+                stagger_pages(geometry, class.size()) as u8
+            },
         })
     }
 
@@ -606,7 +612,6 @@ impl Layout {
             self.origin as u32,
             self.zero,
             self.sizes,
-            self.total_words(),
         ];
         let pair = |a: u32, b: u32| a as u64 | (b as u64) << 32;
         [
@@ -618,7 +623,7 @@ impl Layout {
             pair(f[10], f[11]),
             pair(f[12], f[13]),
             pair(f[14], f[15]),
-            f[16] as u64
+            self.stagger_pages as u64
                 | (self.height as u64) << 32
                 | (self.page_shift as u64) << 40
                 | (self.huge_shift as u64) << 48
@@ -646,6 +651,7 @@ impl Layout {
             sizes: hi(7),
             page_shift: (w[8] >> 40) as u8,
             huge_shift: (w[8] >> 48) as u8,
+            stagger_pages: w[8] as u8,
         }
     }
 
@@ -930,17 +936,35 @@ impl Layout {
     }
 
     /// How far past its slot's start a block in slot `slot` starts when it is staggered: a
-    /// multiple of `policy::STAGGER_STEP` that depends only on the slot's index, so that it is
-    /// never stored and a free recomputes it. Zero for small classes, which are never
-    /// staggered. A block of a large class starts either here or at the slot's start; which
-    /// one the address says.
+    /// multiple of `policy::STAGGER_STEP` that depends only on the class and the slot's index, so
+    /// that it is never stored and a free recomputes it. Lines over 4 KiB, so that the same offset
+    /// in blocks of one class falls in different cache sets, and in a slot large enough, whole
+    /// pages too (`policy::stagger_pages`), so that it falls on different pages' numbers and in
+    /// different TLB sets. Always under the slot's size. Zero for small classes, which are never
+    /// staggered. A block of a large class starts either here or at the slot's start; which one
+    /// the address says.
     #[inline(always)]
     pub(crate) const fn stagger(&self, slot: u32) -> usize {
         if self.sizes == 0 {
-            0
-        } else {
-            (slot as usize % STAGGER_SLOTS) * STAGGER_STEP
+            return 0;
         }
+        let lines = (slot as usize % STAGGER_SLOTS) * STAGGER_STEP;
+        if !PAGE_STAGGER || self.stagger_pages == 0 {
+            return lines;
+        }
+        lines + (((slot % self.stagger_pages as u32) as usize) << self.page_shift)
+    }
+
+    /// The page holding the first byte of a block `into` bytes into slot `slot`, within the
+    /// slot's whole pages `unit`: the pages of `unit` below it are not the block's to write
+    /// (`region`, "Clean bits"). Folds to `unit.start` where the stagger stays within a page.
+    #[inline(always)]
+    pub(crate) const fn first_page(&self, slot: u32, unit: Unit, into: usize) -> u32 {
+        if !PAGE_STAGGER {
+            return unit.start;
+        }
+        let first = ((self.slot_bytes(slot) + into) >> self.page_shift) as u32;
+        if first < unit.start { unit.start } else { first }
     }
 
     /// The slot a block starting at byte `offset` of the region is in, and how far into the
