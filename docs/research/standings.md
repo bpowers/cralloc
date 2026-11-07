@@ -54,11 +54,11 @@ four are one program.
   mimalloc and glibc lose about 70% of their gap in instructions and the rest in stalls. glibc on
   the order service is the clearest stall: +25.3% cycles on +8.3% instructions, IPC 1.34 against
   1.55 ([program-effects.md](program-effects.md)).
-- **The order service over HTTP/2 reads as resolved only because no cralloc placement ran its slow
-  mode this session.** That mode runs 4 to 6% more instructions, follows no build and is not
-  explained. On 2026-10-22, with two cralloc placements in it, the job was level with jemalloc,
-  tcmalloc and mimalloc (-0.6%, +1.5%, +2.5%, inside the range). tcmalloc's pad 16 ran it this time,
-  and that is in its +4.6%.
+- **The order service over HTTP/2 reads as resolved only because no cralloc placement's median fell
+  in its slow mode this session (one run of 15 did).** That mode runs 4 to 6% more instructions,
+  follows no build and is not explained. On 2026-10-22, with two cralloc placements in it, the job
+  was level with jemalloc, tcmalloc and mimalloc (-0.6%, +1.5%, +2.5%, inside the range). tcmalloc
+  ran it at pads 0, 16 and 32, and pad 16's median is in its +4.6%.
 - **Three more servers barely move it.** Over thirteen jobs: jemalloc 1.053 (x1.037), tcmalloc 1.042
   (x1.034), mimalloc 1.068 (x1.050), glibc 1.206 (x1.126). The three:
 
@@ -124,11 +124,11 @@ rounds, cralloc six runs; Meilisearch's heap sits beside a mapped store, 3.5 to 
 Meilisearch reaches at most 710 to 739 MiB through 70% load against jemalloc's 778 to 790. About 587
 MiB of that is the same under both (glibc arenas its C code fills, stacks, the binary), so the row
 dilutes the allocator's part. Just before the first request cralloc is still falling from indexing,
-at 885 to 896, and a second in holds 680 to 705; jemalloc is already down at 655 to 658, and rises
-to 743 to 762. While indexing, before any load, cralloc peaks at 1,388 to 1,433 against jemalloc's
-1,230 to 1,251 (the watcher's cgroup figures, on the first-request clock, computed from the raw
-records). Page faults a request: 42 for cralloc and jemalloc, 23 for mimalloc, 1 for glibc, 0.1 for
-tcmalloc.
+at 885 to 896, and a second in holds 677 to 705; jemalloc is already down at 655 to 658, and a
+second in has risen to 720 to 744. While indexing, before any load, cralloc peaks at 1,388 to 1,433
+against jemalloc's 1,230 to 1,251 (the watcher's cgroup figures, on the first-request clock,
+computed from the raw records). Page faults a request: 42 for cralloc and jemalloc, 23 for mimalloc,
+1 for glibc, 0.1 for tcmalloc.
 
 Long runs, resident heap over the bytes the program holds:
 
@@ -137,7 +137,7 @@ Long runs, resident heap over the bytes the program holds:
 | Steady cache, 2 GiB, 15G operations | 1.105 | 1.148 | 1.127 | 2.97 | 1.27 | `5536610`, 2026-10-24 |
 | Order service, 10 GiB, under load | 1.073 | 1.095 | 1.095 | 1.149 | | `bf837db`, 2026-10-26 |
 | Lifetime mix, 2 GiB, peaks | 1.10 | 1.12 | 1.13 | 1.15 | 1.09 | `bf837db`, 2026-10-27 |
-| Size shift, median 384 B | 1.36 | 1.19 | | | 1.33 | `0cd82ec`, 2026-10-25 |
+| Size shift, median 384 B | 1.36 | 1.19 | | | 1.83 (1.33 in its first cycle) | `0cd82ec`, 2026-10-25; glibc's last cycle `5536610` |
 | mini-redis rewritten, wide phases | 1.15 to 1.18 | 1.16 | | | 1.16 to 1.29 | tail rule, 2026-10-25 to 27 |
 
 A 10.6-hour soak of Qdrant beside jemalloc drifted in neither: 155 MiB at the quiet points against
@@ -194,7 +194,8 @@ Each cause is the one its own study found; none was profiled again at the latest
   359, mimalloc 542, glibc 725. The background thread drained the per-CPU caches in the silence and
   the first requests refill them, about 0.2 ms. Left as it is ([servers.md](servers.md)). The 2 GiB
   order service, where the thread never starts, is level within its range: 151 (136 to 188) against
-  jemalloc's 135 (104 to 204), six and three runs, four of the nine flagged for other work and kept.
+  jemalloc's 135 (104 to 204), six and three runs, three of the nine flagged for other work and
+  kept.
 - **Troughs.** At a 2 GiB trough cralloc holds 0.95 GiB, jemalloc 0.66 (`ab6fe66`, `d36e0cb`,
   2026-10-28), on the same live slots. Each allocation takes the slot the last free pushed, so
   survivors stay spread over the peak's pages: free slots beside live ones are 273 MiB against 40.

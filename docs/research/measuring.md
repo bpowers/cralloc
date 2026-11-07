@@ -50,7 +50,7 @@ it.
 | Order service, 4 jobs | 1.7 to 3.1% (1.2 to 2.7%) | mostly under 1.5% |
 | Sozu proxy | 2.8% (2.3%) | 2 to 3%: partly a mode of its work |
 | Log store; mini-redis | 1.4%; 1.4% (2.8%; 1.0%) | under 1% |
-| `rpc log c64`; `rpc echo c64` | 1.8%; 0.8% (5.8%; 1.1%) | 1 to 2.5% |
+| `rpc log c64`; `rpc echo c64` | 1.8%; 0.8% (5.8%; 1.1%) | under 1% |
 
 Noise within one placement is a median half-range of 0.1 to 0.7%, so more placements help more than
 more rounds. One build of an allocator (the median of 1 to 3 runs) against one of cralloc on the ten
