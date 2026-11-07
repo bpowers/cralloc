@@ -116,19 +116,20 @@ process light.
 ## Measuring
 
 Count cycles and instructions with hardware counters, pin to idle cores, and interleave the
-things being compared. `docs/research/zen5-roofline.md` describes the method. A difference of
+things being compared. `docs/research/measuring.md` describes the method. A difference of
 a cycle or two on a fast path is a finding to explain, not noise: the cause is usually
-instruction selection or layout, and we fix it by construction.
+instruction selection or layout, and we fix it by construction (`docs/research/roofline.md`).
 
 A server job can move by several percent with where the program's own code lands in the
 binary, which any change to the allocator's size shifts. Two builds of such a job are not
 compared by one number each: switch the behaviour at run time inside one binary, or compare
-means over a sweep of placements (`benchrun layout`). `docs/research/grpc-placement.md` says
-which jobs need this and why.
+means over a sweep of placements (`benchrun layout`). `docs/research/measuring.md`, "One number
+from each of two builds measures where the code landed", says which jobs need this and why.
 
 A server's tail latency at one fixed request rate can rank the CPU's idle states instead of
 the allocator: the faster server idles longer, its CPUs sleep deeper, and the wake-up lands
 in the tail. The runner records how often each server run's CPUs went into a deep idle
 state, and the reports flag a tail comparison that this confounds; a flagged difference is
 not the allocator's. `scripts/deep-idle` shows the setting and, with root, switches the
-deep states off. `docs/research/h2-tail.md` has the evidence.
+deep states off. `docs/research/measuring.md`, "A tail at one fixed rate can rank the CPU's
+idle states", has the evidence.
