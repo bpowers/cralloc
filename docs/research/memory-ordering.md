@@ -133,7 +133,10 @@ those loads behind the load of the pointer. The tag, watermark and metadata were
 store that passed it, because a slow path's sequentially consistent operations follow them, and
 nothing passes those. The exception is the word that names the heap, which has no such dependency:
 a program that hands the process's very first block on in this way could find no heap, and abort. We
-accept that; such a program is a data race by C's rules if anyone wrote to the block.
+accept that; such a program is a data race by C's rules if anyone wrote to the block. Rust's model
+has no address dependencies, so there the free has no order at all: under Miri `lookup` reads an old
+tag and finds no block, and the test is not run there. So this rule rests on the hardware's order
+and on the compiler keeping the dependency, and on nothing we can check in the language.
 
 ## A store and then a load, on both sides
 
