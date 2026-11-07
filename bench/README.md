@@ -2,8 +2,8 @@
 
 Workload benchmarks that compare allocators on whole programs: cross-thread patterns, a
 work-stealing pool, an RPC server, single-threaded allocation-heavy shapes, and selected
-mimalloc-bench programs. Results and what they mean are in `docs/research/baselines.md`.
-The fast-path microbenchmarks are in `roofline/` and `docs/research/zen5-roofline.md`. Real
+mimalloc-bench programs. Results and what they mean are in `docs/research/standings.md`.
+The fast-path microbenchmarks are in `roofline/` and `docs/research/roofline.md`. Real
 Rust programs are the `servers` suite (connect-rust, axum and actix-web services under an
 open load) and the `apps` suite (ruff, DataFusion, boa), with their own build step and
 inputs: see `apps/README.md`.
@@ -26,7 +26,7 @@ cargo build --release -p bench-runner
 ```
 
 The `backend` suite is seven small jobs that each exposed a cost of cralloc's back end
-(`docs/research/baselines.md`, "Smoke set for the back end"); run it, against the
+(`docs/research/workloads.md`, "The smoke set for the back end"); run it, against the
 incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
@@ -39,8 +39,9 @@ both L3s.
 
 `build` and `run` refuse an cralloc build whose routines load the rseq offset at a slab hot
 word's page offset (`scripts/rseq-offset-check`): every allocation of that class could wait for
-the previous one, and the session would measure the link (`docs/research/zen5-roofline.md`,
-section 16). `run` records the offsets in its session record.
+the previous one, and the session would measure the link (`docs/research/roofline.md`,
+"A load at the page offset of a store in flight can stall the whole loop"). `run` records
+the offsets in its session record.
 
 `--suite` also takes several suites joined by commas, `--only` several texts joined by
 commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the groups).
@@ -78,8 +79,10 @@ nothing else (`padN` takes any multiple of 16, written with two digits or more).
 allocators the summary also prints each one's mean and range over the layouts, and each
 against the first by the first layout's median (what single builds compare) and by the mean
 over the layouts. Run one round a session and combine the sessions with
-`probes/spawn-gap/padsweep.py`. The server jobs of `rpc-server` move by 2.5 to 5% this way
-(`docs/research/grpc-placement.md`, "How to read server jobs").
+`standings/padsweep.py`, or with `standings/servers.py`, which also says whether each difference
+is resolved or inside the range placement alone covers. The server jobs of `rpc-server` move by several percent this way
+(`docs/research/measuring.md`, "One number from each of two builds measures where the code
+landed").
 
 ```
 ./target/release/benchrun layout --suite servers --only "=connect log grpc h2" \
@@ -105,9 +108,11 @@ cannot be rebuilt under a session.
 | `workloads/` | The `workload` binary: cross-thread, work-stealing and single-threaded workloads. |
 | `rpc/` | connect-rust's echo and log-ingest benchmarks as `rpc-server` (allocator under test) and `rpc-client` (fixed). See `rpc/README.md`. |
 | `apps/` | Real Rust programs, each a workspace of its own with a driver; the `apps` and `servers` suites, built by `benchrun build-apps`. See `apps/README.md`. |
-| `probes/loadgen/` | The servers' open-loop HTTP/1.1 load generator: latency from when each request was due. |
+| `loadgen/` | The servers' open-loop load generator: latency from when each request was due. `benchrun build-apps` builds it. |
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
 | `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
+| `standings/` | What a standings session runs and reports with: session and queue scripts, placement-pad builds, summarizers. See `standings/README.md`. |
+| `tools/` | Small standalone helpers, each explained in its header: `acct.py` (every resident page by structure), `thp-off.py`, `largesum.py` and `doublesum.py` (tables of `servers-large` and `servers-doubling` runs). |
 | `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |
 
 ## Adding an allocator
@@ -165,7 +170,7 @@ cannot be rebuilt under a session.
   execs. A run killed at its cap, or one that reached the cap and was slowed by reclaim, is
   recorded as invalid with that reason, and the session goes on. Every process is charged to
   some memory cgroup anyway, so the cap adds no work to allocation; an interleaved A/B is in
-  `docs/research/baselines.md` section 13.
+  `docs/research/measuring.md`, "The method in brief".
 - **Checks.** Each run must report the allocator, and for tcmalloc the mode, it was meant to
   run with, and where the allocator's code was: linked into the executable, or which shared
   library. A preload run must report the library it preloaded. Native runs report from
@@ -206,18 +211,18 @@ cannot be rebuilt under a session.
   nominal clock (4.38 GHz) for the first 250 ms of work, then boosts to 5.56 to 5.71 GHz.
   One busy core anywhere keeps the boost for all of them. Runs started after the gate took
   up to 30% longer at the same cycles, so medians of jobs ranked by time carried noise from
-  the order of the runs (`docs/research/baselines.md`, section 16). So before each run the
-  runner spins on the job's CPUs, measuring each one's clock in 5 ms windows, until all of
-  them have held their warm clock for three windows, and starts the job straight after
-  (the boost outlasts 200 ms of idle; the start takes a few). The warm clock of each CPU set
-  is learned from an 800 ms spin the first time the set is used. The warm-up comes before
-  the run's interference baseline, so it is not counted as foreign work. It adds about
-  15 ms a run, about a minute and a half to a full session. Every run records the clock it
-  got (`clock.ghz`: cycles over on-CPU time of its measured phases) and its warm-up
-  (`clock.warmup`); the report gives each job's median clock and the runs more than 5%
-  below their allocator's usual clock on that job. An allocator can set the clock itself:
-  glibc's large-object pipeline, all system calls and page faults, runs near nominal.
-  Machine settings (governor, EPP) are left as they come.
+  the order of the runs (`docs/research/measuring.md`, "A short job after idle runs at the
+  wrong clock"). So before each run the runner spins on the job's CPUs, measuring each one's
+  clock in 5 ms windows, until all of them have held their warm clock for three windows, and
+  starts the job straight after (the boost outlasts 200 ms of idle; the start takes a few).
+  The warm clock of each CPU set is learned from an 800 ms spin the first time the set is
+  used. The warm-up comes before the run's interference baseline, so it is not counted as
+  foreign work. It adds about 15 ms a run, about a minute and a half to a full session.
+  Every run records the clock it got (`clock.ghz`: cycles over on-CPU time of its measured
+  phases) and its warm-up (`clock.warmup`); the report gives each job's median clock and the
+  runs more than 5% below their allocator's usual clock on that job. An allocator can set
+  the clock itself: glibc's large-object pipeline, all system calls and page faults, runs
+  near nominal. Machine settings (governor, EPP) are left as they come.
 - **Ranking.** Each job has one primary metric (named in the report with its unit; lower is
   better except rates). The report gives medians, half the interquartile range as a
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up
@@ -235,7 +240,7 @@ Choices that can favour one allocator, not yet tested either way; read the numbe
 - Transparent huge pages are as the machine has them (`madvise` mode on the reference
   machine). mimalloc asks for huge pages for its whole heap and cralloc for dense classes
   past a threshold, which decides the build-and-drop jobs; a session with THP `always` would
-  show the other side. `probes/memory/thp-off.py COMMAND` runs a workload with THP disabled
+  show the other side. `tools/thp-off.py COMMAND` runs a workload with THP disabled
   for the process, which treats every allocator alike.
 - Single-threaded build jobs measure every repetition from a cold process, so allocators that
   keep freed memory gain over those that return it; jemalloc's time-based purging never fires
@@ -245,8 +250,11 @@ Choices that can favour one allocator, not yet tested either way; read the numbe
 - The sampler reads `smaps_rollup` once a second, which holds the process's `mmap_lock`
   during a page-table walk and slightly delays allocators that `munmap` or `mremap` often
   (`--rollup-ms` changes the interval).
-- CPUs 4-7, where builds run, share an L3 with measurement CPUs 0-3; memory-bound jobs have
-  drifted by up to three times on a busy machine without any load on their own CPU.
+- Builds run on CPUs 12-15 and their siblings 28-31 (`scripts/heavy`), which share an L3 with
+  measurement CPUs 8-11 and not with 0-3. A session under `scripts/measure --both-l3` freezes
+  them, so it has no heavy work beside it; a job on CPUs 0-3 alone, under plain
+  `scripts/measure`, runs beside them and shares only memory. When builds shared the job's L3,
+  memory-bound jobs drifted by up to three times with no load on their own CPU.
 
 Output is JSON lines: a `session` record (machine, settings, allocators, the baseline
 manifests) followed by one `run` record per process.

@@ -1,4 +1,4 @@
-//! Servers under an open load: the suite's load generator (bench/probes/loadgen) against a
+//! Servers under an open load: the suite's load generator (bench/loadgen) against a
 //! server the runner started, and what the run reports.
 //!
 //! The generator runs a plan of segments (closed loop, a fixed request rate, silence, closed
@@ -27,10 +27,10 @@ use std::time::{Duration, Instant};
 /// the reference machine (C3) takes about 350 us to leave. A faster allocator leaves more
 /// idle time, so more of it in C3, and the latency tail then ranks the idle states, not the
 /// allocator: with the cores held out of C3, p99.9 at 70% fell from 2 to 4 ms to 30 to 110 us
-/// for every allocator (docs/research/server-latency.md). Disabling the state itself needs
-/// root; a busy sibling holds its core in C0 the same way for every allocator. The spinner
-/// shares the core, which raises medians by a few microseconds; every run's record says which
-/// way it ran (`idle_states`).
+/// for every allocator (docs/research/servers.md, "At one fixed rate a tail can rank idle
+/// states, not allocators"). Disabling the state itself needs root; a busy sibling holds its
+/// core in C0 the same way for every allocator. The spinner shares the core, which raises
+/// medians by a few microseconds; every run's record says which way it ran (`idle_states`).
 pub struct Spinners {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
@@ -189,8 +189,8 @@ pub fn drive(
     arg("--cpus", cpus);
     arg("--plan", l.plan.clone());
     arg("--label", job.id.clone());
-    // Every request's record, for a probe that lines requests up with what the server did
-    // (bench/probes/default-thread): `BENCH_RAW_DIR/<server pid>.raw`. Large at high rates.
+    // Every request's record, for a probe that lines requests up with what the server did:
+    // `BENCH_RAW_DIR/<server pid>.raw`. Large at high rates.
     if let Some(dir) = std::env::var_os("BENCH_RAW_DIR") {
         arg("--raw", Path::new(&dir).join(format!("{}.raw", server.pid)).display().to_string());
     }

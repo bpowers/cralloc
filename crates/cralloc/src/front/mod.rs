@@ -87,7 +87,8 @@ pub(crate) const MASK_COUNT: usize = crate::spec::MASK_COUNT;
 
 /// Where the masks' table starts within its page: past every field of a slab, so that no entry
 /// shares a page offset with a slab word (a load at the page offset of a store in flight waits
-/// for it: `docs/research/zen5-roofline.md`, section 14).
+/// for it: `docs/research/roofline.md`, "A load at the page offset of a store in flight can
+/// stall the whole loop").
 const MASK_PAGE_OFFSET: usize = 2048;
 
 /// Where the mirrors of the heap words start within the masks' page, and where the region table
@@ -232,21 +233,22 @@ const _: () = {
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub static SLABS: Front = Front::new();
 
-// The page-offset rule (`docs/research/zen5-roofline.md`, section 16): a load whose bytes overlap,
-// in the low 12 bits of the address, a hot word that the previous call stored and that is still
-// in flight can wait for that store, and since the hot word's address comes from what the call
-// loaded, a loop of calls then runs one at a time. So nothing a fast path reads or writes on
-// every call shares a page offset with a hot word. For what the crate places, that is checked
-// here. For what others place it rests on alignment: the kernel requires a thread's
-// `struct rseq` to be 32-byte aligned (`include/uapi/linux/rseq.h`), and the routines touch
-// only its `cpu_id` (read) and `rseq_cs` (written), at bytes 4 to 15 of their 32-byte chunk,
-// never `node_id` or `mm_cid`; the executable's copy of glibc's `__rseq_offset` is an 8-byte
-// word as aligned as glibc's own, 16 bytes on the glibc measured; and the routines that would
-// otherwise read the variable's address from its GOT slot, which is only 8-aligned, read it from
-// a 16-aligned word of their own (the generator's `gotLines`). What is not covered is listed in
-// that section: an only 8-aligned `__rseq_offset`, and the tables' wrapped entries (sizes above
-// 16 KiB, sized frees of 2 KiB and up, the region table's top half).
-// `rseq_offset_check` (tests) and `scripts/rseq-offset-check` look at the linked binaries.
+// The page-offset rule (`docs/research/roofline.md`, "A load at the page offset of a store in
+// flight can stall the whole loop"): a load whose bytes overlap, in the low 12 bits of the
+// address, a hot word that the previous call stored and that is still in flight can wait for
+// that store, and since the hot word's address comes from what the call loaded, a loop of calls
+// then runs one at a time. So nothing a fast path reads or writes on every call shares a page
+// offset with a hot word. For what the crate places, that is checked here. For what others
+// place it rests on alignment: the kernel requires a thread's `struct rseq` to be 32-byte
+// aligned (`include/uapi/linux/rseq.h`), and the routines touch only its `cpu_id` (read) and
+// `rseq_cs` (written), at bytes 4 to 15 of their 32-byte chunk, never `node_id` or `mm_cid`;
+// the executable's copy of glibc's `__rseq_offset` is an 8-byte word as aligned as glibc's own,
+// 16 bytes on the glibc measured; and the routines that would otherwise read the variable's
+// address from its GOT slot, which is only 8-aligned, read it from a 16-aligned word of their
+// own (the generator's `gotLines`). What is not covered is listed in that section: an only
+// 8-aligned `__rseq_offset`, and the tables' wrapped entries (sizes above 16 KiB, sized frees
+// of 2 KiB and up, the region table's top half). `rseq_offset_check` (tests) and
+// `scripts/rseq-offset-check` look at the linked binaries.
 
 /// Whether page offset `b` is a byte of some small class's hot word.
 const HOT_PAGE_BYTES: [bool; SLAB_BYTES] = {

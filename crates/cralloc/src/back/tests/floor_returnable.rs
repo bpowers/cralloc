@@ -1,6 +1,6 @@
 //! The floor measured against what a purge could return, and frontiers that a silence does not
 //! age (`purge`, "The floor" and "Frontiers age while the program runs";
-//! `docs/research/default-thread-servers.md`, "The burst after a silence, diagnosed").
+//! `docs/research/servers.md`, "The first requests after a silence").
 //!
 //! A silence is modelled as the background thread makes one: `maintain`'s steps of the clocked
 //! pass (`Back::decay_pass_step`), one round an interval, and no heartbeat.

@@ -1,5 +1,5 @@
-//! Every resident page of the process at exit, for any allocator (feature `memacct`; method and
-//! results in docs/research/memory.md, "Small heaps").
+//! Every resident page of the process at exit, for any allocator (feature `memacct`; method in
+//! docs/research/memory.md, "How memory is accounted", and results in "Small heaps").
 //!
 //! With `BENCH_MEMACCT=<file>` set, an exit handler writes to the file:
 //!
@@ -18,7 +18,7 @@
 //!   tells a private file page that was written (and so charged to this process) from one that
 //!   was only read.
 //!
-//! `bench/probes/memory/acct.py` turns this, the binary's symbol table and cralloc's `memstat`
+//! `bench/tools/acct.py` turns this, the binary's symbol table and cralloc's `memstat`
 //! breakdown into a table by structure. The handler never calls the global allocator: buffers
 //! come from `mmap` and text is formatted into a fixed buffer.
 use std::fmt::Write as _;

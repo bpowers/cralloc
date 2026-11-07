@@ -36,14 +36,16 @@ fn main() {
         "json" => single::json(&args),
         // The cost of one small realloc; not part of any suite.
         "regrow" => single::regrow(&args),
-        // Memory shapes for docs/research/memory.md; not part of any suite.
+        // Memory shapes for docs/research/memory.md, "How memory is accounted"; not part of any
+        // suite.
         "quiet" => mem::quiet(&args),
         "touch" => mem::touch(&args),
         "sparse" => mem::sparse(&args),
         "tiny" => mem::tiny(&args),
         "period" => mem::period(&args),
         "refill" => mem::refill(&args),
-        // Long runs at a large heap for docs/research/heap-drift.md.
+        // Long runs at a large heap for docs/research/memory.md, "A steady heap does not drift"
+        // and "When the size mix wanders, huge pages ratcheted".
         "drift" => drift::drift(&args),
         // A probe of the slow paths' stack depth; not part of any suite.
         "stack" => stack::stack(&args),

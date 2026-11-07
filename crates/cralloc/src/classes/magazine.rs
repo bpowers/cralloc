@@ -98,7 +98,7 @@ const MIN_LOG2: u8 = 2;
 /// slots, larger magazines halved sh8bench's gap and took 10 to 18% off the cross-thread
 /// pipelines; past it the cross-thread gains stopped while the memory parked in loaded
 /// magazines, and the work one slow path does with one, kept doubling
-/// (`docs/research/launder-and-fill.md`, "Magazines of up to 1,024 slots"). The routines accept
+/// (`docs/research/magazines.md`, "What magazine size buys"). The routines accept
 /// up to `2^MAG_LOG_MAX` slots.
 const MAX_LOG2: u8 = 10;
 const _: () = assert!(MAX_LOG2 as u32 <= crate::spec::MAG_LOG_MAX);

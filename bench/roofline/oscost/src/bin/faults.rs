@@ -1,6 +1,7 @@
 //! What it costs to make fresh anonymous memory resident, and what huge-page advice costs
 //! around a block: the measurements behind populate-ahead and huge pages for grown blocks
-//! (`docs/research/zen5-roofline.md`, section 7).
+//! (`docs/research/hardware.md`, "First touch of a 4 KiB page", "Huge pages are bound by
+//! zeroing, and by free 2 MiB blocks").
 //!
 //! ```text
 //! faults single  [MiB] [rounds]      demand faults, MADV_POPULATE_WRITE stretches, huge pages

@@ -5,9 +5,10 @@
 //! and then glibc's variable (the default form), or, on musl, the crate's own word. If any of
 //! those overlaps a hot word in the low 12 bits of its address, a call can wait for the previous
 //! call's store to that hot word, and a loop of them runs one at a time
-//! (`docs/research/zen5-roofline.md`, section 16). The layout keeps hot words at bytes 24 to 31
-//! of each 32-byte chunk, which clears any 16-aligned word; this test catches a link where that
-//! assumption failed. `scripts/rseq-offset-check` does the same for other binaries.
+//! (`docs/research/roofline.md`, "A load at the page offset of a store in flight can stall the
+//! whole loop"). The layout keeps hot words at bytes 24 to 31 of each 32-byte chunk, which
+//! clears any 16-aligned word; this test catches a link where that assumption failed.
+//! `scripts/rseq-offset-check` does the same for other binaries.
 
 use super::{SLAB_BYTES, clear_of_hot};
 use std::string::String;
@@ -85,7 +86,8 @@ fn the_rseq_offset_the_routines_load_is_off_every_hot_words_page_offset() {
             "{what} is at page offset {:#x}, which overlaps a slab hot word's page offset. Every \
              fast path loads it right after the previous call's store to a hot word, and can then \
              wait for that store: allocation loops of that class may run several times slower, \
-             depending on the predictor (docs/research/zen5-roofline.md, section 16). The layout \
+             depending on the predictor (docs/research/roofline.md, \"A load at the page offset \
+             of a store in flight can stall the whole loop\"). The layout \
              assumes the routines' words, the linker and the C library place it 16-aligned.",
             at % SLAB_BYTES
         );

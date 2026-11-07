@@ -1,5 +1,6 @@
 //! Where cralloc's resident memory is, sampled while a workload runs (feature
-//! `cralloc-memstat`; method and results in docs/research/memory.md).
+//! `cralloc-memstat`; method in docs/research/memory.md, "How memory is accounted", and results
+//! in "What resident memory is made of").
 //!
 //! With `CRALLOC_MEMSTAT=<file>` set, a thread started before `main` wakes every
 //! `CRALLOC_MEMSTAT_MS` milliseconds (default 10), walks the heap with `Cralloc::inspect`,

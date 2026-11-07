@@ -111,8 +111,9 @@ symbol's address and never faults, as `exec` says.
 The word is ours to place, which a GOT slot is not: a routine loads it on every call, right
 after the previous call's last store, to a slab's hot word at bytes 24 to 31 of a 32-byte chunk
 (`front`, in the crate). Zen 5 can hold a load whose bytes overlap a store in flight in the low
-12 bits of their addresses (docs/research/zen5-roofline.md, section 16), and a GOT slot is only
-8-aligned. A 16-aligned word never overlaps those bytes. The label `8` is local to these lines:
+12 bits of their addresses (docs/research/roofline.md, "A load at the page offset of a store in
+flight can stall the whole loop"), and a GOT slot is only 8-aligned. A 16-aligned word never
+overlaps those bytes. The label `8` is local to these lines:
 the load names the word defined just before it. -/
 def gotLines (d : Reg) (sym : Piece) : List Line :=
   [".pushsection .data.rel.ro.cralloc_got,\"aw\",@progbits", ".balign 16", "8:"].map .text ++
@@ -250,13 +251,15 @@ def printer : Printer isa where
     | .alu .cmp .. | .alu .test .. | .alu32 .cmp .. | .alu32 .test .. | .cmp8 .. => true
     | _ => false
   /- An out-of-line routine's hot path fits in what the processor delivers
-  during the four cycles a call and return take (docs/research/zen5-roofline.md,
-  section 6): 24 fused micro-ops. -/
+  during the four cycles a call and return take (docs/research/roofline.md,
+  "The front end sets a cliff by micro-op count and by lines, not by
+  alignment"): 24 fused micro-ops. -/
   uopLimit := some 24
   /- A branch to an external symbol is the 6-byte `jcc rel32`; to a stub
   after the return it is the 2-byte `jcc rel8`. The stubs keep the routines'
-  hot paths within the bytes section 13 of docs/research/zen5-roofline.md
-  allows, where the measured cost of the extra jump on a miss is nil. -/
+  hot paths within the bytes a routine may have (docs/research/roofline.md,
+  "The front end sets a cliff by micro-op count and by lines, not by
+  alignment"), where the measured cost of the extra jump on a miss is nil. -/
   stubExits := true
   unencodable i := match i with
     -- `lea` computes an offset, which a segment does not change (`State.offset`);

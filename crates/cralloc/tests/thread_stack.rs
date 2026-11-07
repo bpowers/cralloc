@@ -5,7 +5,8 @@
 //!
 //! The test runs the thread through its paths (a burst freed, a fragmented heap, growth over
 //! the cap, parking, a wake), in the process and again in a child forked from it, and
-//! measures three things (`docs/research/thread-stack.md` has the numbers):
+//! measures three things (`docs/research/portability.md`, "The background thread's stack", has
+//! the numbers):
 //!
 //! - how deep the thread's stack has been written: the stack is fresh memory, zero until
 //!   used, so the lowest non-zero byte below the top is the deepest the thread has gone;

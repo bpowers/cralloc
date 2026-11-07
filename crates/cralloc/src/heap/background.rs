@@ -36,7 +36,8 @@
 //! leaves out its own internal signals, so that a change of credentials still reaches it).
 //! It holds no lock and no allocator state between steps, so process exit and a fork find it
 //! in a state they already handle; a forked child has no thread and decides afresh. It has the
-//! C library's default stack, as the program's own threads do (`docs/research/thread-stack.md`).
+//! C library's default stack, as the program's own threads do (`docs/research/portability.md`,
+//! "The background thread's stack").
 //! The ledger is `docs/safety/cralloc/heap/background-safety.md`.
 
 use super::global::{Cralloc, process};
@@ -173,7 +174,8 @@ fn signals_quiet() -> bool {
 /// attributes, and detaches it; the caller's mask and `errno` are put back after, so that the
 /// allocation or free that started it leaves both as it found them. The default stack is the
 /// one the library gives the program's own threads, sized by the library against its own
-/// thread-local data (`docs/research/thread-stack.md`). The thread names itself (`run`).
+/// thread-local data (`docs/research/portability.md`, "The background thread's stack"). The
+/// thread names itself (`run`).
 ///
 /// # Safety
 ///

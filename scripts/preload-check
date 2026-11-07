@@ -83,8 +83,9 @@ if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "cralloc "* ]]; then
 fi
 echo "work directory: $work"
 
-# Where the library's routines load the rseq offset from: its GOT slot and the dynamic linker's
-# variable, neither of which the crate places (docs/research/zen5-roofline.md, section 16).
+# Where the library's routines load the rseq offset from: a 16-aligned word of their own and the
+# dynamic linker's variable, which the crate does not place (docs/research/roofline.md,
+# "A load at the page offset of a store in flight can stall the whole loop").
 if wanted rseq-offset; then
   if "$here/rseq-offset-check" "$lib"; then
     printf 'PASS  %-24s\n' rseq-offset

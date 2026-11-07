@@ -372,9 +372,9 @@ pub(super) const BEAT_SHIFT: u32 = 15;
 /// intervals instead of within 7. At 32 KiB most classes beat on each exchange, as before. Seven
 /// move less per exchange and beat on a share of them, the bytes they move over 32 KiB: the 8,
 /// 16, 24 and 32-byte classes (magazines of 1,022: one in four, one in two, three in four, and
-/// all but one in 200), whose swaps with spares are the commonest, and the 5,120, 12,288 and
+/// all but one in 512), whose swaps with spares are the commonest, and the 5,120, 12,288 and
 /// 14,336-byte classes (magazines of six and two: 94%, 75% and 88%). Measured in
-/// `docs/research/launder-and-fill.md`, "A lean slow path".
+/// `docs/research/magazines.md`, "What a slow path costs".
 pub const BEAT_BYTES: u64 = 1 << BEAT_SHIFT;
 
 /// Adds `bytes` moved by a slow path of `cpu` to its slab's activity counter and, if the

@@ -295,9 +295,9 @@ fn build_apps(f: &Flags, p: &Paths) {
 
 /// Runs `scripts/rseq-offset-check` on the cralloc builds just made (those of `files` that
 /// exist), and stops if one loads its rseq offset at a hot word's page offset
-/// (docs/research/zen5-roofline.md, section 16): every allocation of that class could wait on
-/// the previous one, so no session should run on it. `run` checks again and records the
-/// offsets in its session record.
+/// (docs/research/roofline.md, "A load at the page offset of a store in flight can stall the
+/// whole loop"): every allocation of that class could wait on the previous one, so no session
+/// should run on it. `run` checks again and records the offsets in its session record.
 fn check_rseq_offsets(p: &Paths, mut files: Vec<PathBuf>) {
     files.retain(|f| f.exists());
     if files.is_empty() {

@@ -5,8 +5,8 @@ restartable sequences, assembly fast paths generated from and proved in Lean, an
 slow paths in Rust.
 
 Read `docs/design.md` before changing anything. It says what we are building and why, and it
-is the source of truth when code and intent disagree. `docs/research/` holds the measurements
-and prior-art notes behind it.
+is the source of truth when code and intent disagree. `docs/research/README.md` says what we
+have learned about allocator performance and links the evidence behind it.
 
 ## Platform
 
@@ -61,8 +61,14 @@ process light.
 - `docs/design.md` changes when the design changes, and not otherwise. It has no plan or
   status section.
 - Keep facts that go stale out of this file, `README.md` and the design: no file lists, no
-  counts derived from the code, no benchmark numbers. Numbers belong in `docs/research/`
-  with the date and method.
+  counts derived from the code, no benchmark numbers. Numbers belong in `docs/research/`.
+- `docs/research/` records what we learned, not what we ran: what gates the fast path, what
+  the hardware charges, how the allocator changes the program's performance. A finding goes
+  into the note on its topic by rewriting the claim, with the answer first, then a statistic
+  with its spread, the commit and date, and the method in a line or two. That directory's
+  `README.md` has the rules.
+- Raw results stay out of git, in `bench/results/`: no CSVs, JSON lines, per-run tables or
+  session logs. They weigh down every clone for good and bury the answer.
 - Write plainly and briefly, for a reader who has none of your context. Lead with what
   matters most.
 - Comments say why, or something non-obvious. They do not restate the next line.
@@ -110,19 +116,20 @@ process light.
 ## Measuring
 
 Count cycles and instructions with hardware counters, pin to idle cores, and interleave the
-things being compared. `docs/research/zen5-roofline.md` describes the method. A difference of
+things being compared. `docs/research/measuring.md` describes the method. A difference of
 a cycle or two on a fast path is a finding to explain, not noise: the cause is usually
-instruction selection or layout, and we fix it by construction.
+instruction selection or layout, and we fix it by construction (`docs/research/roofline.md`).
 
 A server job can move by several percent with where the program's own code lands in the
 binary, which any change to the allocator's size shifts. Two builds of such a job are not
 compared by one number each: switch the behaviour at run time inside one binary, or compare
-means over a sweep of placements (`benchrun layout`). `docs/research/grpc-placement.md` says
-which jobs need this and why.
+means over a sweep of placements (`benchrun layout`). `docs/research/measuring.md`, "One number
+from each of two builds measures where the code landed", says which jobs need this and why.
 
 A server's tail latency at one fixed request rate can rank the CPU's idle states instead of
 the allocator: the faster server idles longer, its CPUs sleep deeper, and the wake-up lands
 in the tail. The runner records how often each server run's CPUs went into a deep idle
 state, and the reports flag a tail comparison that this confounds; a flagged difference is
 not the allocator's. `scripts/deep-idle` shows the setting and, with root, switches the
-deep states off. `docs/research/h2-tail.md` has the evidence.
+deep states off. `docs/research/measuring.md`, "A tail at one fixed rate can rank the CPU's
+idle states", has the evidence.

@@ -37,7 +37,8 @@ directory in the environment variable CHAIN_GEN (relative to the repository root
 prototypes of the generator's output are compared with the checked-in one. CHAIN_CLASS sets the
 word's position in the slab (`CLASS`). CHAIN_SPLIT=INSN
 inserts a taken `jmp` to the next instruction after the routine's first line equal to INSN
-(the split-run prototype in docs/research/zen5-roofline.md, section 15).
+(the split-run prototype in docs/research/roofline.md, "The front end sets a cliff by micro-op
+count and by lines, not by alignment").
 """
 import os
 import re

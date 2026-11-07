@@ -10,7 +10,7 @@ serve C's `malloc(size)`, `calloc(n, size)`, `free(ptr)` and `free_sized(ptr, si
 one restartable sequence that finds the
 class first and then pops or pushes as the routines of `Spec/Slab.lean` do,
 with the class's mask read from the table past the slabs. See docs/design.md, "Interfaces", and
-docs/research/zen5-roofline.md, section 14.
+docs/research/roofline.md, "The C entry points".
 
 ## What a routine reads to find the class
 

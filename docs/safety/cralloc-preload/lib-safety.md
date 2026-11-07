@@ -23,7 +23,7 @@ What the preload setting adds:
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
   interposable names. For a static musl program, where no export list applies, the evidence
-  is the experiments in `docs/research/musl-and-static.md`.
+  is the experiments in `docs/research/portability.md`, "Static linking".
 - **C++.** The library exports no C++ allocation operator (design: "Interfaces", C++), so
   every `operator new` and `delete` a program calls is its C++ runtime's or the program's own,
   and reaches the heap only through the C functions above: the runtime's `new` calls `malloc`
@@ -36,7 +36,7 @@ What the preload setting adds:
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the
   interposed `malloc`; glibc has registered rseq for the main thread before that
-  (`docs/research/linux-rseq-contract.md`, section 4). So the first call finds `__rseq_offset`,
+  (`docs/research/linux-rseq-contract.md`, "glibc"). So the first call finds `__rseq_offset`,
   the library's GOT and the routines' words holding the variable's address (`R_X86_64_64`
   relocations, applied in the same pass as the GOT's) relocated. The switch looks up `malloc`, `calloc`, `realloc` and `free`
   in the global scope (`elf/dl-minimal.c`, `__rtld_malloc_init_real`), where the preload

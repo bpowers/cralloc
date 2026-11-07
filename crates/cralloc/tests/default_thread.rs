@@ -10,7 +10,7 @@
 //! --all` runs them, in parallel. One case: `cargo test -p cralloc --test default_thread --
 //! --include-ignored worker`. A child alone: `CRALLOC_DEFAULT_THREAD_MODE=worker` and the
 //! test binary's path. The modes are the review's probe modes and the cases its findings
-//! named (`docs/research/default-thread.md`).
+//! named (`docs/research/servers.md`, "The background thread").
 
 use cralloc::Cralloc;
 use std::collections::BTreeMap;

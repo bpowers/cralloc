@@ -4,7 +4,8 @@
 //! siblings: instances of one type made in a loop. When different threads then write them,
 //! siblings that share a cache line take it from each other on every write. tokio allocates
 //! one 40-byte run-queue header per worker at start-up; packed side by side, they cost the
-//! spawn jobs 14% at four workers and 8% at eight (`docs/research/spawn-gap.md`).
+//! spawn jobs 14% at four workers and 8% at eight (`docs/research/program-effects.md`, "False
+//! sharing").
 //!
 //! So a magazine whose fill does not continue a run of fills of its class
 //! ([`Filled::opens_run`](super::Filled)), the class's first fill of an interval, hands its
@@ -22,8 +23,9 @@
 //! of its run is affected; strided on every fill, a tree's build and walk lost 47% and a JSON
 //! parse 6%. Servers whose small classes circulate keep a strided magazine's order in their
 //! working set; with one binary and the stride switched at run time, neither 64 strides nor
-//! whole magazines moved the RPC servers measured (`docs/research/spawn-gap.md`, "The rule,
-//! built"). The runtimes' sibling sets are small: tokio's headers need as many as its workers.
+//! whole magazines moved the RPC servers measured (`docs/research/program-effects.md`,
+//! "False sharing"). The runtimes' sibling sets are small: tokio's headers need as many as its
+//! workers.
 //!
 //! Only classes smaller than a line, where several objects share each line. Classes of one to
 //! two lines (80 to 112 bytes) put neighbours on a shared boundary line too, but no measured

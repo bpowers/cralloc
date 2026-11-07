@@ -6,11 +6,11 @@
 //! then boosts (5.56 to 5.71 GHz, by how many cores are busy). Any one busy core, in either
 //! L3, keeps the boost for all of them, and it survives up to 200 ms of idle. So a short job
 //! started after a pause runs its whole length at a clock 23% lower, taking 30% longer at
-//! the same cycles (docs/research/baselines.md, section 16). Before each run the runner
-//! therefore spins on the job's own CPUs, measuring each one's clock as cycles over wall
-//! time in short windows, until every one of them has held the warm clock for a few windows
-//! in a row, and then starts the job. The spin is the check: a run starts only once its CPUs were seen at
-//! the clock, not after a fixed time.
+//! the same cycles (docs/research/hardware.md, "The clock a run starts with belongs to the
+//! package"). Before each run the runner therefore spins on the job's own CPUs, measuring each
+//! one's clock as cycles over wall time in short windows, until every one of them has held the
+//! warm clock for a few windows in a row, and then starts the job. The spin is the check: a run
+//! starts only once its CPUs were seen at the clock, not after a fixed time.
 //!
 //! The warm clock differs with how many cores are busy and with what else runs on the
 //! machine, so it is learned rather than configured: the first warm-up of each CPU set spins

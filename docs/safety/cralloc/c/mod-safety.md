@@ -138,12 +138,12 @@ ledger). Replacing a subset would let glibc serve a block from its own heap that
 then asked to free, or the reverse. glibc supports replacing its allocator by interposition and
 calls `malloc` and the rest through the interposable symbols itself (glibc manual, "Replacing
 malloc"). For a static musl program, where no export list applies, the evidence that the whole
-family is replaced is the experiments in `docs/research/musl-and-static.md`. The macro also
-defines `cralloc_version`, a name no C library or other allocator defines; it returns a pointer
-to a static NUL-terminated string, valid for the life of the program. A program must invoke the
-macro at most once, or enable the `c-abi` feature and not invoke it, since two definitions of
-one symbol fail to link; and it must not also link another allocator that defines these names
-(the design's non-goal: one instance per process).
+family is replaced is the experiments in `docs/research/portability.md`, "Static linking". The
+macro also defines `cralloc_version`, a name no C library or other allocator defines; it returns
+a pointer to a static NUL-terminated string, valid for the life of the program. A program must
+invoke the macro at most once, or enable the `c-abi` feature and not invoke it, since two
+definitions of one symbol fail to link; and it must not also link another allocator that defines
+these names (the design's non-goal: one instance per process).
 
 ## C-EXPORT-02: the generated routines `export_c_abi!` defines
 

@@ -927,9 +927,10 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
 /// Many buffers growing at once leave a trail of the slots they outgrow no larger than the
 /// bound on kept outgrown slots, even where the moves land in slots the heap returned and
 /// reuses, which pays nothing toward the cap: the trail probe's hardest case
-/// (`docs/research/grown-slots.md`). Each round grows the buffers round-robin, three times at
-/// each step so that no growth is advised for huge pages (whose slots are never kept), frees
-/// them, and collects, so that the next round grows into returned slots.
+/// (`docs/research/large-blocks.md`, "What growth leaves behind"). Each round grows the buffers
+/// round-robin, three times at each step so that no growth is advised for huge pages (whose
+/// slots are never kept), frees them, and collects, so that the next round grows into returned
+/// slots.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn buffers_growing_into_reused_slots_leave_a_trail_within_the_bound() {

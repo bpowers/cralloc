@@ -21,4 +21,4 @@ jobs of the large-heap suite (`--suite servers-large`, `servers-thread`; run wit
   reads by id, one in five reads of 20 records of a country, one in ten reads by e-mail
   address, and one in five updates of a record (a new version in the store).
 
-`docs/research/servers-surrealdb.md` has the measurements.
+`docs/research/servers.md`, "What each program taught us", has the measurements.

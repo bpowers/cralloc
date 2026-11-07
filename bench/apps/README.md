@@ -14,7 +14,7 @@ four of the other:
 | Server | Request | Runtime | Shape |
 |---|---|---|---|
 | `connect log` | connect-rust's log-ingest service (`bench/rpc`): a 50-record protobuf batch per request, Connect protocol over HTTP/1.1 | tokio, workers pinned | decode and walk a batch: many small blocks freed on the thread that made them |
-| `orders axum` | the screening's order service (`orders/`): parse a JSON order, price it, keep the last 100k in a sharded map | axum on tokio, work stealing | a cache: blocks freed by whichever worker evicts them, often another |
+| `orders axum` | the order service (`orders/`): parse a JSON order, price it, keep the last 100k in a sharded map | axum on tokio, work stealing | a cache: blocks freed by whichever worker evicts them, often another |
 | `orders actix` | the same service on actix-web | one single-threaded runtime per worker | the same, with requests pinned to a worker |
 | `connect log grpc h2`, `connect log h2` | the log-ingest service over HTTP/2: gRPC (as connect-rust's own log_bench drives it) and the Connect protocol | tokio, a connection task between the socket and the handlers | frames, header blocks and bodies made by one task and freed by another |
 | `orders axum h2` | the axum order service over HTTP/2 | the same | the same |
@@ -33,8 +33,9 @@ Batch programs (`--suite apps`):
 | `datafusion` 55.2.0 | the 22 TPC-H queries at scale factor 3 on Parquet, as datafusion-cli runs them; 3.6 s, 1 GB | 4 (tokio) | analytics: large buffers, hash tables that grow, async tasks moving between workers | mimalloc |
 | `boa` 0.22.0 | the V8 benchmark suite (v7), each benchmark a fixed number of times; 8 s, 250 MB | 1 | an interpreter with a tracing GC: many small objects, one thread | jemalloc |
 
-(Times and peaks are rough, with glibc on the reference machine; `docs/research/apps.md` has
-measurements.) "Ships with" is the allocator the project's own release binary uses on Linux.
+(Times and peaks are rough, with glibc on the reference machine;
+`docs/research/workloads.md`, "Batch programs", has measurements.) "Ships with" is the
+allocator the project's own release binary uses on Linux.
 
 ## What belongs here
 
@@ -97,7 +98,7 @@ exactly (`--only "=connect log"` without the HTTP/2 jobs whose names contain it)
 ## Servers
 
 A server job starts the server on its CPUs, waits for it to print `BENCH_LISTEN addr`, then
-starts the load generator, `bench/probes/loadgen`, on the other L3 domain. The generator is
+starts the load generator, `bench/loadgen`, on the other L3 domain. The generator is
 open loop: requests come due on a fixed schedule whatever the server does, each connection
 carries one at a time, and latency runs from when a request was due to when its response
 arrived, so a stall shows as latency, and as requests that missed their slot, not as fewer
@@ -131,24 +132,26 @@ load, the curve, the cgroup peak and the THP counters. It ranks by cycles per re
 **Idle states.** Between requests a server's cores go idle, and the deepest state on the
 reference machine (C3) takes about 350 us to leave. A faster allocator leaves more idle time,
 hence more C3, and with the states left alone the 70% tail ranks the machine's idle states
-and the runtime's parking, not the allocator: p99.9 of 1 to 7 ms for every allocator, with
-the slowest allocator's often the best (`docs/research/server-latency.md`). So by default the
-runner holds the server's cores out of deep idle while the server runs, the same way for
-every allocator: a spinning thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it
-needs no root, which disabling the state would). p99.9 then falls to tens of microseconds.
-The spinner shares the core, so the server's cycles per request rise (by a third on the
-order service) and its saturated rate falls, alike for every allocator. Every run records
-which way it ran (`idle_states`); `--idle-states free` leaves the states alone, and its
-tails measure the machine as much as the allocator.
+and the runtime's parking, not the allocator: p99.9 of 2 to 4 ms for every allocator, with
+the slowest allocator's often the best (`docs/research/servers.md`, "At one fixed rate a
+tail can rank idle states, not allocators"). So by default the runner holds the server's
+cores out of deep idle while the server runs, the same way for every allocator: a spinning
+thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it needs no root, which disabling
+the state would). p99.9 then falls to tens of microseconds. The spinner shares the core, so
+the server's cycles per request rise (by 17% on the order service) and its saturated rate
+falls, alike for every allocator. Every run records which way it ran (`idle_states`);
+`--idle-states free` leaves the states alone, and its tails measure the machine as much as
+the allocator.
 
 With the spinners the server's CPUs still enter C2 (18 us to leave) and C3 as the kernel
 counts them, and those exits still set tails in the tens of microseconds: at one fixed rate
-the faster server idles longer and goes deep more often (`docs/research/h2-tail.md`). So the runner reads
-the server CPUs' idle-state counters (`/sys/devices/system/cpu/cpuN/cpuidle`, no root
-needed) at every mark, and each group of a server run records, per state, its entries,
-time, name, exit latency and the CPUs where it was disabled, and the deep entries (states
-whose exit latency is above `DEEP_LATENCY_US`, `runner/src/cpuidle.rs`) per thousand
-requests (`served.groups.<group>.idle`). Each run also records the setting it started under
+the faster server idles longer and goes deep more often (`docs/research/measuring.md`, "A
+tail at one fixed rate can rank the CPU's idle states"). So the runner reads the server
+CPUs' idle-state counters (`/sys/devices/system/cpu/cpuN/cpuidle`, no root needed) at every
+mark, and each group of a server run records, per state, its entries, time, name, exit
+latency and the CPUs where it was disabled, and the deep entries (states whose exit latency
+is above `DEEP_LATENCY_US`, `runner/src/cpuidle.rs`) per thousand requests
+(`served.groups.<group>.idle`). Each run also records the setting it started under
 (`cpuidle`). A window the counters cannot cover (none on the host, a CPU taken offline, a
 state switched during it) says why instead. A session of servers prints a warning when deep
 states are enabled on the servers' CPUs; `scripts/deep-idle status` shows them, and
@@ -172,7 +175,7 @@ it listens, then serves searches of one to three title words from 128 connection
 200th request is a batch of 50 updated items, which it indexes in the background. Its store is
 a memory-mapped LMDB file of about 3 GiB in a fresh directory under its inputs each run; its
 heap, about 1 GiB, is the allocator's part, which the runner's curve gives separately (the
-anonymous memory, from the rollups) and `largesum.py --heap` puts over live. The driver
+anonymous memory, from the rollups) and `bench/tools/largesum.py --heap` puts over live. The driver
 (`meilisearch/src/main.rs`) starts the server through Meilisearch's library as its `main` does.
 Meilisearch links jemalloc with its `malloc` override, which would take every C allocation
 whatever the global allocator, so `meilisearch/no-jemalloc` is an empty crate patched in its
@@ -200,7 +203,7 @@ of the generator's L3, as the upstream: a proxy job's upstream may be a workspac
 
 **A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
 generator's L3 domain (two of them already keep up): `upstream`, a binary of
-`bench/probes/loadgen` built with glibc, which answers every request with the same response.
+`bench/loadgen` built with glibc, which answers every request with the same response.
 The proxy's driver (`sozu/src/main.rs`) runs Sōzu's own main process, which forks a worker
 process a CPU, each re-running the driver's binary as Sōzu's worker (Sōzu's library keeps
 that entry private, so the driver carries a verbatim copy of the one function,
@@ -221,13 +224,13 @@ its own with `--mem-cap` sized to it (3, 7 and 12 GiB). The denominator is the p
 live bytes: build the servers with `bench-alloc`'s `live-bytes` feature (cralloc with a
 counter of requested bytes, never a build that is compared) and add it as an allocator entry
 with `build = "live-bytes"`; the runner reads its count at every mark (`marks_ms`), and
-`bench/probes/partial-load/largesum.py` puts each allocator's resident set over it. The
+`bench/tools/largesum.py` puts each allocator's resident set over it. The
 order service runs here with `presize=1`, its tables sized for twice `keep` from the start:
 otherwise each of its 64 shard tables doubles once under churn, long after the store is full,
 and that one event decides the 4 GiB tail. The doubling is a job of its own
 (`--suite servers-doubling`): tables not pre-sized, a fixed rate from the start so that the
 doublings fall inside the measured segment for every allocator, and the server's report of
-each doubling's time and page faults (`doublesum.py`).
+each doubling's time and page faults (`bench/tools/doublesum.py`).
 
 ## How a program is built
 
@@ -312,7 +315,7 @@ A program's driver is a binary named after the program:
 ## Moving it out
 
 The collection depends on `bench/alloc` (the allocator features), `bench/harness` (counters,
-the result line), `bench/probes/loadgen` (the load generator), `bench/runner` (`build-apps`,
+the result line), `bench/loadgen` (the load generator), `bench/runner` (`build-apps`,
 the suites, sessions and reports) and `bench/rpc` (connect-rust's server), and on
 `bench/baselines/build.sh` for the C allocators. Those, with `bench/apps`, are what a
 repository of its own would take.

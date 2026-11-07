@@ -9,11 +9,10 @@ cralloc is a memory allocator for multithreaded Rust programs on modern Linux. I
 - A free never touches the freed object or shared metadata, so freeing on another thread
   costs the same as freeing locally.
 
-The design is in [docs/design.md](docs/design.md), and the measurements behind it are in
-[docs/research/](docs/research/).
+The design is in [docs/design.md](docs/design.md), and what we have learned is in
+[docs/research/README.md](docs/research/README.md).
 
-cralloc was called asmalloc until November 2026. Dated records written before then, in
-`docs/research/` and `bench/probes/`, keep the old name.
+cralloc was called asmalloc until November 2026, and commits from before then use that name.
 
 ## Using it
 

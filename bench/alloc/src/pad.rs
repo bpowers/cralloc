@@ -1,7 +1,8 @@
 //! `benchrun layout`'s padN variants: N bytes of code that never runs, ahead of the allocator
 //! and the program in the linker's order, so that everything placed after it moves by exactly
-//! N bytes and nothing else changes (`docs/research/grpc-placement.md`). Built only when
-//! `BENCH_LAYOUT_PAD` is set at build time (`build.rs`).
+//! N bytes and nothing else changes (`docs/research/measuring.md`, "One number from each of two
+//! builds measures where the code landed"). Built only when `BENCH_LAYOUT_PAD` is set at build
+//! time (`build.rs`).
 
 const fn parse(s: &str) -> usize {
     let b = s.as_bytes();

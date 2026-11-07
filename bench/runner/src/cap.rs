@@ -23,8 +23,9 @@ use std::process::Command;
 /// No cap may exceed this, the session's included.
 pub const MAX: u64 = 16 << 30;
 /// Each measured process. The largest legitimate peak in the full suite is about 1.2 GiB
-/// (churn with 10M live objects; docs/research/baselines.md), so this leaves three times that
-/// for an allocator that is worse but working, and fails one that has run away.
+/// (churn with 10M live objects; docs/research/workloads.md, "The kernel suite"), so this
+/// leaves three times that for an allocator that is worse but working, and fails one that has
+/// run away.
 pub const DEFAULT_RUN: u64 = 4 << 30;
 /// The load generator, which always uses glibc. The open-loop generator keeps a record of
 /// every request (20 bytes each: a minute at 450k req/s is over 500 MiB) and its list of

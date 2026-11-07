@@ -142,7 +142,8 @@ pub struct State<O: Os> {
 /// on a line of its own, not one count. Frees and launders count in and claims and fills count
 /// out, so in a program that allocates on one thread and frees on another each thread writes
 /// a line the other only reads; with one count, every large allocation and free took the line
-/// from the other thread (`docs/research/memory.md`, "The cost of a large block, by cause").
+/// from the other thread (`docs/research/large-blocks.md`, "What one large allocation and free
+/// cost").
 struct Retained {
     added: Lined<Tally>,
     taken: Lined<Tally>,

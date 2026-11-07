@@ -108,7 +108,8 @@ def MARKER_SHIFT : Nat := MAG_LOG_MAX + 3
 entry of class `c` `MASK_DISP` bytes above the class's word in slab 0. The
 table lies past the last slab, 2048 bytes into a page, so that no entry
 shares a page offset with a slab word, whose stores a load at the same
-offset would wait for (docs/research/zen5-roofline.md, section 14). -/
+offset would wait for (docs/research/roofline.md, "A load at the page offset
+of a store in flight can stall the whole loop"). -/
 def MASK_COUNT : Nat := 256
 def MASK_DISP : Nat := 33556480
 

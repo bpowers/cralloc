@@ -8,11 +8,11 @@
 set -euo pipefail
 dest="$1"
 here=$(cd "$(dirname "$0")" && pwd)
-python3 -I "$here/../../probes/loadgen/connect_log_body.py" 50 > "$dest/log50.bin"
+python3 -I "$here/../../loadgen/connect_log_body.py" 50 > "$dest/log50.bin"
 echo "1155e384d3045bc3b872f197a58e406bb21579d61fbd827338cdf327adf58d4d  $dest/log50.bin" | sha256sum --check --quiet
 python3 -I -c 'import sys; m = open(sys.argv[1], "rb").read(); open(sys.argv[2], "wb").write(b"\0" + len(m).to_bytes(4, "big") + m)' \
   "$dest/log50.bin" "$dest/log50.grpc"
 # The log store's load (`rpc-server store`): 4,000 ingests of 50 new records, each followed by
-# a tail of the 100 most recent (probes/loadgen/connect_store_requests.py).
-python3 -I "$here/../../probes/loadgen/connect_store_requests.py" 4000 100 > "$dest/store.http"
+# a tail of the 100 most recent (loadgen/connect_store_requests.py).
+python3 -I "$here/../../loadgen/connect_store_requests.py" 4000 100 > "$dest/store.http"
 echo "68a8b3a62aef270127faff5dfc81c4bf9f7f8d1be4b3fb53e514d67617ec6e6e  $dest/store.http" | sha256sum --check --quiet

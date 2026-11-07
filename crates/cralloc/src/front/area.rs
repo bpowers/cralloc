@@ -78,8 +78,8 @@ pub(crate) const UNREGISTERED: u32 = spec::RSEQ_CPU_ID_UNREGISTERED;
 // the area's section, a page). It is 32-byte aligned, as every registered area is, so `cpu_id`
 // and `rseq_cs` are at bytes 4 to 15 of a 32-byte chunk, where no slab hot word is (`slab`): a
 // load of `cpu_id` at the page offset of a hot word stored just before would wait for that
-// store, two cycles a pair (docs/research/musl-and-static.md). It is also below the words the C
-// routines read at page offsets from 1024 up.
+// store, two cycles a pair (docs/research/portability.md, "The area's page offset"). It is also
+// below the words the C routines read at page offsets from 1024 up.
 const _: () = {
     let start = spec::RSEQ_AREA_PAGE_OFFSET;
     let end = start + spec::RSEQ_AREA_LEN;

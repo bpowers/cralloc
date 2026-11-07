@@ -1,7 +1,8 @@
-//! Memory shapes, for docs/research/memory.md: what an allocator keeps resident after a
-//! peak, in idle threads' caches, and behind sparsely touched large blocks. They are not
-//! ranked and print no `BENCH_RESULT`; each prints `MEM` lines with the process's anonymous
-//! resident memory, page-table memory and huge-page-backed memory, read from `/proc/self`.
+//! Memory shapes, for docs/research/memory.md, "How memory is accounted" and "After a peak, and
+//! in a silence": what an allocator keeps resident after a peak, in idle threads' caches, and
+//! behind sparsely touched large blocks. They are not ranked and print no `BENCH_RESULT`; each
+//! prints `MEM` lines with the process's anonymous resident memory, page-table memory and
+//! huge-page-backed memory, read from `/proc/self`.
 //!
 //! - `quiet`: allocate `live` objects (`sizes`), free all but `keep` percent in random order
 //!   (`order=fifo` for allocation order), then for `secs` seconds run light work and report

@@ -189,7 +189,8 @@ pub fn report(files: &[PathBuf], filter: Option<&str>, reference: &str) {
                     "\nconfounded by idle: the two allocators' deep-idle rates differ by a factor of {} or more (and by \
                      at least {} a thousand requests), so their p99.9 differ in how often the server's CPUs had to \
                      wake from deep idle, which follows the server's speed, not only the allocator \
-                     (docs/research/h2-tail.md). Compare these tails with deep idle off (scripts/deep-idle).",
+                     (docs/research/measuring.md, \"A tail at one fixed rate can rank the CPU's idle states\"). \
+                     Compare these tails with deep idle off (scripts/deep-idle).",
                     cpuidle::CONFOUND_RATIO,
                     cpuidle::CONFOUND_FLOOR
                 );
