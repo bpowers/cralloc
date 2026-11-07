@@ -2,10 +2,12 @@
 
 Small, dependency-free programs that measure what an allocator fast path can cost on the
 host, and what the kernel and the Rust toolchain add around it. The results and what they
-mean are written up in `docs/research/roofline.md`.
+mean are written up in `docs/research/roofline.md`, and for aarch64 in
+`docs/research/firestorm.md`.
 
-Each directory is a stand-alone cargo project (none belongs to a workspace). Everything is
-x86-64 Linux only and needs `perf_event_open` for user-space counters
+Each directory is a stand-alone cargo project (none belongs to a workspace). `aarch64/` and
+`machine/` are any aarch64 Linux, `oscost`'s `faults` runs on both, and everything else is x86-64
+Linux only. Everything needs `perf_event_open` for user-space counters
 (`/proc/sys/kernel/perf_event_paranoid` of 2 or lower).
 
 Run measurements on a quiet machine. Programs pin themselves; builds should be kept off the
@@ -19,9 +21,54 @@ L3; override with the environment variables below.
 | `rust-alloc/` | Allocation workloads through Rust's global allocator for glibc, mimalloc, jemalloc and two floor allocators, single-threaded and cross-thread. | `./run.sh [workload-prefix]` |
 | `fastpath/` | A check that fails if cralloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing; and (`faults`) demand faults against populate stretches and huge pages, one to four threads, huge-page advice around a slot, partial purges of huge pages, khugepaged on sparse memory. | `cargo run --release`, `target/release/faults single\|threads\|advice\|split\|khuge` |
+| `machine/` | What an aarch64 machine charges an allocator, on a kernel of any page size: the coherence unit, moving a line, caches' sets and ways, TLB reach and sets, prefetchers, stagger, class origins, the kernel's calls, huge pages' worth, the clock and idle. | `./run.sh OUT`; see below |
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `chain/` | The slab word's store-to-load chain against code placement: the generated inline free and allocation, the tree job's drop, and `c_free`/`c_malloc`, each placed at every offset in a 64-byte line and across 4 KiB, read from the generated files; and mimalloc's free and malloc moved the same way. | `cargo run --release -- FORMS [PLACES]`; see below |
 | `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
+| `aarch64/` | The same questions on any aarch64 Linux: widths, latencies, forwarding and renaming, atomics, the front end, page-offset holds, the floors, candidates for the routines and the C entry shapes. `reach/` builds a fast path every way a conditional branch or a relocation could fail; `stale/` measures how long a scratch register survives in real programs. | `./run.sh [pattern,...]`; see below |
+
+## aarch64
+
+Built for an Apple M1 Max under Asahi Linux, and portable: the same commands run on a Graviton or a
+Grace. The core's PMU is the one whose `cpus` file in `/sys/bus/event_source/devices` names the CPU
+(`apple_firestorm_pmu`, `armv8_pmuv3_0`), cycles and instructions come from its `events` directory,
+and raw events are per PMU and optional. Kernels use the base instruction set, with LSE and RCpc in
+the atomics family only.
+
+```
+cd aarch64
+../../../scripts/heavy cargo build --release
+./run.sh w_,l_,z_                   # widths, latencies, which pairs fuse
+./run.sh f_,r_,h_,rk_               # forwarding, renaming and its rules, hops that cannot rename
+./run.sh a_                         # atomics and barriers, alone and beside other work
+./run.sh fe_                        # front end: length, position, taken branches, calls
+./run.sh p_,c_,b_                   # the floors and candidates: pair, two calls, batch of 32
+./run.sh cl_,cm_,cs_,cc_,sl_        # C entry shapes and the slow path's routines
+./run.sh m_,mb_,pw_,pwn_,ps_,pc_    # mixed classes, a caller's work, placement sweeps
+./run.sh offsets                    # does a load wait on a store with its low address bits?
+./run.sh clock                      # is a cycle a fixed time, from cold and warm?
+./run.sh list f_                    # the kernels and what each runs
+```
+
+`run.sh` runs through `scripts/measure`. A pattern ending in `$` must match a whole name. The
+program pins itself: `RF_CPU` (by default the last CPU but one), `RF_ITERS` (4,000,000), `RF_REPS`
+(4, the first a warm-up), `RF_ROUNDS` (3, every kernel once a round, interleaved). A cell is the
+fastest repetition over all rounds, and `+x` how far the slowest round's fastest sits above it.
+
+`RF_EVENTS` names up to a few more counters: `name=0xCODE`, a name in the PMU's sysfs directory, or
+for Firestorm a name in the table in `src/main.rs` (`docs/research/firestorm.md` has the ones
+validated). Firestorm's events are tied to subsets of its counters, so more than two or three can
+multiplex even with counters free; a multiplexed repetition is dropped and the program says so.
+
+The kernels' sources are Python modules in `kernels/`, one per family, run at build time; each
+module's docstring names its options. The program links without PIE, since `adrp` to
+`__rseq_offset` needs a copy relocation that GNU ld refuses in a PIE (`reach/`).
+
+```
+cd aarch64/reach && ../../../../scripts/heavy ./check.sh      # about a minute
+cd aarch64/stale && cc -O2 -fPIC -shared -ffixed-x18 probe.c -o probe.so -ldl
+LD_PRELOAD=$PWD/probe.so PROGRAM ...                          # the summary goes to stderr
+```
 
 ## kernels
 
@@ -118,6 +165,37 @@ routines static glibc needs (`__multf3`, `__addtf3`, ...) from `libgcc.a`, which
 lld takes them from the first archive on the line that defines them, ours, and then needs the
 personality. `-Wl,--gc-sections` does not help. Dynamic links do not need those routines.
 
+## machine
+
+```
+cargo build --release --manifest-path bench/roofline/machine/Cargo.toml
+cargo build --release --manifest-path bench/roofline/oscost/Cargo.toml --bin faults
+bench/roofline/machine/run.sh OUT            # the whole bill; about ten minutes on a quiet machine
+bench/roofline/machine/run.sh OUT streams    # one group: lines moves hier streams kernel huge clock
+target/release/topo                          # which CPUs it would use, and why
+```
+
+Nothing names this machine. Page and huge-page sizes come from the kernel, the timer's rate from
+`cntfrq_el0`, the PMU from sysfs (a device with a `cpus` file and a cycle event), and CPU choices
+from `topo`: a CPU of the fastest kind, a neighbour in its last-level cache, one in another
+domain or else the farthest by number, and a CPU of the slowest kind if there are two kinds. Where
+a virtual machine gives no counters the probes read nanoseconds only, and `cycles` columns read 0.
+`RF_LINE` sets the spacing probes lay lines out at (default: sysfs, or 128), `RF_MAX_MIB` caps the
+sweeps for a small virtual machine, and each binary's header gives its commands.
+
+| Binary | Commands | Answers |
+|---|---|---|
+| `lines` | `regs`, `granule A B`, `neighbour CPU` | What the registers say, the real coherence unit between two CPUs, whether a neighbour comes with a miss |
+| `moves` | `pingpong`, `atomics`, `nextuser`, `nextread` `A B` | A line handed over, contended atomics, what the next user of an object pays, in a burst of stores and in a chase |
+| `hier` | `latency`, `tlb`, `tlbsets`, `sets`, `unit`, `prefetch`, `run`, `bandwidth` | Latency by working set, TLB reach and sets, caches' sets, ways and index unit, what the prefetchers follow, bandwidth |
+| `streams` | `stagger`, `rule`, `origin`, `sawtooth`, `pointers`, `magazine` | Blocks written in turn by stagger, the allocator's rule by class, class origins, magazine order, an array of pointers against offsets, and the same in pops of magazines |
+| `kcost` | `purge`, `calls`, `barrier` | `MADV_DONTNEED` by length, alone and beside other threads; the rest of the family; `membarrier` |
+| `worth` | `churn`, `build`, `cold`, `contig` | What a huge page is worth, what splitting one costs, whether the TLB uses the contiguous bit |
+| `clockidle` | `ramp`, `load`, `wake` | The clock after idle and under load, a wake-up by idle gap and the first work after it |
+| `topo` | | The CPU sets above, as shell variables and a table |
+
+Results are in `docs/research/machine-aarch64.md`.
+
 ## rust-alloc
 
 mimalloc is linked from a static library built from the local checkout (not committed):
@@ -171,4 +249,5 @@ machine: `RF_CPU2=10`.
 cd oscost && cargo run --release
 ```
 
-Wall-clock, single run. `oscost` maps and touches 512 MiB.
+Wall-clock, single run. `oscost` maps and touches 512 MiB. It assumes 4 KiB pages and x86-64.
+`faults` takes its sizes from the kernel and its counters from the pinned CPU's PMU.
