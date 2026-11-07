@@ -56,7 +56,7 @@ mkdir -p "$out/logs"
 
 list() {
   cargo +nightly miri test -q -p cralloc --lib -- --list --format terse "$@" |
-    sed -n 's/: test$//p' | sort
+    sed -n 's/: test$//p' | sort -u # Unique: `-Zmiri-many-seeds` lists them once a seed.
 }
 # Building happens here, once; the tests below only run.
 list > "$out/all.txt"

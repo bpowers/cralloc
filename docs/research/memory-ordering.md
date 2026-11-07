@@ -227,39 +227,75 @@ the kernel give.
 - **The explorers' atomics.** They all behave as `SeqCst` in one interleaving whatever they say, so
   an explorer cannot tell a right ordering from a wrong one.
 
+## What the orders cost
+
+On Firestorm the orderings have different prices, where on x86-64 they are one
+([firestorm.md](firestorm.md), "Atomics and barriers"), so a slow path asks for no more than its
+argument needs. The depot's stacks use `casa` to pop and `casl` to push, 26 cycles against 42, and a
+relaxed link and record, since a reload through `stlr` or `ldapr` of a word just stored is 19 cycles
+against 6. A push onto an empty stack keeps `casal`, for the hint. `Word` stays sequentially
+consistent everywhere: `ldsetal` costs what `ldsetl` does, `casal` a cycle more than the `casa` a
+claim would need, and `ldar` what `ldapr` does, and in return the models apply to those words as they
+stand. The acquire on a read of a slab word with no protection can pay the 19 cycles, once a slow
+path; a relaxed read, with a second look at the mark behind a fence before an abort, would be
+correct and would save it, and is not worth the code until a measurement says so.
+
 ## How it was tested
 
 **Tests on real threads** (`crate::stress`, and `ordering` in `depot`, `back::tests`, `heap::tests`)
-run the production code on threads pinned as far apart as the process may go. A ledger of two
-counters on lines apart in each block catches a new owner that missed part of its last owner's
-writes, and a count of all takes catches one that missed all of them. Rounds of a few instructions
-try each store-then-load pattern. They run a third of a second each in the gate, and twenty seconds
-with `--all`.
+run the production code on threads that go round the CPUs the process may use, on the twins and on
+the real routines and kernel. A ledger of two counters on lines apart in each block catches a new
+owner that missed part of its last owner's writes, and a count of all takes one that missed all of
+them. Rounds of a few instructions try each store-then-load pattern. The pipeline's only way from a
+consumer to a producer is the allocator. They run a third of a second each in the gate, and twenty
+seconds with `--all`: 34 passed in 62 s at `91c2e7e`, 2026-11-07, on an M1 Max.
 
-**They have teeth.** RESULTS
+**Weakened on purpose, in a throwaway copy, this CPU shows only part of it, and Miri the rest.** Each
+row is one mutation against the tests that should see it, release builds, 4 s a test; Miri on 8 seeds
+(`c72ea16` to `91c2e7e`, 2026-11-07).
+
+| Weakened | M1 Max | Miri |
+|---|---|---|
+| Summary words, hint or sleep to release writes and relaxed reads | caught, each | not run |
+| Every bitmap word relaxed | caught, by the summary test only | not run |
+| `LinuxOs::fence` does nothing | caught in 3 s, twice of twice (`a_drain_leaves_each_thread_its_own_blocks`, "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
+| A push's release, or a pop's acquire | not caught | caught |
+| A free's OR with no release, or a claim with no acquire | not caught | caught |
+| Summary words, hint or sleep to acquire and release | not caught | caught |
+| A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
+| Tags with no order | not caught | over its limit of 900 CPU seconds |
+| The simulator's barrier relaxed | not caught | caught, on 4 of 8 runs of 8 seeds |
+
+Why the hardware misses so much is under "What fooled us". On the unweakened code Miri passes every
+ordering test it can run, on one seed.
 
 **The kernel's fence**, on the real kernel with no allocator: with plain stores and loads on one side,
-store-then-load never failed, and a CPU's stores were never seen out of order after a fence.
-RESULTS
+store-then-load never failed, and a CPU's stores were never seen out of order after a fence. Left
+out, the same 5 s showed both loads missing in 22,865 rounds and a later store first in 384,403
+(`without_the_fence_the_hardware_shows_what_it_hides`, `91c2e7e`). `bench/probes/rseq_drain.rs` on
+this kernel, 20 s at `335f834`: 525,132 calls and no late commit, and 120,393 late commits with the
+call left out. Both are evidence for one kernel on one CPU. The argument is above.
 
-**Miri's weak memory emulation.** RESULTS
-
-**Arm's model, for the claims that rest on it.** herd7 could not be installed here, so a small
-enumerator transcribed from Arm's `aarch64hwreqs.cat` checked the litmus tests below, by listing every
-candidate execution. A transcription is not herd; the outcomes match what the rules say, and each
-"allowed" row shows the enumerator can see the outcome.
+**Arm's model, for the claims that rest on it**: `python3 tla/armcheck.py`, a small enumerator
+transcribed from Arm's `aarch64hwreqs.cat`, because herd7 could not be installed here. It lists every
+candidate execution. 14 published litmus tests get the catalogue's answers, which is the check on the
+transcription, and each "allowed" row shows it can see the outcome. A transcription is not herd.
 
 | Test | Bad outcome |
 |---|---|
 | `ldsetal; ldar` on both sides (the summary bits) | forbidden |
 | `ldsetl; ldapr` on both sides (`AcqRel` and `Acquire`) | allowed |
 | `stlr; ldapr` on both sides | allowed |
+| A plain store and `ldar` on both sides (a failed compare-and-swap writes nothing) | allowed |
+| The pass's start: `casl`, `stlr`, `ldar`, against `casal`, `ldar` | forbidden |
 | Parking: plain store, `ldar` with a `dmb` anywhere in them, against atomic, `dmb`, interrupt, `dmb`, wait, `dmb`, read | forbidden |
 | Slab word: `ldumaxal`, `ldapr` of the mark, `str` of the word, against `ldapr`, `ldapr` | forbidden |
 | The same with the mark from another thread | forbidden |
 | The same with a plain `ldr` of the word | allowed |
 | Drain: plain slot and commit, `dmb`, handshake, against `swpal`, wait, read | forbidden |
 | Drain with no barrier | allowed |
+| Fence with the thread gone: stores, `dmb`, store of `rq->curr`, against `swpal`, `dmb`, its read, `dmb`, read | forbidden |
+| Fence with the thread returning: store of `rq->curr`, `dmb`, read of the word, against `swpal`, `dmb`, its read | forbidden |
 | Shortcut: store, atomic decrement, against `ldr` of the count, read | allowed |
 | Shortcut with the acquire fence | forbidden |
 | Relaxed hand-off, tag read through the pointer | forbidden |
@@ -268,15 +304,17 @@ candidate execution. A transcription is not herd; the outcomes match what the ru
 ## What is still unproved
 
 - **No tool has explored the Rust under weak memory exhaustively.** GenMC "does not support re-using
-  freed memory", and Miri tries one interleaving a seed. The chains above are an argument on paper,
-  which a fresh reviewer has not yet attacked.
-- **The real routines under stress.** These tests exercise twins on the simulated heap until the
-  aarch64 routines land. `blocks_keep_their_last_owners_writes_on_the_real_routines` then runs them
-  with `collect`'s drains.
-- **The kernel's barriers are read, not proved.** A store-then-load litmus and a store-order litmus
-  pass on one kernel and one CPU. The no-interrupt paths have no test that isolates them.
+  freed memory", and Miri tries one interleaving a seed. The chains above are an argument on paper.
+- **Another core.** This M1 Max cannot show a missing release on an atomic or a missing acquire before
+  a dependent load. Those rest on Miri, which does not run the real routines, and on the argument.
+  `scripts/gate --all` has not been run on Neoverse V2, where atomics may behave differently.
+- **The routines and Miri.** Miri sees the twins, whose order is the simulator's. The real routines
+  have only the tests on real threads and the reading above, and those are provisional, by hand,
+  until Lean emits them.
+- **The kernel's barriers are read, not proved.** The no-interrupt paths have a litmus test in Arm's
+  model and no test on the kernel that isolates them.
 - **The fork's cut** rests on Arm's rule for `tlbi` and `dsb`, as we read it.
 - **Compiler mapping.** We trust that rustc and LLVM map Rust's orderings correctly, on LSE and on
   outlined atomics.
-- **The rule for a block passed with no order** rests on address dependencies surviving the compiler
-  in our own code between the load of the pointer and the loads through it, which nothing checks.
+- **A block passed with no order** rests on address dependencies surviving the compiler in our own
+  code between the load of the pointer and the loads through it, which nothing checks.

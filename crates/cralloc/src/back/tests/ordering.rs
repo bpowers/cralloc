@@ -242,7 +242,7 @@ fn racing_classes_keep_their_regions_apart_fully() {
 /// block passed with no order"). The heap itself is published first: that word has no such
 /// dependency.
 fn a_block_passed_with_no_order_can_be_freed(time: Duration) {
-    let rounds = Rounds::of(time, 3);
+    let rounds = Rounds::of(time, 1);
     let mut round = 0;
     while rounds.go_on(round) {
         round += 1;
