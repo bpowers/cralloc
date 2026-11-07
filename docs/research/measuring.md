@@ -54,8 +54,9 @@ answer over placements by 1.9 points (standard deviation), and at worst by 6.8. 
 1% of pairs where the gap is 1.5% or more, and in 29% where it is smaller. The Router is not
 sensitive (0.3 to 0.9%); JSON spreads 3.5 to 6.7% and the tree 3 to 9%
 ([program-effects.md](program-effects.md)). Two builds of `mpmc p4 c4` whose sources differed only
-in a doc comment ran 4.2 and 4.9 ns in every session. Tails do it too: two builds of Meilisearch
-read +2.0 ms at p99.9 where one binary with a switch reads 0.0.
+in a doc comment ran 4.2 and 4.9 ns in every session. Scratch builds that switched off rules a job
+barely reaches moved one Vec by up to 9% and rpc log by up to 4.7% (2026-10-18). Tails do it too:
+two builds of Meilisearch read +2.0 ms at p99.9 where one binary with a switch reads 0.0.
 
 **The rule.**
 
