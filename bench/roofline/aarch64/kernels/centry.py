@@ -211,6 +211,11 @@ def calloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp", tail="stor
 {p}_end:
 {rseq_section(None, "pop", p)}
   mov x0, x4
+  cmp x15, #8
+  b.hi {p}_wide
+  str xzr, [x0]
+  ret
+{p}_wide:
   stp xzr, xzr, [x0]
   cmp x15, #16
   b.ls {p}_done
@@ -436,15 +441,18 @@ def lean_free_sized(p):
   .subsection 0"""
 
 
-def lean_calloc(p):
-    """n in x0, size in x1, both left alone for the slow path and the zeroing tail."""
+def lean_calloc(p, overflow="orr"):
+    """n in x0, size in x1, both left alone for the slow path and the zeroing tail. `orr` turns away
+    anything with a large argument, `umulh` exactly the products that overflow."""
+    check = {
+        "orr": f"  orr x2, x0, x1\n  cmp x2, #16, lsl #12\n  b.hs {p}_slow",
+        "umulh": f"  umulh x2, x0, x1\n  cbnz x2, {p}_slow",
+    }[overflow]
     return f"""{lean_prologue(p)}
   ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs {p}_slow
-  orr x2, x0, x1
-  cmp x2, #16, lsl #12
-  b.hs {p}_slow
+{check}
   mul x9, x0, x1
   cmp x9, #1024
   b.hi {p}_slow
@@ -463,6 +471,11 @@ def lean_calloc(p):
 {p}_end:
 {lean_group(p)}
   mov x0, x4
+  cmp x9, #8
+  b.hi {p}_wide
+  str xzr, [x0]
+  ret
+{p}_wide:
   stp xzr, xzr, [x0]
   cmp x9, #16
   b.ls {p}_done
@@ -529,6 +542,11 @@ def build_lean(k):
   add x24, x24, #1
   cmp x24, #32
   b.ne 4b""", ops=32, kind="Slab", note="lean malloc, free, batch of 32 of 32 bytes")
+    exact = "rf_l_calloc_u"
+    fn(k, exact, lean_calloc(exact, "umulh"))
+    for n in (16, 32):
+        k.kernel(f"cl_calloc_u_{n}", f"  mov x0, #1\n  mov x1, #{n}\n  bl {exact}\n  bl {free}", kind="Slab",
+                 note=f"lean calloc(1, {n}), overflow by umulh, free")
     for n in (16, 32):
         k.kernel(f"cl_calloc_{n}", f"  mov x0, #1\n  mov x1, #{n}\n  bl {calloc}\n  bl {free}", kind="Slab", note=f"lean calloc(1, {n}) and free")
     # The sized comparison for the plainer routines, in the mixed loop.
