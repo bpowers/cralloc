@@ -693,6 +693,6 @@ server's figures at exit are after the others gave memory back, so compare its p
 - **The threshold at 4 MiB** was refused to stay under jemalloc by a few MiB, before the goal said
   fixed MiB are spent freely. Worth measuring again.
 - **Meilisearch while indexing.** Before any load it peaks at 1,388 to 1,433 MiB against jemalloc's
-  1,230 to 1,251. The heap is already falling when load starts, and through 70% load it reaches at
-  most 710 to 739 against 778 to 790 ([standings.md](standings.md)). The indexing excess is not
-  attributed.
+  1,230 to 1,251. Its heap is still falling when load starts, where jemalloc's has already fallen and
+  rises under load. Through 70% load it reaches at most 710 to 739 against 778 to 790
+  ([standings.md](standings.md)). The indexing excess is not attributed.

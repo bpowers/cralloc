@@ -126,19 +126,21 @@ as much as most differences between good allocators, and the allocator's own siz
 On servers cralloc does the least work: ahead or level on every job, behind on none. Over ten jobs the others'
 cycles a request against cralloc's, geometric mean (geometric standard deviation): tcmalloc 1.045 (x1.04), jemalloc
 1.046 (x1.03), mimalloc 1.065 (x1.05), glibc 1.197 (x1.13). On batch programs we are level, losing in the kernel to
-page faults what we win in user cycles. On large heaps under load we hold the least. We are behind in troughs, on small
-heaps at rest by a few MiB, and in the first requests after a long silence. [standings.md](standings.md)
+page faults what we win in user cycles. On the three large-heap servers under load we hold the least. We are behind in
+troughs, on small heaps at rest by 2 to 11 MiB, in Qdrant's peak, and in the first requests after a long silence.
+[standings.md](standings.md)
 
 ## Measuring without fooling ourselves
 
-Each of these produced a wrong conclusion that we wrote down before we found it:
+Each of these misled us, and most reached a note as a wrong conclusion:
 
 - **Two builds compared by one number each.** A difference blamed on tokio's headers (3.6%) was mostly code placement.
   Switch behaviour at run time in one binary, or compare means over a placement sweep.
 - **Tails at one fixed rate.** These can rank idle states. Check deep-idle entries first.
 - **Short jobs after idle.** The first 250 ms run at 4.38 GHz, and runs of the same cycles spread by 30% in time. Warm
   the clock first.
-- **glibc's "wins".** A spawn job ran 192 to 227 ns a task depending on the length of the binary's path.
+- **glibc's spawn result.** Hard links to one binary ran a spawn job at 192 to 227 ns a task, by the length of the path.
+  The gap behind it was real, and the sibling stride closed it.
 - **Single runs on a shared machine.** Memory-bound jobs drifted by up to three times. Interleave, pin to idle cores, and
   do not multiplex counters.
 
