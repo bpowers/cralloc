@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 /// for every allocator (docs/research/servers.md, "At one fixed rate a tail can rank idle
 /// states, not allocators"). Disabling the state itself needs root; a busy sibling holds its
 /// core in C0 the same way for every allocator. The spinner shares the core, which raises
-/// medians by a few microseconds; every run's record says which way it ran (`idle_states`).
+/// medians by a few microseconds; every run's record says which way it ran (`idle_states`). A
+/// machine without SMT has no sibling to spin on, so nothing holds its cores, and its deep idle
+/// states stay in the tails unless root turns them off (`scripts/deep-idle`).
 pub struct Spinners {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     threads: Vec<std::thread::JoinHandle<()>>,
