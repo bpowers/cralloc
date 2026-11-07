@@ -95,7 +95,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
 /// # Safety
 ///
 /// As the x86-64 routine of this name, whose contract is `VG.Spec.Slab.cpuContract`.
-#[cfg(not(any(feature = "executable", target_env = "musl")))]
+#[cfg(not(any(cralloc_a64_direct, target_env = "musl")))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;
@@ -122,12 +122,12 @@ pub(crate) unsafe fn current_cpu() -> u32 {
     ret
 }
 
-/// [`current_cpu`] in an executable, which has its own copy of glibc's `__rseq_offset`.
+/// [`current_cpu`] reading `__rseq_offset` directly (`text.rs`, `a64_arm_direct`).
 ///
 /// # Safety
 ///
 /// As above.
-#[cfg(all(feature = "executable", not(target_env = "musl")))]
+#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;

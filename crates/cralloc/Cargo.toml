@@ -22,7 +22,8 @@ sim = ["internals"]
 internals = []
 # Read glibc's `__rseq_offset` with one load instead of two on the fast path. This links only
 # into an executable (the linker gives it its own copy of the variable); a shared library that
-# enables it fails to link. A musl build reads its own area's offset this way without it.
+# enables it fails to link. A musl build reads its own area's offset this way without it. On
+# aarch64 it changes nothing, since GNU ld makes no such copy for a position-independent executable.
 executable = []
 # Export the C interface (`malloc`, `free` and the rest of `cralloc::c`) under its C names
 # from this crate, so that a program linking it gets cralloc as its C allocator too. The

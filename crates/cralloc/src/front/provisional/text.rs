@@ -109,9 +109,11 @@ macro_rules! cralloc_a64_end_bare {
     };
 }
 
-/// [`cralloc_a64_arm`] for the routines that read `__rseq_offset` directly where they can: an
-/// executable, which has its own copy of glibc's.
-#[cfg(all(feature = "executable", not(target_env = "musl")))]
+/// [`cralloc_a64_arm`] with `__rseq_offset` read directly, under the configuration
+/// `cralloc_a64_direct`, for comparing it on real jobs with the form that stays. A direct `adrp` to
+/// glibc's variable needs a copy of it in the executable, which GNU ld refuses to make in a PIE and
+/// `rust-lld` makes, so the `executable` feature cannot mean this here.
+#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
 macro_rules! a64_arm_direct {
     () => {
         concat!(
@@ -128,21 +130,21 @@ macro_rules! a64_arm_direct {
     };
 }
 
-#[cfg(all(feature = "executable", not(target_env = "musl")))]
+#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
 macro_rules! a64_end_direct {
     () => {
         $crate::cralloc_a64_end_bare!()
     };
 }
 
-#[cfg(any(not(feature = "executable"), target_env = "musl"))]
+#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
 macro_rules! a64_arm_direct {
     () => {
         $crate::cralloc_a64_arm!()
     };
 }
 
-#[cfg(any(not(feature = "executable"), target_env = "musl"))]
+#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
 macro_rules! a64_end_direct {
     () => {
         $crate::cralloc_a64_end!()
