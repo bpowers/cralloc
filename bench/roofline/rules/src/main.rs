@@ -12,6 +12,9 @@
 //! rules fault CPU [n]      the first touch of `n` huge pages under advice, with the kernel's own
 //!                          count of what it did: what a huge-page rule charges a request when
 //!                          free blocks of that size are short or plentiful
+//! rules request CPU [MiB]  each allocation and first write of 1 KiB blocks, carved past the class's
+//!                          huge-page threshold: how long the worst requests take, as the program
+//!                          sees it
 //! ```
 //!
 //! For `split`, run under `strace -f -e trace=madvise,write` to see which thread calls
@@ -348,6 +351,43 @@ fn fault(cpu: usize, count: usize) {
     println!("# free blocks by order after: {}", free_blocks());
 }
 
+/// Allocates and writes `total` bytes of 1 KiB blocks one at a time, timing each. The huge pages
+/// past the threshold fault on whichever request first writes them.
+fn request(cpu: usize, total: usize) {
+    pin(cpu);
+    println!("# request: {} MiB of 1 KiB blocks on CPU {cpu}", total / MIB);
+    println!("# free blocks by order: {}", free_blocks());
+    let before = vmstat();
+    let count = total / KIB;
+    let mut live = Vec::with_capacity(count);
+    let mut slow = Vec::new();
+    let mut spent = 0u64;
+    for i in 0..count {
+        let start = Instant::now();
+        let mut block = Vec::<u8>::with_capacity(KIB);
+        // SAFETY: inside the block's capacity.
+        unsafe { block.as_mut_ptr().write_volatile(1) };
+        let ns = start.elapsed().as_nanos() as u64;
+        spent += ns;
+        if ns >= 20_000 {
+            slow.push((i * KIB / MIB, ns));
+        }
+        live.push(block);
+    }
+    let after = vmstat();
+    println!("# {} ns a request over all", spent / count as u64);
+    println!("# requests over 20 us: {} ; carved_MiB us", slow.len());
+    for (at, ns) in &slow {
+        println!("{at:6} {:9.0}", *ns as f64 / 1e3);
+    }
+    println!("# anon huge {:.1} MiB", mib(anon_huge()));
+    for ((name, a), (_, b)) in before.iter().zip(&after) {
+        println!("# {name}: +{}", b - a);
+    }
+    println!("# free blocks by order after: {}", free_blocks());
+    std::hint::black_box(&live);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).map(String::as_str);
@@ -364,9 +404,13 @@ fn main() {
             arg(2).map_or(8, |c| c.parse().unwrap()),
             arg(3).map_or(64, |c| c.parse().unwrap()),
         ),
+        Some("request") => request(
+            arg(2).map_or(8, |c| c.parse().unwrap()),
+            arg(3).map_or(768, |c| c.parse().unwrap()) * MIB,
+        ),
         _ => {
             eprintln!(
-                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n]"
+                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n] | request CPU [MiB]"
             );
             std::process::exit(2);
         }

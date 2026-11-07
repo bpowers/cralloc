@@ -282,10 +282,20 @@ kernel's `compact_stall`, `compact_fail` and `thp_fault_fallback`.* This is the 
 use: 62 GiB, 47 of it page cache and 5 free, and no free block that large until the first run's
 `munmap` left 64. At 4.3 ms for 32 MiB the fault costs 131 ns a KiB, against 39 on small pages, so a
 shortage turns the saving of 3.3 times below into a loss of about as much, and a stall lands on one
-request. Where the heap can meet it: the first write to each huge page of a class past 256 MiB, the
+request.
+
+**Compaction does not always stall: it can also give up at once, and then the rule is simply off.**
+Through the allocator, each allocation and first write of 1 KiB blocks, carved to 768 MiB. With 21 and
+22 free blocks, 17 huge pages fault on requests of 383 to 454 us, 137 to 144 ns a request over all.
+With none, in one run, 18 of 18 fell back to small pages after 5 failed compactions, and the slowest
+request took 438 us, since the kernel defers compaction after a failure (`rules request`, the same
+date). So a request meets one of three prices, and which depends on the machine: under 0.5 ms, about
+4 ms with tens of ms in the tail, or no huge pages at all.
+
+Where the heap can meet the stall: the first write to each huge page of a class past 256 MiB, the
 copy into a grown block under advice, and the copy back in `unspill`, each on a request's path. The
-same is possible at 2 MiB, where it takes far more fragmentation to run out and has not been seen.
-A background thread that faulted the next huge page ahead of the watermark would move the stall off
+same is possible at 2 MiB, where it takes far more fragmentation to run out and has not been seen. A
+background thread that faulted the next huge page ahead of the watermark would move the stall off
 requests; that is not built.
 
 **What 32 MiB is worth against 16 KiB.** Objects of 64 bytes, median of three rounds:
