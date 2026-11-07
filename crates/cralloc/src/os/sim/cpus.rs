@@ -239,6 +239,18 @@ impl<const N: usize> Cpus<N> {
             .count()
     }
 
+    /// What a fence of every CPU does: as [`Cpus::fence`] for each. Each thread's state gets a
+    /// read-modify-write, the barrier the kernel's interrupt is: what the thread stored before its
+    /// last step the caller sees, and what the caller stored before the call the thread's next
+    /// step sees. A thread's accesses between two steps, which have no barrier of their own, are
+    /// ordered by neither, where the interrupt would order them, so the simulator gives less order
+    /// than the kernel and a protocol that passes here needs no more than the kernel gives.
+    pub(super) fn fence_all(&self) {
+        for thread in &self.threads {
+            thread.barrier(Target::Any);
+        }
+    }
+
     /// Every thread but `survivor` vanishes, as in the child of a fork; the survivor's sequence,
     /// if any, is aborted, as a fork's return to user space would.
     pub(super) fn fork(&self, survivor: usize) {
