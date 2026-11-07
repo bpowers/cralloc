@@ -790,11 +790,11 @@ fn held_hints_stay_set_under_every_schedule(bounds: Bounds) {
 }
 
 impl World {
-    /// A heap whose every CPU is a cache domain of its own, so that CPU 0 and CPU 1 use
-    /// different stacks and each is "another domain" to the other, with `classes`.
+    /// A heap whose even and odd CPUs are two cache domains, so that CPU 0 and CPU 1 use different
+    /// stacks and each is "another domain" to the other, with `classes`.
     fn in_two_domains(classes: &[SmallClass]) -> World {
         let os = SimOs::new();
-        os.set_topology(SimTopology::Blocks(1));
+        os.set_topology(SimTopology::Stripes(2));
         let world = World {
             rig: Rig::with_os(os, classes, 6, TIGHT),
             migrations: AtomicUsize::new(0),
