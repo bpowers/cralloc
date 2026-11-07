@@ -6,7 +6,10 @@
 mod common;
 
 use common::{balanced, ops, ops_for, profiles, with_drains};
-use cralloc::SimCralloc;
+use cralloc::classes::MagazineSize;
+use cralloc::os::sim::{Shape, SimOs};
+use cralloc::space::Geometry;
+use cralloc::{SimCralloc, SimHeap};
 use cralloc_testkit::subject::ViaGlobalAlloc;
 use cralloc_testkit::{Config, Handoff, Profile, check};
 
@@ -64,11 +67,18 @@ fn the_simulated_heap_frees_on_other_threads_with_miri_sizes_fully() {
 }
 
 /// A fresh simulated heap, by reference.
-#[derive(Clone, Copy)]
-struct Fresh(&'static cralloc::SimHeap);
+struct Fresh<S: Shape = cralloc::os::sim::Standard>(&'static SimHeap<S>);
+
+impl<S: Shape> Clone for Fresh<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: Shape> Copy for Fresh<S> {}
 
 // SAFETY: forwards to the heap's own implementation.
-unsafe impl core::alloc::GlobalAlloc for Fresh {
+unsafe impl<S: Shape> core::alloc::GlobalAlloc for Fresh<S> {
     unsafe fn alloc(&self, l: core::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's contract, passed on.
         unsafe { self.0.alloc(l) }
@@ -87,9 +97,61 @@ unsafe impl core::alloc::GlobalAlloc for Fresh {
     }
 }
 
+/// Pages of 16 KiB, huge pages of 1 MiB, regions of 4 MiB down to 512 KiB.
+enum HugePageOver16 {}
+
+impl Shape for HugePageOver16 {
+    const GEOMETRY: Geometry = Geometry::new(14, 20, 22, 19, 256, 16, MagazineSize::MAX);
+}
+
+/// Pages of 64 KiB, huge pages of 4 MiB, regions of 8 MiB down to 2 MiB.
+enum HugePageOver64 {}
+
+impl Shape for HugePageOver64 {
+    const GEOMETRY: Geometry = Geometry::new(16, 22, 23, 21, 256, 16, MagazineSize::MAX);
+}
+
+/// The model on a heap that got only its smallest regions, which are smaller than a huge page, as
+/// a limit on address space leaves one on a kernel with large pages. The heap asks for no huge page
+/// at any step, and serves every profile and hand-off all the same.
+fn a_heap_of_regions_below_a_huge_page_serves_the_model<S: Shape>(seeds: u64, each: &[Profile]) {
+    let smallest = S::GEOMETRY.smallest_plan();
+    assert!(smallest.region_size() < S::GEOMETRY.huge_page_size());
+    assert!(!smallest.geometry().huge_pages_usable());
+    let largest = S::GEOMETRY.largest_plan().region_size();
+    let room = smallest.size().next_multiple_of(largest);
+    for seed in 1..=seeds {
+        let os = SimOs::<S>::with_capacity(room);
+        let heap = Fresh::<S>(Box::leak(Box::new(SimHeap::with_os(os))));
+        let s = ViaGlobalAlloc(heap);
+        for &p in each {
+            let p = fit(p);
+            balanced(&check(&s, &Config::single(p, seed, 4000)), p.name);
+        }
+        let threads = Config::threads(fit(Profile::MIXED), 4, Handoff::AllToAll, seed, 2000);
+        balanced(&check(&s, &threads), "threads");
+        heap.0.collect();
+        assert_eq!(heap.0.os().advised_bytes(), 0);
+    }
+}
+
+#[test]
+fn a_heap_of_regions_below_a_huge_page_serves_the_model_quickly() {
+    a_heap_of_regions_below_a_huge_page_serves_the_model::<HugePageOver16>(1, &[Profile::MIXED]);
+    a_heap_of_regions_below_a_huge_page_serves_the_model::<HugePageOver64>(1, &[Profile::MIXED]);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_heap_of_regions_below_a_huge_page_serves_the_model_fully() {
+    let all: Vec<Profile> = profiles().into_iter().collect();
+    a_heap_of_regions_below_a_huge_page_serves_the_model::<HugePageOver16>(4, &all);
+    a_heap_of_regions_below_a_huge_page_serves_the_model::<HugePageOver64>(4, &all);
+}
+
 fn fresh_simulated_heaps_serve_threads_that_hand_blocks_over(seeds: u64) {
     for seed in 0..seeds {
-        let heap = Fresh(Box::leak(Box::new(cralloc::SimHeap::new())));
+        let heap = Fresh(Box::leak(Box::new(SimHeap::new())));
         let s = ViaGlobalAlloc(heap);
         let cfg = Config::threads(
             fit(Profile::MIXED.with_migrate(5)),

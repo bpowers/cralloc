@@ -18,7 +18,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     // SAFETY: PROVISIONAL-01; the caller's promise.
     unsafe {
         core::arch::asm!(
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             "b.hs 20f",
             "add x10, {word}, x10, lsl #12",
             "ldr x11, [x10]",
@@ -57,7 +57,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     // SAFETY: PROVISIONAL-01; the caller's promise.
     unsafe {
         core::arch::asm!(
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             "b.hs {miss}",
             "add x10, {word}, x10, lsl #12",
             "ldr x11, [x10]",
@@ -87,7 +87,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
 /// # Safety
 ///
 /// As the x86-64 routine of this name, whose contract is `VG.Spec.Slab.cpuContract`.
-#[cfg(not(any(feature = "executable", target_env = "musl")))]
+#[cfg(not(target_env = "musl"))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;
@@ -102,32 +102,6 @@ pub(crate) unsafe fn current_cpu() -> u32 {
             "adrp {area}, 8b",
             "ldr {area}, [{area}, :lo12:8b]",
             "ldr {area}, [{area}]",
-            "mrs {tp}, tpidr_el0",
-            "add {area}, {area}, {tp}",
-            "ldr {ret:w}, [{area}, #4]",
-            area = out(reg) _,
-            tp = out(reg) _,
-            ret = out(reg) ret,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// [`current_cpu`] in an executable, which has its own copy of glibc's `__rseq_offset`.
-///
-/// # Safety
-///
-/// As above.
-#[cfg(all(feature = "executable", not(target_env = "musl")))]
-#[inline(always)]
-pub(crate) unsafe fn current_cpu() -> u32 {
-    let ret: u32;
-    // SAFETY: PROVISIONAL-01; the caller's promise.
-    unsafe {
-        core::arch::asm!(
-            "adrp {area}, __rseq_offset",
-            "ldr {area}, [{area}, :lo12:__rseq_offset]",
             "mrs {tp}, tpidr_el0",
             "add {area}, {area}, {tp}",
             "ldr {ret:w}, [{area}, #4]",
