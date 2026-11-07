@@ -80,7 +80,7 @@ pub struct Driver {
     pub cpus: Vec<usize>,
 }
 
-/// A server job's load: the suite's open-loop generator (bench/probes/loadgen, built with
+/// A server job's load: the suite's open-loop generator (bench/loadgen, built with
 /// glibc by `build-apps`) on CPUs of its own, sending one request on a plan of segments. The
 /// runner snapshots the server's counters at every segment the generator marks, samples its
 /// memory throughout, and stops it when the generator is done.
@@ -136,7 +136,7 @@ pub struct Upstream {
     pub bin: &'static str,
     pub args: Vec<&'static str>,
     pub cpus: Vec<usize>,
-    /// The cargo workspace under bench/ the binary is built from: bench/probes/loadgen's, with
+    /// The cargo workspace under bench/ the binary is built from: bench/loadgen's, with
     /// the generator, when `None`; else one of its own, which `build-apps` builds with glibc
     /// into `target/upstream/<bin>` (`crate::apps::upstream_bin`).
     pub workspace: Option<&'static str>,
@@ -666,7 +666,7 @@ fn served() -> Vec<Served> {
             rates: (120_000, 280_000),
         },
         // Sōzu, the reverse proxy, forwarding the order service's POST to an upstream on
-        // loopback (bench/probes/loadgen's `upstream`, 4 KiB answers) on three CPUs of the
+        // loopback (bench/loadgen's `upstream`, 4 KiB answers) on three CPUs of the
         // generator's L3, which two of them already keep up with. One worker process a CPU.
         Served {
             id: "sozu proxy",

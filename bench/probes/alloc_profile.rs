@@ -14,8 +14,7 @@
 //! Use:   ALLOC_PROFILE_OUT=DIR/prof LD_PRELOAD=DIR/liballoc_profile.so program args...
 //!        Each process writes DIR/prof.<pid>.json when it exits; a child started with the
 //!        same environment writes its own. With ALLOC_PROFILE_SIGTERM=1 a SIGTERM also writes
-//!        the report and exits, for servers that are stopped that way. `rust-screen/profile.py`
-//!        summarises the files.
+//!        the report and exits, for servers that are stopped that way.
 //!
 //! What it does not see: memory a program maps itself, and allocators linked into the
 //! program (a Rust `#[global_allocator]` other than `System`). Live bytes are summed per

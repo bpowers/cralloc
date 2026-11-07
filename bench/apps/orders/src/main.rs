@@ -9,7 +9,7 @@
 //! their number, median and largest time, and median page faults; and how many rehashed in
 //! place. On stderr, a `REHASH` line for every rehash (its start on the monotonic clock and
 //! the cycle counter, its thread, wall and CPU time, faults and context switches), for
-//! lining doublings up with traces (bench/probes/doubling-tail).
+//! lining doublings up with traces.
 //!
 //! axum runs on hyper and a multi-threaded tokio runtime with work stealing; actix-web runs one
 //! single-threaded runtime per worker thread, so blocks cross threads only through the shared

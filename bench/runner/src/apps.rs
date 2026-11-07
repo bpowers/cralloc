@@ -126,7 +126,7 @@ pub fn loadgen_bin(bench: &Path) -> std::path::PathBuf {
 }
 
 pub fn build_loadgen(p: &Paths, cpus: &str) -> Result<(), String> {
-    build_glibc(&p.bench.join("probes/loadgen"), &p.bench.join("target/loadgen"), cpus)
+    build_glibc(&p.bench.join("loadgen"), &p.bench.join("target/loadgen"), cpus)
         .map_err(|e| format!("the load generator's build failed: {e}"))
 }
 
