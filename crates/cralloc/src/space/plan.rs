@@ -172,7 +172,7 @@ impl Plan {
     /// every region's base, the first pages of all the classes in use share their low virtual
     /// page numbers, which index the sets of the second-level data TLB: a small heap spread
     /// over many classes walked the page tables up to every few operations while using a few
-    /// hundred kilobytes (`docs/research/program-effects.md`, "Spreading objects over lines and
+    /// hundred kilobytes (`docs/research/program-effects.md`, "Order, and lines and
     /// pages"). The origin spreads the classes over [`ORIGIN_SPAN_PAGES`] pages: class `i` at
     /// `i * ORIGIN_STEP` modulo the span, a golden-ratio step, so that classes of neighbouring
     /// sizes, which programs tend to use together, lie far apart, and no two small classes

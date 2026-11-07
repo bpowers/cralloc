@@ -152,7 +152,7 @@
 //! heartbeat, so that what the thread's lag can add to retained memory is bounded whatever the
 //! scheduler does. A grower's step alone would not do: it pays half a megabyte while a carve
 //! may owe tens, and the thread can wait for a CPU behind the threads that carve, 87 ms a run
-//! on DataFusion, though no measured run has needed this limit (`docs/research/memory.md`,
+//! on DataFusion, though no run there has needed this limit (`docs/research/memory.md`,
 //! "Returning memory off request paths"). Past the limit they pay whether a pass is under way
 //! or not, and a pass still under way an interval after it began, which the thread has not
 //! stepped, is the heartbeats' again. The thread's own steps (`StepSize::THREAD`) are a

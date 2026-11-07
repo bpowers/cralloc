@@ -137,7 +137,7 @@ pub const PURGE_CAP_WORDS: usize = 1 << 14;
 /// them: 8, or 16 MiB. The first touch of a huge page makes all of it resident, so the page at
 /// the watermark costs up to one huge page that the program never asked for: at most an
 /// eighth of the class. Below the threshold a class pays 4 KiB faults and dTLB misses, which
-/// are all of the build phases' gap to mimalloc (`docs/research/program-effects.md`, "TLB and
+/// are most of the build phases' gap to mimalloc (`docs/research/program-effects.md`, "TLB and
 /// huge pages"): 4 MiB would close much of it, but would take churn at 1M live objects 5% over
 /// jemalloc's memory (`docs/research/memory.md`, "The huge-page threshold") and still leave
 /// BTreeMap behind mimalloc, whose remaining lead there is the drop. A simulated heap whose
@@ -218,8 +218,8 @@ pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 /// same offset in large blocks of one class falls in different cache sets. Slots are spaced by
 /// their class size, often a power of two, and buffers walked together at slot starts compete
 /// for one set of every cache level: 64 buffers of 4 MiB written round-robin took 7.9 ns an
-/// element at slot starts and 0.77 staggered (`docs/research/program-effects.md`, "Spreading
-/// objects over lines and pages").
+/// element at slot starts and 0.74 to 0.80 staggered (`docs/research/program-effects.md`,
+/// "Order, and lines and pages").
 pub const STAGGER_STEP: usize = 64;
 
 /// The number of distinct staggers: 64, so they span a page, 4 KiB, which is every set of the

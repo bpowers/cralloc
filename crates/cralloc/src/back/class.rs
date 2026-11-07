@@ -111,7 +111,7 @@ impl Sink for [*mut u8] {
 /// magazine hands its objects out in ascending address order. Walking memory upwards is what
 /// the hardware prefetchers follow; a magazine popped from its highest address first made a
 /// walk of a freshly built tree two and a half times slower
-/// (`docs/research/program-effects.md`, "Spreading objects over lines and pages").
+/// (`docs/research/program-effects.md`, "Order, and lines and pages").
 pub struct Descending<'s>(pub &'s [AtomicPtr<u8>]);
 
 impl Sink for Descending<'_> {
