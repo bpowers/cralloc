@@ -1,0 +1,13 @@
+[package]
+name = "roofline-aarch64"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stands alone: not a member of any workspace above it.
+[workspace]
+
+[profile.release]
+opt-level = 3
+debug = 1
+panic = "abort"

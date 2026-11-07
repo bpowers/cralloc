@@ -14,7 +14,7 @@
 //! | `cralloc` | `cralloc::Cralloc`, `executable` feature | itself | its `dealloc` |
 //! | `je` | `tikv-jemallocator` 0.6 itself, default features | itself | `sdallocx` |
 //! | `tc` | google/tcmalloc, static | as `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
-//! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc) | itself | `sn_rust_dealloc` |
+//! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc, Release) | itself | `sn_rust_dealloc` |
 //!
 //! `je` is exactly what a service that depends on `tikv-jemallocator` gets: jemalloc built by
 //! `tikv-jemalloc-sys`, static and with the `_rjem_` prefix, so C code in the process keeps
