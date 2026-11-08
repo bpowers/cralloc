@@ -111,7 +111,7 @@ impl Child {
             return Err(io::Error::other(format!("moving the child into {}: {e}", spec.cgroup.display())));
         }
         let counters = if spec.count {
-            match Counters::open(PROCESS_EVENTS, Target::ChildBeforeExec(pid)) {
+            match Counters::open_on(PROCESS_EVENTS, Target::ChildBeforeExec(pid), spec.cpus) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     kill();
