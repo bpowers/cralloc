@@ -2,10 +2,13 @@
 //!
 //! A generation is a random number that names this process for the drain: a drain's claim and
 //! its markers carry it, and a claim or marker of any other generation counts as absent. It
-//! lives on a page that a forked child reads as zero (`MADV_WIPEONFORK`). The first slow path
-//! that finds it zero draws one and installs it with a compare-and-swap; racing drawers agree
-//! on the winner's. So a child that inherits a drain cut off by the fork sees its claim and
-//! markers as another generation's, and needs no repair pass (`tla/Drain.tla`, protocol
+//! lives on a page that a forked child reads as zero (`MADV_WIPEONFORK`). A process draws one
+//! when it readies the magazine area ([`prepare`]), whether or not anything needs one yet, since
+//! a child learns what it is from an ancestor having drawn. A child inherits that start-up done
+//! and draws when something first needs a generation: a slow path that meets a marker, a drain,
+//! a look at the background thread's word. A draw installs it with a compare-and-swap, and racing
+//! drawers agree on the winner's. So a child that inherits a drain cut off by the fork sees its
+//! claim and markers as another generation's, and needs no repair pass (`tla/Drain.tla`, protocol
 //! "gen").
 //!
 //! A generation is kept in marker form, the random number's bits above [`MARKER_SHIFT`] with
@@ -76,7 +79,8 @@ fn word<'a>(page: NonNull<u8>) -> &'a AtomicU64 {
     unsafe { &*page.as_ptr().cast::<AtomicU64>() }
 }
 
-/// Readies the magazine area and the drain, once per process; later calls return at once.
+/// Readies the magazine area and the drain and draws a generation, once per process; later calls
+/// return at once.
 /// `false` if the generation page cannot be committed, in which case no magazine can be made.
 /// Every slow path asks, so the answer once ready is one load, inline, and the work is out of
 /// line.
@@ -109,6 +113,9 @@ fn prepare_first<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     let fenced = wiped && space.os().register_fence().is_ok();
     let status = READY | if fenced { DRAINS } else { 0 };
     depot.common.status.fetch_or(status, AcqRel);
+    // Whether or not anything needs one yet: a child that finds no ancestor drew does not know it
+    // is a child (`note_drawn`), and takes its parent's threads for its own.
+    let _ = current(depot, area);
     true
 }
 
@@ -147,9 +154,10 @@ const FORKED: u64 = 2;
 /// fork child inherits, while the generation's page is wiped: a process that installs a
 /// generation where one was drawn before is a fork child, or a child of one. A child that
 /// shares its parent's memory (`vfork`, `CLONE_VM`) shares the generation, draws none, and is
-/// not taken for one. A limit: a fork between the install and this record leaves a child that
-/// does not know it is one; and where the page cannot be wiped, a child keeps its parent's
-/// generation and is not known either (drains are off there).
+/// not taken for one. Three limits, each leaving a child that does not know it is one: its
+/// parent had not readied the magazine area, having had no slow path of a small class; a fork
+/// came between readying it and this record; or the page cannot be wiped, so that the child keeps
+/// its parent's generation (drains are off there).
 fn note_drawn(depot: &Depot) {
     let lineage = &depot.common.lineage;
     let bit = if lineage.load(Acquire) & DRAWN != 0 {
@@ -160,8 +168,8 @@ fn note_drawn(depot: &Depot) {
     lineage.fetch_or(bit, AcqRel);
 }
 
-/// Whether this process is a fork child (see [`note_drawn`]): known once its first slow path
-/// has drawn its generation.
+/// Whether this process is a fork child (see [`note_drawn`]): known once it has drawn its
+/// generation, which in a child something must need first, and `false` until then.
 pub(super) fn forked(depot: &Depot) -> bool {
     depot.common.lineage.load(Acquire) & FORKED != 0
 }

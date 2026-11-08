@@ -405,6 +405,32 @@ fn outside_a_fork_child_the_first_thread_may_want_the_thread() {
     assert_eq!(rig.source.thread.load(), Snapshot(key | WANTED));
 }
 
+/// A parent whose slow paths needed no generation has created a thread and forks. The child
+/// still knows what it is: its first thread's crossing wants no thread, though the C library's
+/// record says the parent's threads, and the same crossing by a thread of its own does.
+#[test]
+fn a_child_knows_it_is_one_though_nothing_in_its_parent_needed_a_generation() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    rig.os().set_threads(true);
+    let word = &rig.source.thread;
+    assert_eq!(word.load(), Snapshot(0), "the parent looked at the word");
+    // SAFETY: nothing else runs.
+    unsafe { rig.os().wipe_for_fork() };
+    word.raise_level();
+    slow_path_end(&rig);
+    let child = rig.cache(&SimCpu::new(1)).thread_key();
+    assert_eq!(
+        word.load(),
+        Snapshot(child | NONE),
+        "the child's first thread"
+    );
+    rig.os().set_other_thread(true);
+    word.raise_level();
+    slow_path_end(&rig);
+    assert_eq!(word.load(), Snapshot(child | WANTED));
+}
+
 /// A child that shares its parent's memory (`vfork`, `CLONE_VM`) shares its generation too: it
 /// reads the parent's running thread as running, and creates no second one.
 #[test]
