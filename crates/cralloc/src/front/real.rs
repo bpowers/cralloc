@@ -1,7 +1,6 @@
 //! [`Real`]: the routines as the assembly generated from Lean (`generated/`).
 //!
-//! On aarch64 the routines are hand-written until Lean emits them (`provisional/`). The generated
-//! functions take and return plain words; this module turns them into
+//! The generated functions take and return plain words; this module turns them into
 //! [`Routines`] and nothing more. Pop and push are the inlined forms. They name no class: each
 //! is given the address of its class's word in slab 0 and the class's mask, which a class known
 //! at compile time folds to an address and a constant, and a class known only at run time
