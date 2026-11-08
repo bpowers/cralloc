@@ -123,7 +123,8 @@ fn the_claim_counts_and_clears_what_two_passes_did() {
                 let keep = extent_of(base + last.size).max(extent_of(base + asked));
                 let dirty: Vec<u32> = (keep..unit.end).filter(|&p| !marked(&before, p)).collect();
                 let slack = dirty.first().map(|&low| (low, dirty[dirty.len() - 1] + 1));
-                let settled = region::settle_slot(&host, region, slot, asked, Some(last));
+                let into = layout.stagger(slot);
+                let settled = region::settle_slot(&host, region, slot, asked, into, Some(last));
                 assert_eq!(
                     (settled.resident, settled.revived, settled.zeroed),
                     (class.size() - clean * page, 0, 0),

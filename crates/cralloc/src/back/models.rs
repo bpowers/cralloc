@@ -2362,7 +2362,8 @@ fn large_tenant(host: &Host8) {
     let slot = taken.word * BITS + taken.bits.trailing_zeros();
     let last = region::recorded(host, region, slot);
     let size = host.layout().size() / 3;
-    let settled = region::settle_slot(host, region, slot, size, last);
+    let into = host.layout().stagger(slot);
+    let settled = region::settle_slot(host, region, slot, size, into, last);
     if settled.zeroed != 0 {
         assert!(host.is_zero(region, slot), "a zeroed claim reads non-zero");
     }

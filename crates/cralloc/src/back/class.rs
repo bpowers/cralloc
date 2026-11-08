@@ -19,8 +19,8 @@ use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
-    PURGE_STEP_PAGES, UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown, move_piece,
-    unwritten_floor, wants_huge,
+    PAGE_STAGGER, PURGE_STEP_PAGES, UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown,
+    move_piece, unwritten_floor, wants_huge,
 };
 use super::region::{self, Carve};
 use super::tree::{self, Host};
@@ -503,13 +503,16 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let page = layout.page_size();
         let end = region::extent_of(layout, slot, unit, now.size, false);
-        let pages = end.saturating_sub(unit.start) as usize;
+        // From the first page a staggered block may write: those below it say nothing of what
+        // the tenant wrote.
+        let first = layout.first_page(slot, unit, layout.stagger(slot));
+        let pages = end.saturating_sub(first) as usize;
         let samples = UNWRITTEN_SAMPLES.min(pages);
         let base = self.space.region(region);
         let mut resident = 0;
         for i in 0..samples {
             // The middle page of each of `samples` equal parts of the extent.
-            let at = unit.start as usize + (2 * i + 1) * pages / (2 * samples);
+            let at = first as usize + (2 * i + 1) * pages / (2 * samples);
             let ptr = base.map_addr(|a| a.saturating_add(at * page));
             // SAFETY: BACK-CLASS-06 in docs/safety/cralloc/back/class-safety.md. One whole page
             // of the slot, which the caller holds and nothing writes during the call.
@@ -610,8 +613,8 @@ impl<'a, O: Os> Back<'a, O> {
 
     /// [`Back::alloc`] for a large block whose alignment is at most `policy::STAGGER_STEP`: it
     /// starts at its slot's stagger (`Layout::stagger`) if the object fits there, so that large
-    /// blocks of a class do not all start at the same offset in the caches. A small class is
-    /// never staggered.
+    /// blocks of a class do not all start at the same offset in the caches and the TLB. A small
+    /// class is never staggered.
     pub fn alloc_staggered(&self, class: Class, size: usize) -> Option<Block> {
         self.alloc_at(class, size, true)
     }
@@ -624,14 +627,26 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let small = class.is_small();
-        let (region, slot, zeroed, slack) = if let Some(taken) = tree::claim(&host, 1, !small) {
+        // Where the block starts in its slot, which its clean bits are settled by: the slot's
+        // stagger if it fits, else the slot's start.
+        let start_in = |slot: u32| {
+            let into = host.layout().stagger(slot);
+            if stagger && size + into <= bytes {
+                into
+            } else {
+                0
+            }
+        };
+        let (region, slot, into, zeroed, slack) = if let Some(taken) = tree::claim(&host, 1, !small)
+        {
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
+            let into = start_in(slot);
             let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
                 // The size word as the last tenant left it, which says how much room it used.
                 let last = region::recorded(&host, taken.region, slot);
-                let settled = region::settle_slot(&host, taken.region, slot, size, last);
+                let settled = region::settle_slot(&host, taken.region, slot, size, into, last);
                 if last.is_some_and(|r| r.outgrown) {
                     // What is left of the charge its keep added: the pages purges have not
                     // taken off it since (`region::outgrown_dirty`).
@@ -645,16 +660,17 @@ impl<'a, O: Os> Back<'a, O> {
             // stays resident and in no count until the block's free counts it again.
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            (taken.region, slot, settled.zeroed != 0, settled.slack)
+            (taken.region, slot, into, settled.zeroed != 0, settled.slack)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
             // A large block makes resident at most what it asked for (one with headroom asks
             // for the room it may grow into), however big its slot.
             self.grow(if small { bytes } else { size });
+            let into = start_in(first);
             if !small {
-                region::mark_fresh(&host, region, first, size);
+                region::mark_fresh(&host, region, first, size, into);
             }
-            (region, first, true, None)
+            (region, first, into, true, None)
         };
         region::reach(&host, region, slot, self.epoch());
         if let Some(before) = region::recorded(&host, region, slot) {
@@ -679,12 +695,6 @@ impl<'a, O: Os> Back<'a, O> {
             self.trim_slack(&host, region, slot, slack);
         }
         let layout = host.layout();
-        let into = layout.stagger(slot);
-        let into = if stagger && size + into <= bytes {
-            into
-        } else {
-            0
-        };
         // A slot below the region's count lies wholly inside the region, which is what
         // `Space::slot` checks.
         if slot >= layout.slots() {
@@ -724,8 +734,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// milliseconds (`docs/research/large-blocks.md`, "Slack: what earlier tenants left in an
     /// occupied slot"). What a trim leaves below the step stays in the slot, resident and in no
     /// count, until the slot's next claim trims again or its free charges it. A step here is
-    /// pages and never whole huge pages, as the purge walk's pieces are in a class of a huge
-    /// page or more: those pieces must not split a huge page of a free slot that kept its
+    /// pages and never whole huge pages, as the purge walk's pieces are where a huge page is
+    /// 2 MiB: those pieces must not split a huge page of a free slot that kept its
     /// advice, and a slot that kept it here, which only a refused call to take it back leaves,
     /// has its range cut inward to whole huge pages by `purge_part`: nothing of a step inside
     /// the slot's whole huge pages goes, and a part in its unaligned tail, which the advice
@@ -896,15 +906,15 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// The advice rounds down, so the huge page a block only starts is left on small pages,
     /// and a staggered block whose size is a whole number of huge pages spills its stagger, a
-    /// few bytes, into the next one. Those bytes give the page a page table, and advice given
-    /// to a page that has one changes nothing: when the block grows over it, the rest of it
-    /// faults 4 KiB at a time, 511 faults where one huge one would do, at each such doubling
-    /// (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense"). So the
-    /// page of bytes is copied aside into the block's own new room, the huge page is returned,
-    /// which frees its emptied page table, and the bytes are copied back, which faults the huge
-    /// page whole under its new advice. Where the OS keeps the page table, or refuses the
-    /// purge, the copy back restores the bytes all the same, and the page goes on in small
-    /// pages, as before.
+    /// few bytes or a few pages, into the next one. Those bytes give the page a page table, and
+    /// advice given to a page that has one changes nothing: when the block grows over it, the rest
+    /// of it faults a small page at a time, 511 faults where one huge one would do with pages of
+    /// 4 KiB, at each such doubling (`docs/research/large-blocks.md`, "Huge pages only for blocks
+    /// that prove dense"). So the pages of the spill are copied aside into the block's own new
+    /// room, the huge page is returned, which frees its emptied page table, and the bytes are
+    /// copied back, which faults the huge page whole under its new advice. Where the OS keeps the
+    /// page table, or refuses the purge, the copy back restores the bytes all the same, and the
+    /// page goes on in small pages, as before.
     ///
     /// Only when the rest of the huge page is not resident, which the OS is asked: in a slot
     /// kept resident from its last tenant, or one the block shrank in and grows back over, the
@@ -912,15 +922,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// it back. The clean bits cannot say this: the extent of an advised block is rounded up to
     /// a huge page, so they are cleared over the page before the program writes it.
     ///
-    /// The room is the first page of the huge page that holds the new end, which the advice,
+    /// The room is the first pages of the huge page that holds the new end, which the advice,
     /// rounded down, does not cover, and which a block that fills its new size writes anyway as
     /// its next spill. Anywhere in the advised range the copy would fault a whole huge page the
     /// program has not reached. A growth that ends on a huge-page boundary has no such page and
     /// is left alone.
     ///
     /// Where the OS gives no huge pages at all (transparent huge pages off for the process),
-    /// this returns one small page and faults it back at each such growth, for nothing; the
-    /// allocator does not know that setting, and the cost is one call and one fault.
+    /// this returns the spill's pages and faults them back at each such growth, for nothing; the
+    /// allocator does not know that setting, and the cost is one call and a fault a page.
     ///
     /// # Safety
     ///
@@ -954,12 +964,18 @@ impl<'a, O: Os> Back<'a, O> {
         // The room: the first page of the huge page that holds the new usable end.
         let fresh = (into + new).next_multiple_of(page);
         let room = ((base + fresh - 1) & !(huge - 1)) - base;
-        // Only the spill of a first page; the page must now be advised; `at > into` keeps the
-        // block's start out of it; and the room must lie past it, past the advised range, and
-        // inside what the block may now use, its new size rounded up to a page.
+        // The most a spill may be: a first page, or the pages of the stagger that spilled.
+        let spilled = if PAGE_STAGGER {
+            into.next_multiple_of(page).max(page)
+        } else {
+            page
+        };
+        // Only a spill; the page must now be advised; `at > into` keeps the block's start out of
+        // it; and the room must lie past it, past the advised range, and inside what the block may
+        // now use, its new size rounded up to a page.
         let first = ((base + at) / page) as u32;
         if part == 0
-            || part > page
+            || part > spilled
             || at <= into
             || first + pages > advised
             || room < at + huge
@@ -969,9 +985,9 @@ impl<'a, O: Os> Back<'a, O> {
             return;
         }
         let spill = ptr.map_addr(|a| a.saturating_add(at - into));
-        let rest = spill.map_addr(|a| a.saturating_add(page));
+        let rest = spill.map_addr(|a| a.saturating_add(part));
         // SAFETY: BACK-CLASS-05: whole pages inside the block, which nothing writes meanwhile.
-        if unsafe { self.space.resident(rest, huge - page) } != Ok(0) {
+        if unsafe { self.space.resident(rest, huge - part) } != Ok(0) {
             return;
         }
         let aside = ptr.map_addr(|a| a.saturating_add(room - into));
@@ -985,10 +1001,11 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
-    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`)
-    /// at a time, and the whole pages of `from` behind each piece go back to the OS before the
-    /// next is copied, so the two copies are both resident for one piece at most. Aborts if
-    /// `from` is not the start of a handed-out large slot or a run.
+    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`, or
+    /// a huge page if the slot is advised for larger ones) at a time, and the whole pages of
+    /// `from` behind each piece go back to the OS before the next is copied, so the two copies
+    /// are both resident for one piece at most. Aborts if `from` is not the start of a
+    /// handed-out large slot or a run.
     ///
     /// What becomes of `from`'s slot depends on `why` (design: "Large objects"):
     ///
@@ -1083,6 +1100,18 @@ impl<'a, O: Os> Back<'a, O> {
             }
             _ => return,
         };
+        // A block under huge-page advice goes back in whole huge pages or not at all
+        // (`region::purge_part`), so its pieces are at least one, however large.
+        let huge = self.space.plan().geometry().huge_page_size();
+        let piece = match &host {
+            Some((host, region, index))
+                if huge > piece
+                    && region::recorded(host, *region, *index).is_some_and(|r| r.huge) =>
+            {
+                huge
+            }
+            _ => piece,
+        };
         // Returns the slot's or run's pages in `start..end`, both page boundaries. Where all of
         // a slot's went back they are marked clean, so that a free of the slot charges only
         // what is left.
@@ -1114,9 +1143,9 @@ impl<'a, O: Os> Back<'a, O> {
         // An outgrown slot within the bound is kept whole, with both copies resident for the
         // move; anything else goes back behind the copy. Two kinds are never kept. A block
         // marked unwritten: its slot is returned, as a block its tenant left unwritten is at its
-        // free. And a block advised for huge pages: its slot's pages fault back 2 MiB at a time
-        // for a fraction of the small pages' cost, and the next block, written over memory that
-        // is resident but cold, took more time than the faults it saved (a buffer grown to
+        // free. And a block advised for huge pages: its slot's pages fault back a huge page at a
+        // time for a fraction of the small pages' cost, and the next block, written over memory
+        // that is resident but cold, took more time than the faults it saved (a buffer grown to
         // 64 MiB over and over, 31% slower kept; `docs/research/large-blocks.md`, "What growth
         // leaves behind").
         let keep = match (&host, slot) {
@@ -1143,9 +1172,17 @@ impl<'a, O: Os> Back<'a, O> {
                 unsafe { self.copy_window(from, to, at, end, &mut dest) };
                 at = end;
             }
-            // Only pieces that reach a boundary go back here: the last may end inside a page.
+            // Only pieces that reach a boundary go back here: the last may end inside a page. The
+            // first goes from the slot's start, past the pages a stagger passes over: an earlier
+            // tenant may have written them, and a slot that goes back whole is taken to read as
+            // zero.
             if !keep && done + step == boundary {
-                all &= give_back((into + done) & !(page - 1), into + boundary);
+                let start = if PAGE_STAGGER && done == 0 {
+                    0
+                } else {
+                    (into + done) & !(page - 1)
+                };
+                all &= give_back(start, into + boundary);
             }
             done += step;
             observe();
@@ -1548,7 +1585,7 @@ impl<'a, O: Os> Back<'a, O> {
         let plan = self.space.plan();
         // A class that has filled a region before has carved far past the huge-page threshold,
         // so its new region uses huge pages from the start, if its class gets them at all.
-        let huge = seen != 0 && wants_huge(class.size(), host.layout().page_size());
+        let huge = seen != 0 && wants_huge(class.size(), plan.geometry());
         let layout = host.layout();
         let (start, end) = layout.fixed_commit();
         for region in plan.regions() {

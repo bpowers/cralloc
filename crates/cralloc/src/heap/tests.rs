@@ -859,7 +859,7 @@ fn a_block_resized_back_and_forth_across_its_slot_boundary_settles() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
-    use crate::back::policy::{STAGGER_ROOM, kept_outgrown};
+    use crate::back::policy::{STAGGER_LINES, kept_outgrown};
     // The block's charge must fit the bound for the slot to be kept.
     const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 * KIB));
     use crate::os::HugePages;
@@ -889,7 +889,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
             Some(crate::back::Kind::Slot(class)) => class.size(),
             other => panic!("{other:?}"),
         };
-        let most = (grown.size() + STAGGER_ROOM).next_multiple_of(huge);
+        let most = (grown.size() + STAGGER_LINES).next_multiple_of(huge);
         assert!(slot >= 2 * most, "a slot of {slot}");
         // Freed, it goes back whole and loses its advice.
         let before = back.retained_large();
@@ -2841,3 +2841,5 @@ mod cache_domains {
         );
     }
 }
+/// Whole heaps on simulated kernels at their real size.
+mod kernels;

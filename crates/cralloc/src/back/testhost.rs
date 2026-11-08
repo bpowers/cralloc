@@ -202,6 +202,10 @@ impl<W: TestWord> Host for TestHost<W> {
         &self.layout
     }
 
+    fn geometry(&self) -> crate::space::Geometry {
+        self.plan.geometry()
+    }
+
     fn tree_words(&self, region: RegionId, level: u8, count: u32) -> &[W] {
         assert!(count <= self.layout.level_words(level));
         let first = self.layout.tree_word(level, 0) as usize;
