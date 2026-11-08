@@ -1,8 +1,8 @@
 # Safety ledger: `crates/cralloc/src/os/linux/rseq.rs`
 
 The system calls that register a thread's own rseq area on musl, which registers none. Each
-block calls `syscall()` (SYSCALL-01), so each entry's obligation is that the kernel's contract
-for the call is met and that the call changes only what the caller may change. Compiled on musl
+block calls `syscall()` (SYSCALL-01 and SYSCALL-02), so each entry's obligation is that the kernel's
+contract for the call is met and that the call changes only what the caller may change. Compiled on musl
 only; `front/area.rs`'s tests run every call on the real kernel.
 
 References: rseq(2) and `kernel/rseq.c` (Linux 7.2), `include/uapi/linux/rseq.h`,
@@ -10,7 +10,8 @@ arch_prctl(2), rt_sigprocmask(2).
 
 ## RSEQ-01: `arch_prctl(ARCH_GET_FS)` in `thread_pointer`
 
-On aarch64 `thread_pointer` has no block of its own: it reads the register (SYSCALL-03).
+On aarch64 `thread_pointer` has no block of its own: it reads the register, and the pointer's
+provenance is argued with that read (SYSCALL-03).
 
 **Obligations.** The call writes 8 bytes through its second argument and nothing else.
 
@@ -37,8 +38,11 @@ the thread unregisters it or ends, and every descriptor `rseq_cs` may name stays
 `kernel/rseq.c` checks `rseq_len == ORIG_RSEQ_SIZE` before the feature-size path). The
 signature is `RSEQ_SIGNATURE_X86_64` or `RSEQ_SIGNATURE_AARCH64`, the constant the Lean printer
 writes before every abort handler (`VG.X86_64.rseqSignature`, `VG.AArch64.rseqSignature`), emitted
-into `constants.rs` from the same definition, so the two cannot differ. A wrong argument is rejected (`EINVAL`, `EPERM`), not undefined behaviour; a
-second registration of the same area returns `EBUSY` and changes nothing.
+into `constants.rs` from the same definition, so the two cannot differ. A wrong argument is rejected
+(`EINVAL`, `EPERM`), not undefined behaviour; a second registration of the same area returns `EBUSY`
+and changes nothing (`rseq_reregister`). A first one clears `rseq_cs` and writes the area's ID fields
+(`rseq_register`), all within the 32 bytes, and `cpu_id` holds the thread's CPU by the time the call
+returns to user space.
 
 ## RSEQ-03: `rseq` unregistration (`unregister`)
 
@@ -59,4 +63,4 @@ whose size is passed. The kernel ignores `SIGKILL` and `SIGSTOP` in the set. The
 the destructor that retires an exiting thread's area (AREA-05), which blocks signals for two
 system calls and restores the mask it found, so code that runs after it sees the mask it had.
 
-Reviewed: f6d9023
+Reviewed: 5a8ade1

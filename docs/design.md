@@ -21,8 +21,8 @@ Three ideas define it.
    tracked in bitmaps stored elsewhere. Freeing a small object writes only to the caller's own
    cache, so it touches neither the object nor shared metadata, and it costs the same on any thread.
 
-The allocator has three tiers. Each is reached only when the one above runs dry or fills up, and
-each handles objects in larger batches than the one above.
+The allocator has three tiers. Each is reached only when the one above runs dry or fills up. The
+front end handles one object at a time, and the depot and the back end a magazine at a time.
 
 ```
 alloc / free
@@ -37,7 +37,7 @@ middle  depot: stacks of whole magazines, one set per cache domain
      |  depot above or below its target
      v
 back    class regions and their free bitmaps; memory from and to the OS
-        cost: about one atomic instruction per 64 objects
+        cost: one atomic instruction per 64 objects, up to one per object if they are scattered
 ```
 
 This document says what the allocator does and why. What we measured is in `docs/research/`,
@@ -113,10 +113,12 @@ design.
   cache line moved between cores many more, and one page fault hundreds. The design effort belongs
   in not faulting, not moving cache lines between cores, and not executing an atomic instruction per
   object.
-- **A per-CPU cache is worth its price.** It costs at most a few cycles more than a thread-local one
-  when inlined, nothing when called, and nothing either way on an Apple core, and it buys caches
-  bounded by the CPU count, no per-thread state to create or tear down, and frees that are local on
-  every thread.
+- **A per-CPU cache is worth its price.** On Zen 5 it costs a few cycles more than a thread-local one
+  when inlined and nothing when called. On an Apple core it costs what a thread-local cache through a
+  base register costs, though a thread-local word at an immediate offset, which the core renames,
+  makes a tight pair about three times as fast, and programs mostly do not wait on that. It buys
+  caches bounded by the CPU count, no per-thread state to create or tear down, and frees that are
+  local on every thread.
 - **On Zen 5, inlining matters more than any other fast-path choice,** and it needs LTO.
 - **On Zen 5, the last cycle or two depend on what a compiler does not control.** Narrow loads and
   absolute addressing lose zero-delay store forwarding. The processor delivers a straight-line run
@@ -149,8 +151,9 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
    machine-checked for all inputs. Every `unsafe` block has a machine-checked proof or a reviewed
    written one.
 5. **Robust by construction.** No locks, so `fork` cannot deadlock the child and a signal handler
-   may allocate. No per-thread state, so thread exit needs no code. An all-zero heap is a valid
-   heap, so the fast path has no initialization check.
+   may allocate. No per-thread state, so thread exit needs no code on glibc, and on musl only the
+   unregistering of the rseq area that is ours there. An all-zero heap is a valid heap, so the fast
+   path has no initialization check.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates, panics,
    unwinds or prints while serving a request.
 7. **Two architectures, done fully.** cralloc is developed, tested and measured on x86-64 and aarch64
@@ -207,9 +210,10 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
 
 ### What is fixed when
 
-Whatever a fast path touches is a constant at compile time on every target: the slabs' number and
-layout, the size classes, the magazines' shapes. So a routine holds them as immediates, and no
-machine pays to look them up.
+The slabs' number and layout, the size classes and the magazines' shapes are constants at compile
+time on every target, so a routine holds the slab count and shift as immediates. A class's mask
+reaches a routine in a register, or in C from a table. Only the rseq offset and, in C's frees, the
+heap's base and region shift are known just at run time, and a routine loads them.
 
 A kernel's page size is a constant only on x86-64. On aarch64 it is 4, 16 or 64 KiB, and a huge page,
 a page table's worth of pages, is 2, 32 or 512 MiB. No fast path needs either, so they are found
@@ -237,7 +241,7 @@ start the allocator, and every allocation fails.
 
 A region is assigned to a class on demand and holds only objects of that class, at `region_base +
 origin + index * class_size`. A small class's origin is a whole number of pages, different for each
-class, so that the first pages of the classes in use do not all share the low page-number bits that
+class where a region is large enough to spread them, so that the first pages of the classes in use do not all share the low page-number bits that
 index the TLB's sets; the pages below it are never committed. A large class's origin is zero. A
 4096-byte table records the class of each region.
 
@@ -368,9 +372,9 @@ can observe yet, and commits by storing the incremented word.
 
 When the class is a compile-time constant, the caller's computation of the two inputs folds to two
 or three instructions. On x86-64 an executable can read `__rseq_offset` with one load instead of two,
-and a cargo feature selects that. On aarch64 there is one form, because GNU ld gives a
+and a cargo feature selects that. On aarch64 with glibc there is one form, because GNU ld gives a
 position-independent executable no copy of the variable to load, and the second load costs no job
-anything we can see. Keeping the slab's address in a scratch register between calls would let an
+anything we can see. On musl, on either, the area is the allocator's own and no load is needed. Keeping the slab's address in a scratch register between calls would let an
 Apple core forward the hot word for free, but it needs an unstable compiler feature and helps one kind
 of program, so it is left out (`docs/research/firestorm.md`, "Held, not built").
 
@@ -378,8 +382,9 @@ The hot word is the last thing a call stores, and on Zen 5 a load that shares a 
 store still in flight can be held until the store completes. So nothing a fast path loads on every
 call may share a page offset with a hot word (`docs/research/roofline.md`, "A load at the page offset
 of a store in flight can stall the whole loop"). An Apple core has no such hold, and Neoverse V2's is
-unknown, so the rule stands on every target. The crate places its own tables clear of them, and the
-build checks flag a binary whose linker did not.
+unknown, so the rule stands on every target. The crate places its own tables clear of them, except
+for entries that wrap round the page (`docs/research/roofline.md` lists them), and the build checks
+flag a binary whose linker puts the rseq offset on one.
 
 The routines follow rules that come from the measurements, of which the checks under "Assembly"
 enforce the commit, the micro-op limits and the sizes:
@@ -488,8 +493,8 @@ refuses the `membarrier` registration, or the page wiped on fork, draining is of
 ### Depot
 
 The depot holds, per class, a stack of non-empty magazines for each cache domain (the CPUs that
-share a last-level cache: the highest the kernel lists, an L3 on most machines and a cluster's L2 on
-an Apple chip) and one more shared by all of them, and per magazine size the same for empty
+share a last-level cache: on x86-64 the L3, and on aarch64 the highest the kernel lists, a cluster's
+L2 on an Apple chip) and one more shared by all of them, and per magazine size the same for empty
 magazines. A slow path that retires a magazine pushes it on its domain's stack while that holds less
 than a cap, else on the shared stack. One that needs a magazine pops its domain's stack, else the
 shared one, else fills or makes one. The domains are read once from sysfs, on the process's first
@@ -528,12 +533,14 @@ or above it have never been allocated, and their memory has never been touched.
   carves from the last region's watermark with one compare-and-swap, and when that region is
   exhausted it assigns a new one to the class.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits with one
-  atomic OR. If a bit was already set, the object was freed twice and the process aborts.
+  atomic OR, or, once a batch proves scattered, gives each slot an OR of its own. If a bit was already
+  set, the object was freed twice and the process aborts.
 - **Summary bits are hints.** They may be set when nothing below is free, and they stay clear over
   something free only for a moment, or in a fork child until the next free into that word. A free
-  sets the word's bits and then sets every summary bit above it that it finds clear. Whoever empties
-  a word clears its summary bit and then reads the word again, and sets the bit back if the word is
-  no longer empty. A free does not assume that the first free into an empty word set the summary
+  sets the word's bits and then sets every summary bit above it that it finds clear. A small class's
+  claim that empties a word clears its summary bit and then reads the word again, and sets the bit
+  back if the word is no longer empty. A large class's claim leaves the bit set, and the next search
+  that finds the word empty clears it. A free does not assume that the first free into an empty word set the summary
   bit, because that thread may have vanished in a fork before it could.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before carving
@@ -743,7 +750,7 @@ objects pack into the bottom of the region, and the top is left a few long-lived
 page, each holding a huge page (`docs/research/memory.md`, "When the size mix wanders, huge pages
 ratcheted"). So a step that may return memory treats the huge pages above the frontier as small
 pages. One wholly free goes back whole. One with a quarter of its pages or more free and resident is
-split, and its free runs are returned. A sample of a few pages, at places that move with every lap,
+split, where the step may ask for a split, and its free runs are returned. A sample of a few pages, at places that move with every lap,
 chooses which huge pages are counted, so a lap over dense huge pages reads little. The purge asks
 the kernel to split a huge page before it returns part of it, since pages returned from an unsplit
 huge page stay charged to the cgroup until reclaim splits it.
@@ -772,8 +779,8 @@ In summary:
 | What holds the memory | What returns it | When |
 |---|---|---|
 | Free slots on pages with nothing live, above what fills reached in the last two intervals | The clocked purge | Once an interval, down to the floor |
-| Free pages of a huge page above that frontier, when a quarter of it or more is free | The clocked purge splits the huge page and returns them | When the pass reaches it |
-| Free slots of large classes, above the floor | Heartbeats, or the background thread in a silence | After a short hold without a free that left them resident |
+| Free pages of a huge page above that frontier, when a quarter of it or more is free | The clocked purge splits the huge page and returns them | When the pass reaches it; at 32 MiB, only the thread's or `maintain`'s pass |
+| Free slots of large classes, above the floor | Heartbeats, or the background thread while it runs | After a short hold without a free that left them resident |
 | An occupied large slot's pages past its block and its last tenant's | The claim of the slot | At the claim, one bounded step |
 | Any retained memory, while over the cap and the heap grows elsewhere | The carve that grows the heap, and the heartbeats after it | A bounded step each |
 | A slot a large block outgrew, beyond a bound on such slots | The move | Behind the copy, a piece at a time |
@@ -814,9 +821,10 @@ another page, since the pages below a block are never touched and are not charge
 is stored: a block starts at its slot's start or at that offset, and any other pointer into the slot
 is not a block.
 
-`realloc` and `grow` succeed in place whenever the new size fits the slot and the caller's next
-`dealloc` will still find the right class: for a small object the new size maps to the same class,
-and for a large one it is still large. Anything else moves the object.
+`realloc` and `grow` succeed in place whenever the new size fits the slot, the caller's next
+`dealloc` will still find the right class, and a shrink keeps enough of the slot (see "Shrinking"):
+for a small object the new size maps to the same class, and for a large one it is still large.
+Anything else moves the object.
 
 **Growing.** A large object that has to move because it grew moves into a slot with room to grow in
 place, so a buffer that doubles repeatedly is copied a few times in total. A heap with its full
@@ -877,8 +885,8 @@ its own. A small program's thread never runs, because it holds nothing worth ret
 with one thread never gets one, because it may depend on staying that way; once quiet it keeps its
 free memory until it calls `maintain` or `collect`, as it would under glibc's allocator, and we
 accept that as a limit. The evidence of a second thread is the C library's own record that one was
-created. Where there is no such record, and in a fork child, it is a free by a thread other than the
-first. The condition is a level, looked at when free memory rises over the floor and once an
+created. Where there is no such record, and in a fork child, it is a slow path, at its look at the
+level, on a thread other than the first. The condition is a level, looked at when free memory rises over the floor and once an
 interval while it stays there, so a moment that is unsafe for creating the thread only delays it; a
 creation that fails leaves the default off.
 
@@ -965,7 +973,8 @@ across a workspace, and every test binary would then replace `malloc`.
 Beyond what the compiler emits (`memcpy`, `memset`), the allocator's only references to a C library
 are `errno`'s accessor and glibc's `__rseq_offset`; on musl, `errno`'s accessor and the three
 pthread key functions that run code at thread exit; and in the default build, what creating the
-background thread takes.
+background thread takes and, on glibc, its record of whether the program has created a thread
+(`__libc_single_threaded`).
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency crates,
 but it silently stops doing so when the crate that declares `#[global_allocator]` contains a private
@@ -1012,11 +1021,16 @@ a Rust `Layout` of the same size implies.
 - **Fork.** The child gets a copy of a heap in which every shared structure is valid at every
   instant. Objects that another thread held privately at the moment of the fork are lost to the
   child: a small, bounded leak. A drain that was under way leaves a claim and markers with no
-  drainer. The generation lives on a page that is wiped on fork, and the child's first slow path
-  draws a new one, so the child sees the parent's claims and markers as belonging to another
-  generation and treats them as absent. That same slow path clears any owner bit left on a region's
-  huge-page advice, has each region's next change make the kernel's advice agree with its word
-  first, and marks every region a class is carving or has carved from as named for the walks.
+  drainer. The generation lives on a page that is wiped on fork. A process draws one when it readies
+  the magazine area, so that its child can tell what it is. The first call in the child that needs
+  one, a slow path that meets a marker, a drain or a look at the background thread's word, draws a
+  new one, so the child sees the parent's claims and markers as belonging to another generation and
+  treats them as absent. That draw also clears any owner bit left on a region's huge-page advice, has
+  each region's next change make the kernel's advice agree with its word first, and marks every
+  region a class is carving or has carved from as named for the walks. A child whose parent had no
+  slow path of a small class, or forked between readying the area and that draw, does not know it is
+  one, and we accept that as a limit: the repair does not run, which costs memory returned and never
+  a block, and it may take its parent's threads for its own and start the background thread.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and the slow
   paths hold nothing that a nested call could trip over. The exceptions are where the allocator
   calls the C library, which has locks of its own: the creation of the background thread, and on
@@ -1049,7 +1063,8 @@ These hold everywhere, and the proofs and tests lean on them.
 ### Components
 
 Components depend downward only: the interfaces on the front end and large objects, those on the
-depot and back end, everything on size classes and the OS interface. The OS interface is a trait
+depot and back end, everything on size classes and the OS interface. The one exception is the back
+end's policy constants, which the address space and the depot read too. The OS interface is a trait
 with a Linux implementation built on raw system calls and a simulated implementation for tests.
 
 The crate's public API is small: the allocator's handle, the statistics it reports, the background
@@ -1134,13 +1149,13 @@ against forged proofs. They guard against honest mistakes, not an author who run
 
 For each routine we prove four things. Run to completion, it performs its specified step on the
 slab. Stopped before any instruction, including the last, it has changed nothing the specification
-can see, and the registers the restart needs are intact. It reads and writes only the thread's rseq
-area, the slab array and the magazine the slab word names. It clobbers only the registers it
-declares.
+can see, and the registers the restart needs are intact. It writes only the thread's rseq area, the
+slab array and the magazine the slab word names, and it reads those, the rseq offset and, in C, its
+tables. It clobbers only the registers it declares.
 
 The proofs assume, at entry and at every retry, the part of the slab invariant a routine can see:
 its class's word is zero, a marker, or an entry address of a magazine of the class's size, and that
-magazine lies apart from the slabs, the thread's rseq area and the stack. The Rust slow paths keep
+magazine lies apart from the slabs, the thread's rseq area and, on x86-64, the stack. The Rust slow paths keep
 the whole invariant. The layout constants the proofs assume are emitted with the routines, and the
 Rust code is held to them.
 

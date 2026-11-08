@@ -1851,7 +1851,7 @@ impl<O: Os> Back<'_, O> {
     /// cleared rather than left to go stale. Only the thread that draws the child's generation
     /// runs this, so it may also clear the bit of a live owner of the child's: the forking
     /// thread, if it forked from a signal handler in the middle of a change, or a second thread
-    /// the child started before its first slow path. That owner is then taken over: its
+    /// the child started before it drew its generation. That owner is then taken over: its
     /// give-back finds the bit gone and asks for a repair, as any taken-over owner does, and the
     /// repair puts the advice right whatever its late call did. A word left with a
     /// claim's mark sets the marks flag, which the bit's owner would have. Words that are zero,

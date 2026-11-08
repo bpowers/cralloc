@@ -19,7 +19,8 @@ What the preload setting adds:
   `aligned_alloc`, `memalign`, `valloc`, `pvalloc`, `malloc_usable_size`, `malloc_trim`
   (checked with `nm -D --defined-only /lib64/libc.so.6`). The rest of glibc's malloc
   interface (`mallinfo`, `mallinfo2`, `mallopt`, `malloc_stats`, `malloc_info`) takes no block
-  and reads or tunes only glibc's own heap, which then stays empty. `__libc_malloc` and its
+  and reads or tunes only glibc's own heap, which then stays empty, and `memalignment` looks
+  only at the address it is given. `__libc_malloc` and its
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
   interposable names. For a static musl program, where no export list applies, the evidence
@@ -37,10 +38,10 @@ What the preload setting adds:
   it has relocated every object, the preload library included, and only then switches to the
   interposed `malloc`; glibc has registered rseq for the main thread before that
   (`docs/research/linux-rseq-contract.md`, "glibc"). So the first call finds `__rseq_offset`,
-  the library's GOT and the routines' words holding the variable's address (`R_X86_64_64`
-  relocations, applied in the same pass as the GOT's) relocated. The switch looks up `malloc`, `calloc`, `realloc` and `free`
+  the library's GOT and the routines' words holding the variable's address (`R_X86_64_64` or
+  `R_AARCH64_ABS64` relocations, applied in the same pass as the GOT's) relocated. The switch looks up `malloc`, `calloc`, `realloc` and `free`
   in the global scope (`elf/dl-minimal.c`, `__rtld_malloc_init_real`), where the preload
-  library comes before libc, and the unversioned definitions here satisfy its `GLIBC_2.0`
+  library comes before libc, and the unversioned definitions here satisfy its versioned
   lookup. Memory the minimal allocator handed out is not passed to the interposed `free`: the
   one block the loader later resizes or frees, the initial thread's DTV, is copied into a new
   block instead of reallocated and is never freed (`elf/dl-tls.c:562-578` and `741`). The
@@ -58,13 +59,13 @@ What the preload setting adds:
   which ends the process through `Os::abort` (raw system calls, no allocation). Nothing the
   library calls can throw: the system call instruction, glibc's `__errno_location`, the
   compiler's `memcpy` and `memset`, and the C functions the background thread's start uses
-  (`getenv`, `sigfillset`, `pthread_sigmask`, `sigaltstack`, the `pthread_attr` functions,
-  `pthread_create`, `pthread_setname_np`, `pthread_detach`, `dlsym`, `getpid`; BACKGROUND-01,
-  PRELOAD-03). None is a cancellation point, at which a cancelled thread would unwind. The
-  background thread itself waits with the `futex` system call, made directly, which is not
-  one either, and nothing can cancel it: its identifier never leaves the function that creates
+  (`sigfillset`, `pthread_sigmask`, `sigaltstack`, `pthread_create`, `pthread_detach`, `dlsym`,
+  `getpid`; BACKGROUND-01, PRELOAD-03). None is a cancellation point, at which a cancelled thread
+  would unwind (`pthreads(7)` lists them). The background thread itself waits with the `futex`
+  system call, made directly, which is not one either, and nothing can cancel it: its identifier never leaves the function that creates
   it.
-  So no exception ever unwinds out through the library's frames.
+  So no exception ever unwinds out through the library's frames. If one did, the personality the
+  library binds aborts (PRELOAD-02).
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn cralloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it
 
@@ -83,4 +84,4 @@ only reachable when an exception unwinds into the library's own frames, which no
 can start (PRELOAD-01). If one did, it aborts, which is the behaviour Rust defines under
 `panic = "abort"`.
 
-Reviewed: 602428b
+Reviewed: 5a8ade1
