@@ -606,6 +606,63 @@ to 0.4 ms of synchronous work per 2 MiB in a slow path, and adds nothing at a lo
 Populate-ahead: faults cut three to five times, kernel time by at most a tenth, about 1 MiB at every
 peak.
 
+**On 32 MiB huge pages the threshold stays at 8 huge pages, 256 MiB, and not because it counts huge
+pages.** Fewer buy about 1% where they buy anything, and the worst case costs them far more. Every value
+from one binary, switched at run time, so that placement cancels (`bench/roofline/aarch64/hopjob`,
+variant `hugen`, which does not ship), interleaved, on an M1 Max with 16 KiB pages, at `e779fa0`,
+2026-11-08. Change in cycles from 8, and the second allocator at 8 as the control, 7 rounds, 15 on JSON, 3
+on the programs and 2 on the servers, at 70% of what this machine saturates at:
+
+| Job | 1 | 2 | 4 | Control | Peak at 1, 2, 4, 8, MiB |
+|---|---:|---:|---:|---:|---|
+| Tree, depth 20 | −0.68% | 0.00% | +0.04% | −0.05% | 65, 52, 52, 52 |
+| JSON, 32 MiB | −0.27% | −0.56% | −0.59% | +0.46% | 382 at each |
+| B-tree map, 1 M | +0.13% | +0.73% | +0.29% | −0.04% | 146, 126, 126, 126 |
+| Hash map, 1 M | +0.15% | +0.29% | −0.13% | +0.30% | 208 at each |
+| Churn, 100 k live, mixed | −0.36% | −0.08% | +0.19% | +0.20% | 54 at each |
+| Churn, 1 M live | +0.27% | +0.98% | +0.36% | +0.40% | 111 at each |
+| Churn, 10 M live | −1.67% | −0.92% | −0.39% | −0.34% | 1,221, 1,157, 1,084, 1,063 |
+| boa, the V8 suite | −0.25% | −0.43% | −0.09% | | 309, 309, 309, 276 |
+| ruff, 4 threads | +0.09% | +0.09% | +0.09% | | 66, 65, 66, 62 |
+| DataFusion, TPC-H at 3 | −0.09% | −0.14% | +0.01% | | 940, 942, 941, 942 |
+| miniredis, 2 GiB heap | −0.04% | −0.23% | −0.29% | | 2,062, 2,045, 2,045, 2,044 |
+| miniredis, 4 GiB heap | +0.17% | +0.22% | +0.50% | | 4,147, 4,090, 4,047, 4,046 |
+
+Those are with the huge pages in hand: JSON held 256 MiB of them at 1 and 32 at 8. Its kernel time halves,
+0.34 to 0.17 cycles a byte, and its own code gives back half of that. Churn at 10 M live has the most
+to gain, with 736 MiB of them: its fill falls from 15.5 cycles an object to 11.8, and its steady state
+1.7%. One build for each value read JSON as −2.3%, which was where its code landed. The servers' 99th
+percentile is 2.2 to 2.4 ms at every value, with deep idle off.
+
+**The worst case on purpose:** 24 dense classes, each holding just past a threshold, where its first huge
+page is up to half of what it holds. Peak in MiB, with huge pages free:
+
+| Each class holds | In objects | 1 | 2 | 4 | 8 | mimalloc | jemalloc |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 33 MiB | 792 | 1,489 | 794 | 794 | 794 | 930 | 828 |
+| 65 MiB | 1,560 | 2,257 | 2,257 | 1,562 | 1,562 | 1,794 | 1,628 |
+| 129 MiB | 3,096 | 3,533 | 3,707 | 3,793 | 3,098 | 3,522 | 3,229 |
+| 257 MiB | 6,168 | 6,865 | 6,865 | 6,865 | 6,865 | 7,012 | 6,431 |
+
+Each value's worst is the same 695 MiB, so the share falls as the threshold rises: +87% at 1, +44% at 2,
++22% at 4 and +11% at 8, against the leanest incumbent +80%, +39%, +17% and +7%. That last is the eighth
+of a class the constant allows, and 8 is the only value that stays near the goal on memory on a heap of
+gigabytes. A real program pays much less: the most here is 158 MiB at 1, on churn at 10 M live.
+
+**A shortage does not change the answer, and it adds to it.** With the free blocks used up first
+(`hopjob/fragment.c`), each allocation and first write of 1 KiB blocks, three runs at each value:
+
+| Class carved to | 1 | 2 | 4 | 8 |
+|---:|---:|---:|---:|---:|
+| 128 MiB, slowest request of each run | 2.6 to 4.1 ms | 0.38 to 3.1 ms | 0.38 to 0.92 ms | 44 to 178 us |
+| 128 MiB, ns a request over all | 139 to 157 | 123 to 164 | 143 to 149 | 131 to 141 |
+| 384 MiB, slowest request of each run | 0.64 to 3.3 ms | 0.88 to 40 ms | 1.7 to 3.5 ms | 0.38 to 41 ms |
+| 384 MiB, ns a request over all | 111 to 127 | 116 to 244 | 123 to 153 | 129 to 249 |
+
+A class past 256 MiB meets a stall at any value. A class under it meets one only at the lower values, once
+for each huge page on the way, at most seven more a class in a process's life. With blocks free the same
+growth costs 111, 110, 115 and 129 ns a request at 384 MiB: 15% off a phase of growth, and nothing after it.
+
 ## The rules are bytes, on a kernel of any page
 
 **The cap and the floor act at 64 and 32 MiB on a kernel with 32 MiB huge pages, where stated in huge

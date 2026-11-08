@@ -315,8 +315,8 @@ requests; that is not built.
 So on an established heap a huge page buys little up to about 64 MiB, apart from 9 to 11% at 32 MiB,
 which this probe does not explain, and growth gains twice at any size past one huge page. A written-once build costs 18.7 to 19.4 cycles an object on small pages, 12.2
 on huge and 10.0 on resident memory. The rule starts at 256 MiB in a class, or at a block that grows
-past 32 MiB, which is where the gain is. This churn is a synthetic heap; the switch in one binary that
-`measuring.md` asks for needs the port.
+past 32 MiB, which is where the gain is. On real jobs, with the switch at run time in one binary, a lower
+start buys about 1% where it buys anything ([memory.md](memory.md), "The huge-page threshold").
 
 **How the worth falls with the page, while the stall and the unit grow:**
 

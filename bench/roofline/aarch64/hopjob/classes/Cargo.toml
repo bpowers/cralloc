@@ -1,0 +1,22 @@
+[package]
+name = "roofline-classes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Stands alone: not a member of any workspace above it.
+[workspace]
+
+[dependencies]
+bench-alloc = { path = "../../../../alloc" }
+
+[features]
+cralloc = ["bench-alloc/cralloc"]
+mi = ["bench-alloc/mi"]
+je = ["bench-alloc/je"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

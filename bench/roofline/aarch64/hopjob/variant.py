@@ -5,6 +5,8 @@ real jobs feel the store-to-load hop on the hot word: variant.py COPY VARIANT
   plain    the routines as they are
   relaxed  the bitmap words' operations relaxed, to size what their order costs a single thread;
            wrong with more than one
+  hugen    one binary whose huge-page switch is the environment's CRALLOC_HUGE_N, so that placement
+           cancels; each value is an allocator of the copy, by `env` in its allocators.toml
   huge1    a class's growth switches to huge pages after one, not eight: the same bytes as on x86-64,
            where a kernel's huge pages are 32 MiB
   nostretch a launder and a fill with no dense path, to compare with them over placements
@@ -32,7 +34,7 @@ copy, variant = sys.argv[1], sys.argv[2]
 crate = os.path.join(copy, "crates/cralloc/src")
 files = {name: os.path.join(crate, name) for name in
          ("front/generated/aarch64_inline/slab.rs", "front/real.rs", "lib.rs", "back/word.rs",
-          "back/class.rs", "back/policy.rs")}
+          "back/class.rs", "back/policy.rs", "back/region.rs", "environment.rs")}
 text = {}
 for name, path in files.items():
     if not os.path.exists(path + ".orig"):
@@ -252,6 +254,56 @@ elif variant == "area":
 elif variant == "relaxed":
     text["back/word.rs"] = text["back/word.rs"].replace("SeqCst", "Relaxed").replace("Release", "Relaxed")
     text["back/word.rs"] = text["back/word.rs"].replace("{Relaxed, Relaxed}", "Relaxed")
+elif variant == "hugen":
+    # One binary whose huge-page switch comes from CRALLOC_HUGE_N, read with the allocator's one
+    # environment setting, at the first slow path, before the first carve.
+    text["back/policy.rs"] += '''
+pub static HUGE_AFTER_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(HUGE_AFTER_HUGE_PAGES);
+
+pub fn huge_after_switched(region_huge_pages: usize) -> usize {
+    let quarter = region_huge_pages / 4;
+    let quarter = if quarter == 0 { 1 } else { quarter };
+    quarter.min(HUGE_AFTER_N.load(core::sync::atomic::Ordering::Relaxed))
+}
+'''
+    s = text["back/region.rs"]
+    s = sub(s, "let threshold = huge_after(region_huge_pages as usize) as u32 * layout.huge_pages();",
+            "let threshold = super::policy::huge_after_switched(region_huge_pages as usize) as u32 * layout.huge_pages();")
+    s = s.replace("    grown_huge, huge_after, wants_huge,", "    grown_huge, wants_huge,")
+    text["back/region.rs"] = s
+    s = text["environment.rs"]
+    s = sub(s, """fn read<O: Os>(os: &O) -> Choice {
+    let mut piece = [0u8; PIECE];
+""", """fn read<O: Os>(os: &O) -> Choice {
+    let mut piece = [0u8; PIECE];
+    {
+        const NAME_N: &[u8] = b\"CRALLOC_HUGE_N=\";
+        // At the start of an entry, how far the name has matched; past it, the number so far.
+        let (mut matched, mut other, mut value) = (0usize, false, 0usize);
+        os.environment(&mut piece, |bytes| {
+            for &byte in bytes {
+                if byte == 0 {
+                    if matched == NAME_N.len() {
+                        return false;
+                    }
+                    (matched, other) = (0, false);
+                } else if matched == NAME_N.len() {
+                    value = value * 10 + (byte - b'0') as usize;
+                } else if !other && NAME_N.get(matched) == Some(&byte) {
+                    matched += 1;
+                } else {
+                    other = true;
+                }
+            }
+            true
+        });
+        if value != 0 {
+            crate::back::policy::HUGE_AFTER_N.store(value, Relaxed);
+        }
+    }
+""")
+    text["environment.rs"] = s
 elif variant == "huge1":
     text["back/policy.rs"] = sub(text["back/policy.rs"], "pub const HUGE_AFTER_HUGE_PAGES: usize = 8;",
                                  "pub const HUGE_AFTER_HUGE_PAGES: usize = 1;")
