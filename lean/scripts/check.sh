@@ -16,8 +16,9 @@ cd "$(dirname "$0")/.."
 python3 scripts/check_lean_imports.py
 python3 scripts/check_registrations.py
 lake build --log-level=warning
-# Replays every module through the kernel: a declaration that skipped it
-# (`debug.skipKernelTC`) is rejected here.
+# Replays every module under `Cralloc` through the kernel: a declaration that skipped it
+# (`debug.skipKernelTC`) is rejected here. The emitter's audit refuses to load any other, but
+# Lean's own (`VG.foreignModules`), so this is every module it loads.
 lake env leanchecker Cralloc
 lake env lean --run Emit.lean --check "$@"
 # Each naked function's bytes and alignment, assembled (needs llvm-mc).
