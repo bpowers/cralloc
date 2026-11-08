@@ -546,6 +546,9 @@ structure Api where
   function under each symbol into a macro of the group's, which only a crate
   that invokes the macro expands (`Rust.exportsFile`). -/
   exports : List (String × String) := []
+  /-- Whether an inline function returns `bool`, that its result is not zero,
+  rather than the result (`Rust.inlineFunction`). -/
+  retNonzero : Bool := false
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -629,6 +632,8 @@ structure Artifact where
   rustConsts : List (String × IntTy × Nat) := []
   /-- `Api.exports`. -/
   exports : List (String × String) := []
+  /-- `Api.retNonzero`. -/
+  retNonzero : Bool := false
   /-- Instructions the function runs once on entry, before `code`, which a
   retry does not run again (see "Setup"). -/
   setup : List target.isa.Instr := []
