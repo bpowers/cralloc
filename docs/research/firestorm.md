@@ -426,6 +426,29 @@ load of the first, 2.4 to 3.5 a pass; with the load feeding the store, 6.67 at o
 
 ## Held, not built: keeping the slab's address in a scratch register
 
+**Decided, with Bobby, 2026-11-07: left out.** cralloc builds on stable Rust, and this needs nightly.
+The reasoning that led to it is written down because each step is worth repeating on a new core, and
+because the idea will occur again to anyone who looks at this pair.
+
+1. **Nothing in the instructions sets the cost.** Sixteen variations of the routines cost 12.8 to 13.1
+   a pair at 3.2 instructions a cycle, on a core that can do 8. When selection stops mattering and
+   the core is far from its width, a dependency chain is binding: here two hops of 6 cycles.
+2. **The core can do better, so the limit is not the hardware's.** A thread-local floor runs the same
+   store-then-load at 4.5 a pair. A difference that large between two shapes of one operation is
+   a rule to find, not a cost to accept.
+3. **The rule is about the register, not the address.** The hop is free when the load and the store
+   use one base register with an immediate offset, and nothing writes that register between them. The
+   address staying the same is not enough. Zen 5 does not care which register holds it
+   (`roofline.md`), so this could not be read across.
+4. **So a per-CPU routine pays for what almost never happens.** It writes its base on every call, only
+   because the thread might have moved, and it almost never has.
+5. **So compare, do not write.** Compute the address as before, and leave the register alone if it
+   already holds it. Since the compare makes the value safe whatever it is, the register needs no
+   reservation, only the habit of surviving between calls, which a probe can measure (below).
+
+Step 5 is the whole of the idea, and it may apply elsewhere: a cost that comes from writing a value
+can sometimes be removed by testing that the value is already there.
+
 A routine computes the CPU's slab's address as before, but compares it with what a scratch register
 still holds and loads through that register, which is then not written. Memory safety rests on the
 compare, since the register can hold anything. A CPU number masked by `ubfiz` needs no branch of its
@@ -456,7 +479,11 @@ stable Rust, since `const` operands need a Rust constant and a `match` over the 
 table at run-time sites, so it takes the unstable `is_val_statically_known`. And Neoverse V2 has no
 reported renaming, where it would be three instructions for nothing. A clobbered register sends the
 call through `fix`: 13.05 when that is steady, and 14.13 when it clobbers at random on half the pairs
-(0.46 mispredicts).
+(0.46 mispredicts). It would also be a second proved form of the routines.
+
+**When to look again.** Only if a value known after inlining can reach `asm!` as an immediate on stable
+Rust, and programs shaped like the tree turn out to matter. Measure first whether the cores we care
+about rename at all: `bench/roofline/aarch64` shows it. A rejected form that needs no immediate is below.
 
 **How long a register survives.** A preloaded probe (`bench/roofline/aarch64/stale`) left a sentinel
 in four registers as each `malloc` or `free` returned and checked them at the next call. Percent of
