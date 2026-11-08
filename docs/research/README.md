@@ -200,7 +200,7 @@ Each note ends with its own open questions.
 | Note | The question it answers |
 |---|---|
 | [roofline.md](roofline.md) | What gates the fast path? |
-| [firestorm.md](firestorm.md) | What gates the fast path on Apple Firestorm, and which of it should carry to other aarch64 cores? |
+| [firestorm.md](firestorm.md) | What gates the fast path on Apple Firestorm, does a real job feel it, how do the incumbents compare there, and which of it should carry to other aarch64 cores? |
 | [hardware.md](hardware.md) | What does the hardware and kernel charge, and which of it is Zen 5's? |
 | [machine-aarch64.md](machine-aarch64.md) | What do an aarch64 machine's topology, caches and kernel charge, and which of the allocator's constants follow from them? |
 | [program-effects.md](program-effects.md) | How does the allocator change the program's performance? |

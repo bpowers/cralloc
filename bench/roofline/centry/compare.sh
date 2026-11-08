@@ -22,7 +22,8 @@ base=${BASELINES:-$(dirname "$common")/bench/baselines/out}
 forms=("$@")
 [ ${#forms[@]} -gt 0 ] || forms=(pair:32 burst:8:32 burst:32:32 mixed:1:512)
 rounds=${RF_ROUNDS:-3}
-builds=(${RF_BUILDS:-plt ibt noplt static})
+if [ "$(uname -m)" = aarch64 ]; then default_builds="plt noplt static"; else default_builds="plt ibt noplt static"; fi
+builds=(${RF_BUILDS:-$default_builds})
 # The loops: cloop (C), or cxxloop (C++ new and delete; plt and noplt builds only).
 prog=${RF_PROG:-cloop}
 repo=$(git -C "$here" rev-parse --show-toplevel)
@@ -42,7 +43,8 @@ declare -A lib=(
   [tcmalloc]="$base/tcmalloc/libtcmalloc.so"
   [tcmalloc-percpu]="$base/tcmalloc/libtcmalloc.so"
 )
-order=(${RF_ALLOCS:-glibc cralloc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu})
+if [ "$(uname -m)" = aarch64 ]; then default_allocs="glibc cralloc jemalloc mimalloc tcmalloc tcmalloc-percpu"; else default_allocs="glibc cralloc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu"; fi
+order=(${RF_ALLOCS:-$default_allocs})
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
