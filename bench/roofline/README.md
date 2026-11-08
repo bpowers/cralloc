@@ -88,9 +88,11 @@ RF_CPU=8 ../../../scripts/measure ./compare.sh pair:32 burst:32:32 mixed:1:512 c
 Whether real jobs feel the hop, `aarch64/hopjob/`. `variant.py` rewrites the inlined routines:
 `chainK` puts K more cycles on the hop and nothing else, `freeK` puts the same instructions off every
 chain, so that the two are one placement and their difference is what the hop alone costs, `kept`
-keeps the slab's address in `x18` at the sites whose class the compiler knows, and `area` reads the
-rseq area in a block the compiler may hoist. All of it happens in a scratch copy of the repository
-(COPY, outside any checkout), so the checkout stays as it is:
+keeps the slab's address in `x18` at the sites whose class the compiler knows, `area` reads the rseq
+area in a block the compiler may hoist, `relaxed` sizes what the bitmap words' order costs one thread,
+and `nostretch` takes away the dense launder and fill. All of it happens in a scratch copy of the
+repository, so the checkout stays as it is. COPY belongs on a disk, such as `target/hop` of the
+checkout: `/tmp` here is memory, and each build is a gigabyte:
 
 ```
 cd aarch64/hopjob
@@ -102,10 +104,9 @@ cd aarch64/hopjob
 ./analyze.py OUT.jsonl --calls 'tree depth=20=2,json 32Mi=0.224'    # calls per unit of the metric
 ```
 
-`stale/probe.so` counts allocator calls for `--calls`. The direct read of `__rseq_offset`, which GNU
-ld refuses in a position-independent executable, stays under the configuration `cralloc_a64_direct`
-for a link by `rust-lld`, to compare on jobs; `build.sh COPY lld direct` makes both forms under that
-linker.
+`stale/probe.so` counts allocator calls for `--calls`. `count.py COPY` adds counters to a copy, for what
+a job asks of the slow paths: each class's exchanges, its laundered objects and how they lie, its
+fills.
 
 ## kernels
 
