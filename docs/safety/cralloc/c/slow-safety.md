@@ -6,11 +6,12 @@ Shared facts used below and in `mod-safety.md` and `routines-safety.md`.
 
 - F1 (the address table). `process::find(p)` returns `Some(Found::Small(class))` only when the
   heap has started, `p` lies in the heap's object regions, the region table tags `p`'s region
-  with the small class `class`, and `p` is the start of a slot of that region
-  (`Back::lookup`: `Space::locate`, `RegionTable::get`, `Plan::slot_at`). A region holds slots
-  of exactly the class it is tagged with, and a tag never changes while the region holds a
-  handed-out slot (`back/class.rs`: a region is tagged before its first slot is carved, and
-  only an untouched region is ever untagged).
+  with the small class `class`, and `p` is the start of a slot of that region, past the class's
+  origin (`Back::lookup`: `Space::locate`, `Tags::at`, `Layout::block_at`, which for a small
+  class is `Plan::slot_at`'s arithmetic). A region holds slots of exactly the class it is tagged
+  with, and a tag never changes while the region holds a handed-out slot (`Back::assign`: a
+  region is tagged before its first slot is carved, and only the loser of the race to name it,
+  which has carved nothing there, gives the tag back).
 - F2 (where blocks live). Every block the heap hands out, through any interface, is either a
   slot in a region of its class or a run. A small block (from the Rust layout, from a C size,
   from the back end directly when a thread has no CPU) is a slot of a small class in a region
@@ -33,7 +34,8 @@ prefix), so all `class.size()` bytes are writable.
 ## SLOW-02: the zeroing stores in `zero_block`, `zero_small` and `zero16`
 
 `block.write_bytes(0, len)`, and for a length up to 32 bytes (`SMALL_ZERO`), `zero_small`'s volatile stores:
-one 8-byte store for a length of 8, else one 16-byte store at each multiple of 16 below `len`.
+one 8-byte store for a length of 8, else one 16-byte store at each multiple of 16 below `len`, of
+an `__m128i` on x86-64 and a `u128` on aarch64, both aligned to 16.
 
 **Preconditions.** `block` is valid for writes of `len` bytes and nothing else accesses them
 during the write; for `zero_small`'s stores, `len` is 8, or a multiple of 16 with `block`
@@ -42,14 +44,13 @@ aligned to 16 (each store is aligned and inside the `len` bytes).
 **Proof.** `len` is `table::C_CALLOC_LENS[total]`, the size of `table::calloc_class(total)`
 (the table's tests check every entry), when the table covers `total`, else `total`. C classes
 are 8 bytes or a multiple of 16 (the malloc table's test checks the 16-byte rule for every small
-size), and a slot of a class of 16 bytes or more is aligned to 16: slots are carved at multiples
-of the class size from a region start, which is page-aligned. `zero_block`'s contract is that
-`block` is a slot of that class (so exactly `len` bytes of committed memory, SLOW-01), or, beyond
-the table, a block of at least `total` bytes, and that the caller owns it; a block the caller
-owns is one no other code accesses. Its one caller is `calloc_zero_tail` (SLOW-04).
-
-`free_sized_slow` and `free_aligned_sized_slow` each call `free_slow(ptr)` with their own
-contract, which is `free_slow`'s (the size and alignment are not used).
+size), and a slot of a class is aligned to the largest power of two that divides its size: slots
+lie at multiples of the class size from the class's origin, a multiple of that power of two
+(`Plan::slot_origin`), in a region aligned to its size. So a slot of a class of 8 bytes is aligned
+to 8 and one of 16 or 32 to 16. `zero_block`'s contract is that `block` is a slot of that class
+(so exactly `len` bytes of committed memory, SLOW-01), or, beyond the table, a block of at least
+`total` bytes, and that the caller owns it; a block the caller owns is one no other code accesses.
+Its one caller is `calloc_zero_tail` (SLOW-04).
 
 ## SLOW-04: `zero_block(block, n.wrapping_mul(size))` in `calloc_zero_tail`
 
@@ -59,14 +60,14 @@ caller owns.
 **Proof.** `calloc_zero_tail`'s contract gives that the product does not overflow, so the
 wrapping product is the total, at most the calloc table's end, and that `block` is a slot of its
 class, owned. Its one caller is the generated `c_calloc`, which jumps here only after a pop that
-committed (`Spec.CEntry.callocContract`, proved in Lean): the product did not overflow and was
-at most `CALLOC_MAX` (1024, `table::CALLOC_TABLE_MAX` by a compile-time assertion), and the block
-popped is from the magazine of the class `C_CALLOC_SIZES[total]` gives, which is
+committed (`VG.Spec.CEntry.callocContract`, proved in Lean): the product did not overflow and was
+at most `CALLOC_MAX` (1024, which is `table::CALLOC_TABLE_MAX`, from what the Lean emitter wrote
+in `crate::spec`), and the block popped is from the magazine of the class `C_CALLOC_SIZES[total]` gives, which is
 `C_CALLOC_CLASSES`, the class of `Class::of_c` of the total (`table.rs`'s tests check every
 entry). A popped block is a free block of that class that the pop handed to this call alone
-(`routines-safety.md`). The routine passes `n` and `size` as they arrived and the block in
-`rdx`, the third argument's register, and its tail call leaves the stack as the caller of
-`calloc` left it, so the arguments arrive as the signature says.
+(`routines-safety.md`). The routine passes `n` and `size` as they arrived and the block in the
+third argument's register (`rdx` on x86-64, `x2` on aarch64), and its tail call leaves the stack
+as the caller of `calloc` left it, so the arguments arrive as the signature says.
 
 ## SLOW-03: `heap::c_free_small(class, object)` in `free_slow`
 
@@ -82,8 +83,9 @@ of `class`. The caller owns it and gives it up, by the contract. The sized frees
 `process::free_large(object)` in the `Large` arm asks that `object` be a large block of the heap
 that the caller owns and gives up: `find` returned `Large`, so a large slot or a run starts at
 `object`, and the contract makes it a block the caller gives up. The back end finds the class or
-run from the address and aborts if the slot is not handed out (`Back::free_by_address`,
-`Back::launder`'s validation). `None` aborts.
+run from the address and aborts if no slot or run starts there or the slot lies at or above the
+watermark (`Back::free_by_address`, `Back::slot_in`). `None` aborts. A null pointer returns at
+once: the sized free's routine has no test for null, and sends it here (`routines-safety.md`).
 
 A pointer that breaks the contract is outside what the proof covers. Two kinds still fail
 safely: one outside the heap, interior to a slot, in an untagged region, or before the heap
@@ -99,4 +101,4 @@ declared safe. They pass `ptr` unchanged and nothing else: the size and alignmen
 unused parameters and reach no computation, so whatever they are cannot affect what
 `free_slow` does. `ptr` carries the caller's promise, which is `free_slow`'s word for word.
 
-Reviewed: a09c36e
+Reviewed: 5a8ade1

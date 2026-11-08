@@ -62,8 +62,8 @@ impl Cralloc {
     }
 
     /// The bytes the block starting at `ptr` may use: the class size of a small block; for a
-    /// large one, the size last asked for rounded up to a page, not the whole slot or run.
-    /// `None` if no slot or run of the heap starts at `ptr`.
+    /// large one, the size last asked for carried to the end of the page it ends in, not the
+    /// whole slot or run. `None` if no slot or run of the heap starts at `ptr`.
     pub fn usable_size(ptr: *const u8) -> Option<usize> {
         HEAP.usable_size(ptr)
     }

@@ -26,9 +26,9 @@
 //! zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that size rounded
-//! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
-//! been asked for.
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that
+//! size carried to the end of the page it ends in, so a block with headroom never reports, or
+//! makes anyone touch, the room it has not been asked for.
 
 use super::{Bound, Grant, Heap, Zero, small};
 use crate::back::Move;
@@ -269,8 +269,9 @@ impl<O: Os> Heap<O> {
         }
     }
 
-    /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small
-    /// layout, else its whole slot or run. Aborts if no large block starts there.
+    /// The bytes the block at `ptr`, described by `layout`, may reach without moving: its class
+    /// for a small layout, else from where it starts to its slot's or run's end (`Back::room`).
+    /// Aborts if no large block starts there.
     fn block_len(&self, ptr: NonNull<u8>, layout: Layout) -> usize {
         if let Some(class) = small(layout) {
             return class.size();

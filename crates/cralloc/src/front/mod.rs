@@ -104,7 +104,8 @@ const PUBLISHED_PAGE_OFFSET: usize = 1024;
 
 const REGION_PAGE_OFFSET: usize = 2048;
 
-/// The number of entries of the region table the C frees read: one per region.
+/// The number of entries of the region table the C frees read: one for each region, and entry 0,
+/// which is no region's (`c::mirror`).
 pub(crate) const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 
 /// The slabs, one per CPU number, and after them what the C entry points read at fixed distances
@@ -126,8 +127,8 @@ pub(crate) const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 pub struct Front {
     slabs: Slabs<[Slab; SLAB_COUNT]>,
     _gap0: [u8; PUBLISHED_PAGE_OFFSET],
-    /// The C frees' mirror of the heap's region shift (in the low 32 bits) and its base address
-    /// shifted right by it.
+    /// The C frees' mirror of the heap's region shift (in the low 32 bits) and its base index: its
+    /// base address shifted right by it, less one (`c::mirror`).
     published: [AtomicU64; 2],
     _gap1: [u8; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
     masks: [AtomicU64; MASK_COUNT],
@@ -170,8 +171,8 @@ impl Front {
             .addr()
     }
 
-    /// The heap words the C frees read: the region shift and the base's region index,
-    /// `(shift, base >> shift)`, both zero until published.
+    /// The heap words the C frees read: the region shift and the base index, both zero until
+    /// published (`c::mirror`).
     #[cfg_attr(any(miri, kani), allow(dead_code))]
     pub(crate) fn published(&self) -> (&AtomicU64, &AtomicU64) {
         (&self.published[0], &self.published[1])
@@ -202,8 +203,6 @@ const _: () = {
     use crate::spec;
     assert!(MASK_DISP == spec::MASK_DISP);
     assert!(SHIFT_DISP == spec::SHIFT_DISP && BASE_DISP == spec::BASE_DISP);
-    // On aarch64 a routine forms `SLABS` from its page alone.
-    assert!(align_of::<Front>() >= 4096);
     // On aarch64 a routine forms `SLABS` from its page alone.
     assert!(align_of::<Front>() >= 4096);
     // The routines were proved for one mirror, C's, at `SHIFT_DISP`.

@@ -68,9 +68,10 @@ pub trait Source {
     /// The background thread's word (`crate::thread_word`).
     fn thread(&self) -> &crate::thread_word::ThreadWord;
 
-    /// In the child of a fork, at its first slow path: state that a thread the fork cut off
-    /// may have left half-changed is to be distrusted (the back end's huge-page tails,
-    /// `back::tail`, "Repair"), or finished (a region named and not published, `back::tags`).
+    /// In the child of a fork, at the call that draws its generation: state that a thread the
+    /// fork cut off may have left half-changed is to be distrusted (the back end's huge-page
+    /// tails, `back::tail`, "Repair"), or finished (a region named and not published,
+    /// `back::tags`).
     fn forked(&self) {}
 
     /// How many times the depot halves its refresh interval (`slow.rs`, "Refresh"): how far

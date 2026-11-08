@@ -178,9 +178,9 @@ impl<O: Os> Heap<O> {
     }
 
     /// The bytes the caller may use of the block starting at `ptr`: the class size of a small
-    /// one; for a large one, the size last asked for rounded up to a page, never the whole slot
-    /// or run, which may be far bigger (`Back::usable_size`). `None` if no slot or run starts
-    /// there.
+    /// one; for a large one, the size last asked for carried to the end of the page it ends in,
+    /// never the whole slot or run, which may be far bigger (`Back::usable_size`). `None` if no
+    /// slot or run starts there.
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         self.back()?.usable_size(ptr)
     }
