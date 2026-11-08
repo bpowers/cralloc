@@ -125,6 +125,16 @@ impl Geometry {
         }
     }
 
+    /// This shape with blocks that stagger by pages as a real kernel's do, for a test's heap that
+    /// keeps its own units.
+    #[cfg(test)]
+    pub const fn with_page_stagger(self) -> Geometry {
+        Geometry {
+            staggers_pages: true,
+            ..self
+        }
+    }
+
     /// A geometry with pages of `2^page_shift` bytes, huge pages of `2^huge_page_shift`, regions
     /// of `2^max_region_shift` down to `2^min_region_shift`, at most `max_regions` regions in
     /// all, `magazine_regions` of them for magazines, and magazines of at most `max_magazine`.
