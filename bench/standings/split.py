@@ -5,9 +5,9 @@ For each job on which the base costs more than the other (by default each job's 
 over the job's measured work (the workload's phases, a server's window, or else the whole process),
 medians over valid runs: the ratios of cycles, user cycles and instructions, and how much of the gap
 in cycles instructions explain, log(instruction ratio) / log(cycle ratio) as in
-docs/research/measuring.md, "The IPC split of a gap". The rest is stalls, or kernel cycles where user
-cycles are level. Faults are per run. An instruction count is the whole work's, so a stall can hide
-behind fast added code."""
+docs/research/measuring.md, "The IPC split of a gap", and how much of it is kernel cycles. Instructions
+count the kernel's too, so where the kernel's share is large the split speaks of the kernel's work as
+well as the allocator's. Faults are per run. A stall can hide behind fast added code."""
 import argparse
 import collections
 import json
@@ -47,7 +47,7 @@ def main():
         p = r["primary"]
         return p["value"] if p.get("better", "lower") == "lower" else 1 / p["value"]
 
-    print(f"{'ratio':>6} {'job':46} {'other':16} {'cycles':>7} {'user':>7} {'instr':>7} {'share':>6} {'faults':>16}")
+    print(f"{'ratio':>6} {'job':46} {'other':16} {'cycles':>7} {'user':>7} {'instr':>7} {'share':>6} {'kernel':>7} {'faults':>16}")
     rows = []
     for job, per in runs.items():
         if a.base not in per:
@@ -67,8 +67,11 @@ def main():
         cy, ins = over("cycles"), over("instructions")
         share = math.log(ins) / math.log(cy) if cy > 0 and cy != 1 and ins > 0 else float("nan")
         faults = f"{c['page_faults'][0] or 0:.0f}/{c['page_faults'][1] or 0:.0f}"
+        kernel = float("nan")
+        if c["cycles_user"][0] and c["cycles_user"][1] and c["cycles"][0] != c["cycles"][1]:
+            kernel = ((c["cycles"][0] - c["cycles_user"][0]) - (c["cycles"][1] - c["cycles_user"][1])) / (c["cycles"][0] - c["cycles"][1])
         print(
-            f"{ratio:6.3f} {job:46} {other:16} {cy:7.3f} {over('cycles_user'):7.3f} {ins:7.3f} {share:6.2f} {faults:>16}"
+            f"{ratio:6.3f} {job:46} {other:16} {cy:7.3f} {over('cycles_user'):7.3f} {ins:7.3f} {share:6.2f} {kernel:7.2f} {faults:>16}"
         )
 
 
