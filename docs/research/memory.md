@@ -606,6 +606,44 @@ to 0.4 ms of synchronous work per 2 MiB in a slow path, and adds nothing at a lo
 Populate-ahead: faults cut three to five times, kernel time by at most a tenth, about 1 MiB at every
 peak.
 
+## The rules are bytes, on a kernel of any page
+
+**The cap and the floor act at 64 and 32 MiB on a kernel with 32 MiB huge pages, where stated in huge
+pages they read 1 GiB and 512 MiB and never acted.** One thread, Linux 7.2 with 16 KiB pages:
+
+| | Stated in huge pages | In bytes |
+|---|---:|---:|
+| 512 MiB freed, 512 MiB of another class grown: retained at the end, MiB | 512.6 | 64.0 |
+| The same: resident at the end, MiB | 1,059.5 | 582.5 |
+| 256 MiB freed, then 15 s of `maintain`: retained at the end, MiB | 256.6 | 31.9 |
+| The same: resident at the end, MiB | 259.6 | 34.9 |
+
+*2026-11-07, `09c0e19` against `335f834`, `rules cap`, `rules floor` in `bench/roofline/rules`, one
+run each.* Retained memory falls by what is carved, 32 MiB for each 32 MiB, and stops at 64.0.
+
+**A class past 256 MiB still gets 32 MiB huge pages, and only a class of at most 1 KiB does.** Stated
+as slots to a page, the rule took classes up to 4 KiB in on 16 KiB pages, which it does not mean:
+carved to 771 MiB, a class of 1 KiB has its huge-page part from 256 MiB and 544 MiB mapped by huge
+pages; a class of 4 KiB had the same and now has none. The rule's own threshold stays eight huge
+pages, since what it bounds is a share of the class.
+
+**A split of 32 MiB is the background thread's or `collect`'s.** A heap with 416 MiB under huge
+pages, one live block of 1 KiB left in each 48 pages' worth, then 10 s of requests:
+
+| | `MADV_COLD` by a request | By the background thread | By `collect` | Resident after the requests, MiB |
+|---|---:|---:|---:|---:|
+| One thread | 0 | | 8,274 | 536 |
+| With the background thread | 0 | 8,275 | 0 | 281 |
+
+*Same commit and date, `strace -f` over `rules split`.* So a program with one thread keeps such a
+heap's sparse huge pages whole until it calls `collect`, and growth over the cap cannot pay with
+them. That is the price of the bound on a slow path: 1.0 to 1.8 ms a split, by
+[machine-aarch64.md](machine-aarch64.md).
+
+**A bound on the kernel's work stays in pages.** A step of the walk returns 128 pages and a look at
+the hold 512 on every kernel, 2 MiB and 8 MiB on 16 KiB pages, since the kernel's cost is per page: 42
+us here for 512, 41 to 49 on Zen 5.
+
 ## Which rules earn their place
 
 Each rule switched off in a build of its own; the figures are the rule off against cralloc as built.

@@ -10,9 +10,10 @@ exclusives.
     aob = rmw | rmw;lmrs;[A|Q]
     bob = po;[dmb.full];po | [R];po;[dmb.ld];po | [W];po;[dmb.st];po;[W]
         | [range(A;amo;L)];po | [L];po;[A] | [A|Q];po | po;[L]
-    ifb = [R];ctrl;[IFB];po        (ISB, or an exception return with SCTLR.EOS)
-    ob  = (obs | dob | aob | bob | ifb)+,  irreflexive
+    ob  = (obs | dob | aob | bob)+,  irreflexive
     internal: coherence per location (po-loc | rf | co | fr acyclic), and an RMW's atomicity.
+
+The model's IFB-ob, for ISB and an exception's return, is left out: no test here uses it.
 
 A test lists threads of instructions and asks whether a bad outcome is allowed, by listing every
 candidate execution. The first group are litmus tests whose answers are published, there to catch a
@@ -129,7 +130,7 @@ def run(name, threads, ask, expect):
     locs = sorted({e.loc for e in events if e.loc})
     initial = {l: E(-1, 0, "W", l, 0) for l in locs}
     by_loc = {l: [w for w in writes if w.loc == l] for l in locs}
-    fences = [e for e in events if e.kind in ("dmb", "dmb.ld", "dmb.st", "isb", "eret")]
+    fences = [e for e in events if e.kind in ("dmb", "dmb.ld", "dmb.st")]
     allowed = set()
 
     for orders in itertools.product(*[list(itertools.permutations(by_loc[l])) for l in locs]):
@@ -172,8 +173,6 @@ def run(name, threads, ask, expect):
                             elif f.kind == "dmb.ld" and is_r(a):
                                 bob.add((a, b))
                             elif f.kind == "dmb.st" and is_w(a) and is_w(b):
-                                bob.add((a, b))
-                            elif f.kind in ("isb", "eret") and (a, f) in ctrl:
                                 bob.add((a, b))
             for a, b in po:
                 if not (is_m(a) and is_m(b)):
@@ -305,6 +304,45 @@ def ours():
         [[RMW("mark", 1, "a"), R("mark", "m", "Q"), W("word", 1, ctrl=["m"])],
          [R("word", "r"), R("mark", "s", "Q")]],
         lambda o: o["1:r"] == 1 and o["1:s"] == 0, ALLOWED)
+    # The second look before a refusal: a plain read of the word, a full fence, the mark again.
+    run("slab word: plain ldr of the word, dmb, ldapr of the mark",
+        [[RMW("mark", 1, "a"), R("mark", "m", "Q"), W("word", 1, ctrl=["m"])],
+         [R("word", "r"), F("dmb"), R("mark", "s", "Q")]],
+        lambda o: o["1:r"] == 1 and o["1:s"] == 0, FORBIDDEN)
+    # The depot stack: a push's plain slot and release of the head, a pop's acquire of the head and
+    # read of the link, and a read of what the pusher wrote through pops between.
+    run("stack: push casal, pop casal, a third acquires the head: the slot is there",
+        [[W("slot", 1), RMW("head", 1, "a", "AL")],
+         [R("head", "h", "Q"), RMW("head", 2, "b", "AL")],
+         [R("head", "c", "Q"), R("slot", "s")]],
+        lambda o: o["1:h"] == 1 and o["1:b"] == 1 and o["2:c"] == 2 and o["2:s"] == 0, FORBIDDEN)
+    run("stack: as above, the pop between relaxed: Arm's aob still orders it",
+        [[W("slot", 1), RMW("head", 1, "a", "AL")],
+         [RMW("head", 2, "b", "")],
+         [R("head", "c", "Q"), R("slot", "s")]],
+        lambda o: o["1:b"] == 1 and o["2:c"] == 2 and o["2:s"] == 0, FORBIDDEN)
+    run("stack: a push with no release",
+        [[W("slot", 1), RMW("head", 1, "a", "A")],
+         [R("head", "c", "Q"), R("slot", "s")]],
+        lambda o: o["1:c"] == 1 and o["1:s"] == 0, ALLOWED)
+    run("stack: a pop's first read of the head acquires: its link is the pusher's",
+        [[W("link", 1), RMW("head", 1, "a", "L")],
+         [R("head", "h", "Q"), R("link", "l"), RMW("head", 2, "b", "A")]],
+        lambda o: o["1:h"] == 1 and o["1:l"] == 0, FORBIDDEN)
+    run("stack: that read relaxed: a stale link, and a compare-and-swap that succeeds",
+        [[W("link", 1), RMW("head", 1, "a", "L")],
+         [R("head", "h"), R("link", "l"), RMW("head", 2, "b", "A")]],
+        lambda o: o["1:h"] == 1 and o["1:l"] == 0 and o["1:b"] == 1, ALLOWED)
+    run("stack: a link read after a failed compare-and-swap's acquire",
+        [[W("link", 1), RMW("head", 1, "a", "L")],
+         [RMW("head", 9, "f", "A"), R("link", "l")]],
+        lambda o: o["1:f"] == 1 and o["1:l"] == 0, FORBIDDEN)
+    # What a context switch stands in for: a thread's plain stores, the kernel's barrier, the next
+    # thread on that CPU, whose push releases, then a pop elsewhere.
+    run("chain: plain stores, context switch, next thread's release, pop elsewhere",
+        [[W("bytes", 1), W("slot", 1), F("dmb"), W("mag", 1, "L")],
+         [R("mag", "m", "Q"), R("bytes", "b"), R("slot", "s")]],
+        lambda o: o["1:m"] == 1 and (o["1:b"] == 0 or o["1:s"] == 0), FORBIDDEN)
     # A pointer passed by a relaxed store: the thread that frees it reads what the address says.
     run("relaxed hand-off: tag CAS, ldar, str g against ldr g, addr ldapr tag",
         [[RMW("tag", 1, "a"), R("other", "o", "A"), W("g", 1)],
@@ -336,6 +374,37 @@ def ours():
         [[W("curr", 1), F("dmb"), R("word", "r")],
          [RMW("word", 2, "old"), F("dmb"), R("curr", "r")]],
         both_zero, FORBIDDEN)
+    # Each barrier those rest on, left out, and the outcome comes back.
+    park = lambda o: o["0:r"] == 0 and o["1:r"] == 0 and o["0:i"] == 1 and o["1:k"] == 1
+    run("park, control: no barrier in the slow path",
+        [[R("ipi", "i"), W("slab", 1), R("word", "r", "A"), W("ack", 1)],
+         [RMW("word", 1, "a"), F("dmb"), W("ipi", 1), F("dmb"), R("ack", "k"), F("dmb"),
+          R("slab", "r")]],
+        park, ALLOWED)
+    run("park, control: no barriers in the parker",
+        [[R("ipi", "i"), F("dmb"), W("ack", 1), W("slab", 1), R("word", "r", "A")],
+         [RMW("word", 1, "a", "L"), W("ipi", 1), R("ack", "k"), R("slab", "r")]],
+        park, ALLOWED)
+    run("fence, thread gone, control: no scheduler barrier",
+        [[W("slot", 1), W("word", 1), W("curr", 1)],
+         [RMW("word", 2, "old"), F("dmb"), R("curr", "c"), F("dmb"), R("slot", "s")]],
+        lambda o: o["1:old"] == 1 and o["1:c"] == 1 and o["1:s"] == 0, ALLOWED)
+    run("fence, thread gone, control: no barrier after the caller's read of rq->curr",
+        [[W("slot", 1), W("word", 1), F("dmb"), W("curr", 1)],
+         [RMW("word", 2, "old"), F("dmb"), R("curr", "c"), R("slot", "s")]],
+        lambda o: o["1:old"] == 1 and o["1:c"] == 1 and o["1:s"] == 0, ALLOWED)
+    run("fence, thread returning, control: no dsb after the store of rq->curr",
+        [[W("curr", 1), R("word", "r")],
+         [RMW("word", 2, "old"), F("dmb"), R("curr", "r")]],
+        both_zero, ALLOWED)
+    run("sleep, control: ldapr in place of ldar",
+        [[RMW("decay", 1, "a", "L"), W("pass", 1, "L"), R("thread", "r", "Q")],
+         [RMW("thread", 1, "a"), R("decay", "r", "A")]],
+        both_zero, ALLOWED)
+    run("drain, control: the handshake not acquired, and a plain exchange",
+        [[W("slot", 1), W("word", 1), F("dmb"), W("ack", 1)],
+         [RMW("word", 2, "old", ""), R("ack", "k"), R("slot", "s")]],
+        lambda o: o["1:old"] == 1 and o["1:k"] == 1 and o["1:s"] == 0, ALLOWED)
     # The shortcut: an exited thread's stores, its full-barrier decrement, the caller's read of the
     # count, and then its load.
     run("shortcut: decrement, then ldr of the count, then a load, no barrier",

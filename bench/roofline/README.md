@@ -21,6 +21,7 @@ L3; override with the environment variables below.
 | `rust-alloc/` | Allocation workloads through Rust's global allocator for glibc, mimalloc, jemalloc and two floor allocators, single-threaded and cross-thread. | `./run.sh [workload-prefix]` |
 | `fastpath/` | A check that fails if cralloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing; and (`faults`) demand faults against populate stretches and huge pages, one to four threads, huge-page advice around a slot, partial purges of huge pages, khugepaged on sparse memory. | `cargo run --release`, `target/release/faults single\|threads\|advice\|split\|khuge` |
+| `rules/` | What the heap's rules do on the kernel it runs on, through the real allocator: where the retained cap and the floor act, whether a class gets huge pages, who splits them, what a stagger does for buffers written in turn, and what a first touch under huge-page advice costs when free blocks of that size run short. | `target/release/roofline-rules cap\|floor\|huge\|split\|stagger\|fault` |
 | `machine/` | What an aarch64 machine charges an allocator, on a kernel of any page size: the coherence unit, moving a line, caches' sets and ways, TLB reach and sets, prefetchers, stagger, class origins, the kernel's calls, huge pages' worth, the clock and idle. | `./run.sh OUT`; see below |
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `chain/` | The slab word's store-to-load chain against code placement: the generated inline free and allocation, the tree job's drop, and `c_free`/`c_malloc`, each placed at every offset in a 64-byte line and across 4 KiB, read from the generated files; and mimalloc's free and malloc moved the same way. | `cargo run --release -- FORMS [PLACES]`; see below |
@@ -87,9 +88,11 @@ RF_CPU=8 ../../../scripts/measure ./compare.sh pair:32 burst:32:32 mixed:1:512 c
 Whether real jobs feel the hop, `aarch64/hopjob/`. `variant.py` rewrites the inlined routines:
 `chainK` puts K more cycles on the hop and nothing else, `freeK` puts the same instructions off every
 chain, so that the two are one placement and their difference is what the hop alone costs, `kept`
-keeps the slab's address in `x18` at the sites whose class the compiler knows, and `area` reads the
-rseq area in a block the compiler may hoist. All of it happens in a scratch copy of the repository
-(COPY, outside any checkout), so the checkout stays as it is:
+keeps the slab's address in `x18` at the sites whose class the compiler knows, `area` reads the rseq
+area in a block the compiler may hoist, `relaxed` sizes what the bitmap words' order costs one thread,
+and `nostretch` takes away the dense launder and fill. All of it happens in a scratch copy of the
+repository, so the checkout stays as it is. COPY belongs on a disk, such as `target/hop` of the
+checkout: `/tmp` here is memory, and each build is a gigabyte:
 
 ```
 cd aarch64/hopjob
@@ -101,10 +104,9 @@ cd aarch64/hopjob
 ./analyze.py OUT.jsonl --calls 'tree depth=20=2,json 32Mi=0.224'    # calls per unit of the metric
 ```
 
-`stale/probe.so` counts allocator calls for `--calls`. The direct read of `__rseq_offset`, which GNU
-ld refuses in a position-independent executable, stays under the configuration `cralloc_a64_direct`
-for a link by `rust-lld`, to compare on jobs; `build.sh COPY lld direct` makes both forms under that
-linker.
+`stale/probe.so` counts allocator calls for `--calls`. `count.py COPY` adds counters to a copy, for what
+a job asks of the slow paths: each class's exchanges, its laundered objects and how they lie, its
+fills.
 
 ## kernels
 

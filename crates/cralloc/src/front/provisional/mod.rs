@@ -32,7 +32,6 @@
 //!   branch to a stub, and a preemption in a stub out of the sequence's range does not abort it.
 //! - The `executable` feature changes nothing: GNU ld will not copy a C library's variable into a
 //!   position-independent executable for `adrp` to reach, so every routine reads through a word.
-//!   The configuration `cralloc_a64_direct`, for a link by `rust-lld`, compares the direct read.
 //! - The return register is the first argument's, so a routine that returns a value and restarts
 //!   with its arguments moves the value there after the sequence.
 //!

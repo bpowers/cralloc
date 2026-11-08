@@ -21,6 +21,7 @@ trusted").
 | `cpu_id` is negative with no registration | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; seen under valgrind. Refusal by seccomp under glibc is from source |
 | `membarrier` on every CPU returns only after every sequence in flight has completed or been aborted | 7.2.9 | `rseq_drain.rs` |
 | The same, aimed at one CPU, which is what the drain uses | tag v7.2 | No probe isolates it: a test that it returns success, and soak modes that drain |
+| Either form is also a full barrier between the caller and those CPUs, which `membarrier(2)` does not promise of it ([memory-ordering.md](memory-ordering.md)) | tag v7.2 | `kernel_fence` in `depot/ordering.rs` |
 | glibc registers a thread's area before the thread can call the allocator | glibc 2.43 | `rseq_lifecycle.rs`; `rseq_preload.rs`. In a static program an IFUNC resolver runs before the thread pointer exists (not tested) |
 | A forked child is safe. A `vfork` or `CLONE_VM` child is not, and glibc never allocates in one | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; `cid_stress.rs`; `rseq_preload.rs` |
 

@@ -219,6 +219,10 @@ def atomics(k):
         "stlr": ("  stlr x7, [x6]", "stlr"),
         "str": ("  str x7, [x6]", "plain str"),
         "dmb": ("  dmb ish", "dmb ish"),
+        "ldsetal": ("  ldsetal x7, x8, [x6]", "ldsetal, as a bitmap word's OR"),
+        "ldset": ("  ldset x7, x8, [x6]", "ldset"),
+        "dmb_ldset_dmb": ("  dmb ish\n  ldset x7, x8, [x6]\n  dmb ish", "ldset between two dmb ish"),
+        "dmb_cas_dmb": ("  dmb ish\n  ldr x8, [x6]\n  add x12, x8, #1\n  cas x8, x12, [x6]\n  dmb ish", "load, cas between two dmb ish"),
         "dmbst": ("  dmb ishst", "dmb ishst"),
         "dmbld": ("  dmb ishld", "dmb ishld"),
         "isb": ("  isb", "isb"),
@@ -272,6 +276,43 @@ def atomics(k):
 
 
 def build(k):
+    store_bursts(k)
     forwarding(k)
     renaming(k)
     atomics(k)
+
+
+def store_bursts(k):
+    """A fill's loop: pointers written downward through a magazine's 8 KiB, by what each form of store
+    sustains. The value's chain is kept off the loop: two pointers step two strides."""
+    setup = "  mov x12, x22\n  add x13, x12, #24\n  mov x15, #48\n  dup v0.2d, x12\n  dup v1.2d, x13\n  dup v2.2d, x15\n"
+    forms = {
+        "str": ("""  str x12, [x14]
+  stur x13, [x14, #-8]
+  add x12, x12, x15
+  add x13, x13, x15
+  sub x14, x14, #16""", 2),
+        "stp": ("""  stp x13, x12, [x14, #-8]
+  add x12, x12, x15
+  add x13, x13, x15
+  sub x14, x14, #16""", 2),
+        "stp2": ("""  stp x13, x12, [x14, #-8]
+  add x16, x12, x15
+  add x17, x13, x15
+  stp x17, x16, [x14, #-24]
+  add x12, x16, x15
+  add x13, x17, x15
+  sub x14, x14, #32""", 4),
+        "stpq": ("""  stp q1, q0, [x14, #-16]
+  add v0.2d, v0.2d, v2.2d
+  add v1.2d, v1.2d, v2.2d
+  sub x14, x14, #32""", 4),
+    }
+    for name, (body, step) in forms.items():
+        k.kernel(f"st_burst_{name}", f"""  mov x14, #8184
+  add x14, x22, x14
+  mov x9, #(1024 / {step})
+1:
+{body}
+  subs x9, x9, #1
+  b.ne 1b""", setup=setup, ops=1024, note=f"8 KiB of pointers by {name}")
