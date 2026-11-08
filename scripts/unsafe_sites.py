@@ -23,8 +23,8 @@ implementation has the trait's and is not a site. Every other site must cite a l
 or name a Kani harness as ``Kani: `harness_name` `` that a module of the crate declares.
 
 Two more rules, over every module the shipping crates declare whatever its cfg: no
-`asm!`, `naked_asm!` or `global_asm!` but in the Lean routines, the aarch64 routines that wait for
-Lean (`PROVISIONAL_DIR`) and the file of the system-call instruction (`SYSTEM_CALL`); and no
+`asm!`, `naked_asm!` or `global_asm!` but in the Lean routines and the file of the system-call
+instruction (`SYSTEM_CALL`); and no
 shipping crate's manifest turns on the allocator's `sim` or `internals`.
 
 The scan is a small lexer and a token walk, not a Rust parser. `self_test()` runs it over
@@ -49,9 +49,6 @@ SHIPPING_CRATES = ("cralloc", "cralloc-preload", "cralloc-tokio")
 # the reads of two registers Rust has no stable way to name.
 SYSTEM_CALL = "crates/cralloc/src/os/linux/syscall.rs"
 SYSTEM_CALL_BLOCKS = 4
-# Where hand-written aarch64 routines live until Lean emits them. Unlike Lean's they cite a ledger
-# entry, so only the rule against hand-written assembly passes them by.
-PROVISIONAL_DIR = "crates/cralloc/src/front/provisional"
 ASSEMBLY_MACROS = ("asm", "naked_asm", "global_asm")
 # Scaffolding that compiles in every build but serves only tests, relative to the root.
 SCAFFOLDING = {"crates/cralloc/src/front/twin.rs"}
@@ -630,12 +627,12 @@ def kani_harnesses(walker: Walker) -> set[str]:
 
 def assembly_problems(walker: Walker) -> list[Site]:
     """Hand-written assembly: every `asm!`, `naked_asm!` or `global_asm!` outside the Lean
-    routines and those that wait for Lean, but for `SYSTEM_CALL_BLOCKS` `asm!`s in the file of
-    the system-call instruction (CLAUDE.md)."""
+    routines, but for `SYSTEM_CALL_BLOCKS` `asm!`s in the file of the system-call instruction
+    (CLAUDE.md)."""
     problems, allowed = [], 0
     for path, line, macro in walker.assembly:
         relative = path.relative_to(walker.root).as_posix()
-        if relative.startswith((LEAN_DIR + "/", PROVISIONAL_DIR + "/")):
+        if relative.startswith(LEAN_DIR + "/"):
             continue
         if relative == SYSTEM_CALL and macro == "asm" and allowed < SYSTEM_CALL_BLOCKS:
             allowed += 1

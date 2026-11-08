@@ -27,20 +27,18 @@ mod differential;
 #[cfg(cralloc_real)]
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod generated;
-#[cfg(all(cralloc_real, target_arch = "aarch64"))]
-mod provisional;
 #[cfg(cralloc_real)]
 mod real;
 #[cfg(all(test, cralloc_real))]
 mod rseq_offset_check;
+#[cfg(all(cralloc_real, target_arch = "aarch64"))]
+use generated::{aarch64 as outlined, aarch64_inline as inlined};
 /// This target's routines: those that are called, and those that are inlined.
 #[cfg(all(cralloc_real, target_arch = "x86_64"))]
 use generated::{x86_64 as outlined, x86_64_inline as inlined};
 /// The generated C entry points' module, for the C layer.
 #[cfg(cralloc_real)]
 pub(crate) use outlined::centry as generated_centry;
-#[cfg(all(cralloc_real, target_arch = "aarch64"))]
-use provisional::{aarch64 as outlined, aarch64_inline as inlined};
 mod routines;
 mod slab;
 pub(crate) mod sync;
@@ -204,6 +202,10 @@ const _: () = {
     use crate::spec;
     assert!(MASK_DISP == spec::MASK_DISP);
     assert!(SHIFT_DISP == spec::SHIFT_DISP && BASE_DISP == spec::BASE_DISP);
+    // On aarch64 a routine forms `SLABS` from its page alone.
+    assert!(align_of::<Front>() >= 4096);
+    // On aarch64 a routine forms `SLABS` from its page alone.
+    assert!(align_of::<Front>() >= 4096);
     // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
     assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
     assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
