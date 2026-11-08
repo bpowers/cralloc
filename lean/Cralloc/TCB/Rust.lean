@@ -19,11 +19,14 @@ pub(crate) unsafe extern "<abi>" fn <name><sig> {
 }
 ```
 
-A naked function has no compiler-generated prologue or epilogue, so the
-machine code that runs is exactly the code that was verified (plus the
-final `ret` from the printer). The functions of each target are collected
-in `<target>/` under the output directory (`TCB/Emit.lean`), one file per
-`module`, compiled only under the target's `cfg`.
+A naked function has no compiler-generated prologue or epilogue, so what the
+assembler is given is exactly the code that was verified (plus the final
+`ret` from the printer). What runs is that, as the linker leaves it: it writes
+each relocation, and on AArch64 it may replace a load or store after an `adrp`
+with a branch to a copy out of line (`--fix-cortex-a53-843419`, which rustc
+passes on every link). `checkRseq` refuses what that would break. The functions
+of each target are collected in `<target>/` under the output directory
+(`TCB/Emit.lean`), one file per `module`, compiled only under the target's `cfg`.
 
 A call (`Code.call name body`) is a call instruction whose operand is the
 symbol of the Rust function `name` (a `sym` operand). The model runs `body`
@@ -499,13 +502,16 @@ def usesStack {I C : Type} : Code I C → Bool
 registers as clobbers, each once, has no more arguments than argument
 registers, and returns no value if it has exits (`asm!` cannot have a label
 and an output: rust-lang/rust#119364); one of a naked target declares no
-clobbers and no generic parameters. Only an inline function with a result may
-return that it is not zero (`Api.retNonzero`). -/
+clobbers and no generic parameters. Only an inline function with a result as wide
+as its register may return that it is not zero (`Api.retNonzero`): the contract's
+result is the whole register, and Rust's test is at the result's width. -/
 def checkInline (a : Artifact) : Except String Unit := do
   let T := a.target
   let n := s!"{T.name}: {a.name}"
-  if a.retNonzero && !(T.inline && a.sig.ret.isSome) then
-    throw s!"{n} returns that its result is not zero, but is not inline with a result"
+  if a.retNonzero then
+    unless T.inline && a.sig.ret.any fun ty => ty.bits T.abi.ptrBits == T.abi.ptrBits do
+      throw s!"{n} returns that its result is not zero, but is not inline with a result as wide \
+        as a register"
   if T.inline then
     if usesStack a.code then throw s!"{n} is inline but calls a function or has a frame"
     for c in a.clobbers do
@@ -521,14 +527,16 @@ def checkInline (a : Artifact) : Except String Unit := do
       throw s!"{n} is a naked function but declares clobbers or generic parameters"
 
 /-- On a target whose printer `P` has a limit of fused micro-ops
-(`Printer.uopLimit`), the hot path of the code `c` of the function `n` has
-at most that many (`Printer.hotUops`); code whose hot path the count is not
-defined for is refused there, rather than let through uncounted. -/
-def uopCheck {M : ISA} (P : Printer M) (inline : Bool) (n : String) (c : Prog M) :
-    Except String Unit := do
+(`Printer.uopLimit`), the hot path of the code `c` of the function `n`, with its
+setup, has at most that many (`Printer.hotUops`, each instruction of the setup one);
+code whose hot path the count is not defined for is refused there, rather than let
+through uncounted. -/
+def uopCheck {M : ISA} (P : Printer M) (inline : Bool) (n : String) (c : Prog M)
+    (setup : List M.Instr := []) : Except String Unit := do
   if let some lim := P.uopLimit then
     match P.hotUops inline c with
     | some k =>
+      let k := k + setup.length
       unless k ≤ lim do
         throw s!"{n}'s hot path has {k} fused micro-ops, more than {lim}"
     | none =>
@@ -536,7 +544,7 @@ def uopCheck {M : ISA} (P : Printer M) (inline : Bool) (n : String) (c : Prog M)
         micro-ops cannot be counted against the limit of {lim}"
 
 def checkUops (a : Artifact) : Except String Unit :=
-  uopCheck a.target.printer a.target.inline s!"{a.target.name}: {a.name}" a.code
+  uopCheck a.target.printer a.target.inline s!"{a.target.name}: {a.name}" a.code a.setup
 
 /-- The tables of constants of `a`, which its contract gives it
 (`Artifact.consts`). -/
@@ -790,6 +798,69 @@ def nearExits {M : ISA} (P : Printer M) (n : String) (body : List (Step M.Instr 
         throw s!"{n} is inline, where a conditional branch may not reach an exit with code of \
           its own or an external target"
 
+/-- The instructions `is` of the function `n`, its `what`, which run outside its
+restartable sequence, access no memory: only registers, which a preemption keeps. The
+model runs them straight after the sequence (`Exec`), but on the machine another thread may
+run first and change any memory, with no abort to say so. -/
+def noMemory {M : ISA} (P : Printer M) (n what : String) (is : List M.Instr) :
+    Except String Unit := do
+  for i in is do
+    if P.accessesMemory i then
+      throw s!"{n}'s {what} accesses memory, outside its restartable sequence"
+
+/-- What may be in the sequence `arm`, `body` of the function `n`, whose setup is `setup`, for the
+model of it to be of what runs: an arm as the target requires (`Printer.armOneStore`); no
+instruction in the arm or the body that `Printer.bodyRefuses`; no memory access in an exit's code
+(`noMemory`); and nothing in the last of the setup after which a linker may move a later
+instruction (`Printer.movesAfter`), with enough setup that nothing before it, which an inlined
+function's caller chooses, can be that near. -/
+def seqSteps {M : ISA} (P : Printer M) (n : String) (setup arm : List M.Instr)
+    (body : List (Step M.Instr M.Cond)) : Except String Unit := do
+  if P.armOneStore then
+    unless (match arm with | [i] => P.plainStore i | _ => false) do
+      throw s!"{n}'s arm is not exactly one store"
+  for i in arm do
+    if let some why := P.bodyRefuses i then throw s!"{n}'s arm has {why}"
+  for st in body do
+    match st with
+    | .instr i => if let some why := P.bodyRefuses i then throw s!"{n}'s sequence has {why}"
+    | .exit _ cold _ => noMemory P n "exit's code" cold
+  if setup.length < P.moveReach then
+    throw s!"{n}'s setup has fewer than the {P.moveReach} instructions a linker's move can span"
+  if (setup.drop (setup.length - P.moveReach)).any P.movesAfter then
+    throw s!"{n}'s setup ends too near an instruction after which a linker may move one into \
+      its sequence"
+
+/-- The code after the commit of the function `n`: straight-line (a call or a frame would touch
+the stack, and a branch has no use there), and with no memory access (`noMemory`). -/
+def tailCheck {M : ISA} (P : Printer M) (n : String) : Prog M → Except String Unit
+  | .block is | .jump is _ => noMemory P n "code after its commit" is
+  | _ => throw s!"{n}'s code after its commit is not straight-line"
+
+/-- The function `n` names its descriptor (`Printer.namesDesc`) only ahead of it: in its setup,
+arm and body, if it has a sequence. -/
+def descRefs {M : ISA} (P : Printer M) (n : String) (setup : List M.Instr) (code : Prog M) :
+    Except String Unit := do
+  let names (is : List M.Instr) := is.any P.namesDesc
+  let bad : Bool := match code with
+    | .rseq _ body => body.any fun st => match st with | .exit _ cold _ => names cold | _ => false
+    | .seq (.rseq _ body) t =>
+      !t.all (!P.namesDesc ·) || body.any fun st => match st with | .exit _ cold _ => names cold | _ => false
+    | c => names setup || !c.all (!P.namesDesc ·)
+  if bad then throw s!"{n} names its descriptor where its label is not that routine's"
+
+/-- What `checkRseq` asks of the code `code` and the setup `setup` of the function `n` on the
+printer `P`, beyond what depends on the artifact (its operands, and being inline). -/
+def seqShape {M : ISA} (P : Printer M) (n : String) (setup : List M.Instr) (code : Prog M) :
+    Except String Unit := do
+  descRefs P n setup code
+  match code with
+  | .rseq arm body => seqSteps P n setup arm body
+  | .seq (.rseq arm body) t =>
+    seqSteps P n setup arm body
+    tailCheck P n t
+  | _ => pure ()
+
 /-- The code of `p`'s artifact has a restartable sequence only as the whole
 of its code (`Code.rseq arm body`), or followed by code with no sequence
 (`.seq (.rseq arm body) tail`), the only place a `jump` may be, to a function
@@ -801,13 +872,15 @@ target can print a sequence
 (`Printer.rseqSig`), the arm is not empty (`Verified` checks that its last
 instruction arms the sequence), the body ends with its commit, a plain
 store (`Printer.plainStore`): a store of a value the code computed, never a
-read-modify-write of memory another thread may have changed meanwhile; and
-each external exit jumps to a function the artifact declares (a `sym`
+read-modify-write of memory another thread may have changed meanwhile; each
+external exit jumps to a function the artifact declares (a `sym`
 operand), which it tail-calls with its arguments as they arrived
-(`Sig.contract`'s `exit`). -/
+(`Sig.contract`'s `exit`); and all of it is as `seqShape` requires, so that what
+runs is what the model runs. -/
 def checkRseq (p : Prepared) : Except String Unit := do
   let a := p.art
   let P := a.target.printer
+  seqShape P s!"{a.target.name}: {a.name}" a.setup a.code
   let (seqCode, tail) : Prog a.target.isa × Option (Prog a.target.isa) := match a.code with
     | .seq (.rseq arm body) t => (.rseq arm body, some t)
     | c => (c, none)
@@ -1052,8 +1125,14 @@ def areasOf (as : List Artifact) : List (String × OwnArea) :=
   (distinct as (·.target.name)).filterMap fun t =>
     (as.find? (·.target.name == t)).bind fun a => a.target.ownArea.map (t, ·)
 
-/-- The constants of every artifact (`Api.rustConsts`) and of every own rseq
-area (`OwnArea.consts`), one file for every target: no assembly, so it
+/-- The constants of the targets of `as` (`Target.consts`), by name, each once, in
+order of their names; a target's inline form shares its target's. -/
+def targetConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
+  let all := as.flatMap (·.target.consts)
+  ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
+
+/-- The constants of every artifact (`Api.rustConsts`), of every own rseq
+area (`OwnArea.consts`) and of every target (`Target.consts`), one file for every target: no assembly, so it
 builds wherever the crate does (under Miri and Kani too). The crate
 declares it itself (`front::constants`). -/
 def constsFile (as : List Artifact) : String :=
@@ -1064,7 +1143,9 @@ def constsFile (as : List Artifact) : String :=
   "#![allow(dead_code)]\n" ++
   rustConstsText (rustConstsOf as) ++
   String.join ((areasOf as).map fun (t, oa) => String.join (oa.consts.map fun (n, ty, v) =>
-    s!"\n/// Of the rseq area for `{t}` (`OwnArea.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n"))
+    s!"\n/// Of the rseq area for `{t}` (`OwnArea.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n")) ++
+  String.join ((targetConstsOf as).map fun (n, ty, v) =>
+    s!"\n/// Of its target's assembly (`Target.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
 
 /-- The module of a target's own rseq area (`Target.ownArea`): its lines, as
 one `global_asm!` block, which the target's `mod.rs` compiles only under the
@@ -1080,10 +1161,19 @@ def areaFile (t : String) (oa : OwnArea) : String :=
 /-- The own rseq area of every target is as the crate needs it: its
 constants are named as Rust constants, fit their types, and are named apart
 from every artifact's constants; its lines are not empty and have no
-newline (each is one line of the block). -/
+newline (each is one line of the block). So are the targets' constants, of which
+each name has one value. -/
 def checkAreas (as : List Artifact) : Except String Unit := do
   let artConsts := (as.flatMap (·.rustConsts)).map (·.1)
+  let targetConsts := as.flatMap (·.target.consts)
+  for (n, ty, v) in targetConsts do
+    unless tableName n && v < 2 ^ ty.bits 64 do
+      throw s!"the target constant {n} is not named as a Rust constant or does not fit a {ty.rust}"
+    if artConsts.contains n || targetConsts.any fun (m, ty', v') => m == n && (ty' != ty || v' != v) then
+      throw s!"the target constant {n} is named twice"
   for (t, oa) in areasOf as do
+    if oa.consts.any fun (n, _, _) => (targetConsts.map (·.1)).contains n then
+      throw s!"{t}: a constant of the own rseq area is also a target's"
     if oa.lines.isEmpty then throw s!"{t}: the own rseq area has no lines"
     for l in oa.lines do
       if l.any (· == '\n') then throw s!"{t}: a line of the own rseq area has a newline"

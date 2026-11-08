@@ -68,6 +68,19 @@ each step of `body`, is `Code.abortStates` (`TCB/Artifact.lean`); what
 `Verified` requires there, and how a run with any number of aborts follows,
 is in `TCB/Artifact.lean` and `Proof/Framework/Rseq.lean`.
 
+That is true of the machine only for what lies in the sequence's range as it was
+linked, one instruction to a step, and only there. So the emitter refuses a step
+that is two instructions, or that a linker may move out of the range, and any
+memory access outside the range after the sequence (`Rust.checkRseq`).
+
+## What the model leaves out
+
+A run is one thread's, one instruction at a time, and its memory accesses happen in
+that order: other threads appear only in what `Contract.env` lets them change while the
+thread is aborted. That the routines are right under the processors' weaker orders, with
+the kernel and other threads reading and writing the same words, is argued, not proved
+here: docs/research/memory-ordering.md.
+
 ## Semantics and safety
 
 A `jump` never completes: its only run is the one that reaches the jump
@@ -141,7 +154,8 @@ structure ISA where
 inductive Step (I C : Type) where
   | instr (i : I)
   /-- If `c` holds, leave the sequence: run the instructions `cold` (laid
-  out of line), then continue after the sequence (`ext = none`), or jump to
+  out of line, outside the sequence's range, so the emitter allows them no
+  memory access), then continue after the sequence (`ext = none`), or jump to
   the external target `ext` (`some t`), code outside the routine that the
   model does not run. -/
   | exit (c : C) (cold : List I) (ext : Option String)
@@ -174,8 +188,9 @@ inductive Code (I C : Type) where
   target `t`: a tail call of code outside the routine, which the model does
   not run, with the registers as `is` leaves them. The emitter allows one
   only right after a restartable sequence, `.seq (.rseq arm body) (.jump is
-  t)` (`Rust.checkRseq`): the code that runs after the commit, outside the
-  sequence, where it cannot be aborted. -/
+  t)`, and `is` to touch only registers (`Rust.checkRseq`): the code runs after
+  the commit, outside the sequence, where it cannot be aborted, and so another
+  thread may run between the commit and any memory access in it. -/
   | jump (is : List I) (t : String)
 
 /-- `if c then t else e`, with `t` laid out after the function's return

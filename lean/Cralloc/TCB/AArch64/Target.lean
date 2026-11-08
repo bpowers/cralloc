@@ -83,9 +83,9 @@ to name it. The model reads `__rseq_offset` as the symbol of that name
 store of 64 bits is single-copy atomic (DDI 0487, "Single-copy atomicity").
 
 A routine forms the descriptor's and the area's addresses once, in registers
-(`Artifact.setup`), and its arm is the one store: the abort handler jumps back
-to it, so a retry finds those registers as the abort left them, which is what a
-retry's precondition asks of it. -/
+(`Artifact.setup`), and its arm is the one store, as the emitter requires
+(`Printer.armOneStore`): the abort handler jumps back to it, so a retry finds those
+registers as the abort left them, which is what a retry's precondition asks of it. -/
 
 /-- The name of glibc's variable holding the rseq area's offset from the
 thread pointer. -/
@@ -131,6 +131,7 @@ abbrev target : Target where
   arms := arms
   armed := armed
   rely := rely
+  consts := [("RSEQ_SIGNATURE_AARCH64", .u32, rseqSignature)]
 
 /-! ## Inline functions
 
@@ -147,13 +148,21 @@ block from: it reserves no memory the calling convention does not. -/
 /-- The registers an inline function's arguments are in, in order. -/
 def inlineArgRegs : List Reg := [.x3, .x2, .x0]
 
-/-- The calling convention as an inline function sees it: `abi`, but for where
-the arguments are. -/
-def inlineAbi : Abi isa :=
+/-- The calling convention as an inline function with its result in `r` sees it:
+`abi`, but for where the arguments are and the result. -/
+def inlineAbiOf (r : Reg) : Abi isa :=
   { abi with
     args ws := if ws.length ≤ inlineArgRegs.length then
       some fun s => (inlineArgRegs.take ws.length).map s.gpr
-    else none }
+    else none
+    ret s := s.gpr r }
+
+/-- An inline function's, with its result in `x0`, where most have it. -/
+abbrev inlineAbi : Abi isa := inlineAbiOf .x0
+
+/-- An inline function's with its result in `x4`: one that has `x0` as an argument it
+must keep until its commit (the inline push). -/
+abbrev inlineAbiX4 : Abi isa := inlineAbiOf .x4
 
 /-- Every register but those named in `rs` holds in `s'` what it held in `s`. -/
 def preservedExcept (rs : List String) (s s' : State) : Prop :=
@@ -164,26 +173,24 @@ keeps `x19` for itself, and `asm!` refuses it as an operand. -/
 def clobberable : List Reg := [.x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7, .x8, .x9, .x10, .x11, .x12,
   .x13, .x14, .x15, .x16, .x17, .x20, .x21, .x22, .x23, .x24, .x25, .x26, .x27, .x28, .x30]
 
-/-- The inline target: the same model and printer, with the obligations of `asm!`
-in place of a call's. Its conditional branches may not leave the function, which
-the compiler may make any size. -/
-abbrev inlineTarget : Target :=
+/-- The inline target, for a function with its result in `r`: the same model and
+printer, with the obligations of `asm!` in place of a call's. Its conditional
+branches may not leave the function, which the compiler may make any size. -/
+abbrev inlineFor (r : Reg) : Target :=
   { target with
     name := "aarch64_inline"
-    abi := inlineAbi
+    abi := inlineAbiOf r
     abiPreserved := fun s s' => s'.sp = s.sp
     inline := true
     argRegs := inlineArgRegs.map Reg.x
-    retReg := "x0"
+    retReg := r.x
     regs := clobberable.map Reg.x
     preservedExcept := preservedExcept
     printer := { printer with stubExits := false, coldFar := true } }
 
-/-- The calling convention of an inline function whose result is in `x4`: one that
-has `x0` as an argument it must keep until its commit (the inline push). -/
-def inlineAbiX4 : Abi isa := { inlineAbi with ret s := s.gpr .x4 }
+abbrev inlineTarget : Target := inlineFor .x0
 
-/-- The inline target, for a function whose result is in `x4`. -/
-abbrev inlineTargetX4 : Target := { inlineTarget with abi := inlineAbiX4, retReg := "x4" }
+/-- For a function whose result is in `x4`. -/
+abbrev inlineTargetX4 : Target := inlineFor .x4
 
 end VG.AArch64

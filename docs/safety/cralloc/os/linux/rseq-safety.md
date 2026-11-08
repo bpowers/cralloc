@@ -35,7 +35,7 @@ the thread unregisters it or ends, and every descriptor `rseq_cs` may name stays
 **Proof.** The function's `# Safety` passes the area's validity and alignment to the caller
 (AREA-04). `len` is `RSEQ_AREA_LEN`, 32 (`ORIG_RSEQ_SIZE`, accepted by every kernel with rseq;
 `kernel/rseq.c` checks `rseq_len == ORIG_RSEQ_SIZE` before the feature-size path). The
-signature is `RSEQ_SIGNATURE`, the constant the Lean printer writes before every abort handler
+signature is `RSEQ_SIGNATURE_X86_64` or `_AARCH64`, the constant the Lean printer writes before every abort handler
 (`VG.X86_64.rseqSignature`), emitted into `constants.rs` from the same definition, so the two
 cannot differ. A wrong argument is rejected (`EINVAL`, `EPERM`), not undefined behaviour; a
 second registration of the same area returns `EBUSY` and changes nothing.
