@@ -244,6 +244,86 @@ fn a_heap_serves_every_size_on_regions_under_a_huge_page() {
     serve(heap, 0x7766_5544_3322_1100, QUICKLY);
 }
 
+/// A block aligned past a line starts at its slot's start, shrinks, and grows back over the pages
+/// the shrink returned, writing them. They must not stay marked clean: a look of the hold that ends
+/// at the floor returns a slot in pieces, stepping over pages marked clean, and once all of the slot
+/// reads clean it is taken for zero. The next zeroed block of that slot is then cleared by nothing
+/// and hands over what the last tenant wrote.
+fn a_zeroed_block_never_finds_what_a_block_grew_back_over<S: Shape>() {
+    use crate::back::policy::{FINE_TICKS, HOLD_STEPS, allowance_floor};
+    if !room_for::<S>() {
+        return;
+    }
+    let heap = SimHeap::<S>::new();
+    let page = S::GEOMETRY.page_size();
+    // Free memory of exactly the floor, in a lower region than the slot under test, which the hold's
+    // walk reaches first. So the look's goal is the slot's own charge.
+    let floor = allowance_floor(S::GEOMETRY);
+    let at_floor = layout(floor, 1 << 20);
+    // SAFETY: valid layouts; each block is written within its size and freed once with its layout.
+    unsafe {
+        let low = heap.alloc(at_floor);
+        assert!(!low.is_null());
+        // Slots 0 to 30 of a class of 256 pages stay held, so that the block below takes slot 31,
+        // whose stagger is 31 pages. Held at a stagger, they are taken with its room to spare.
+        let held = layout(220 * page, 8);
+        let others: Vec<*mut u8> = (0..31).map(|_| heap.alloc(held)).collect();
+        assert!(others.iter().all(|p| !p.is_null()));
+        // A tenant at the slot's start, as `posix_memalign` makes one.
+        let old = layout(225 * page, 128);
+        let p = heap.alloc(old);
+        assert!(!p.is_null());
+        assert_eq!(heap.usable_size(p), Some(225 * page), "at a page boundary");
+        fill(p, old.size(), 0x5a);
+        let shrunk = layout(10 * page, 128);
+        assert_eq!(heap.realloc(p, old, shrunk.size()), p, "shrinks in place");
+        let grown = layout(20 * page, 128);
+        assert_eq!(heap.realloc(p, shrunk, grown.size()), p, "grows in place");
+        // The program writes what it grew back over.
+        p.write_bytes(0x5a, grown.size());
+        let back = heap.heap.back().unwrap();
+        let os = heap.os();
+        for _ in 0..2 {
+            os.advance_clock(FINE_TICKS);
+            back.heartbeat();
+        }
+        heap.dealloc(low, at_floor);
+        heap.dealloc(p, grown);
+        for _ in 0..HOLD_STEPS + 8 {
+            os.advance_clock(FINE_TICKS);
+            back.heartbeat();
+        }
+        // `calloc`, taking the same slot.
+        let whole = layout(256 * page, 128);
+        let q = heap.alloc_zeroed(whole);
+        assert_eq!(q, p, "the same slot");
+        let bytes = core::slice::from_raw_parts(q, whole.size());
+        let stale = bytes.iter().position(|&b| b != 0);
+        assert_eq!(
+            stale, None,
+            "a zeroed block holds what its last tenant wrote"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_zeroed_block_never_finds_what_a_block_grew_back_over_with_4_kib_pages() {
+    a_zeroed_block_never_finds_what_a_block_grew_back_over::<Kernel4k>();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_zeroed_block_never_finds_what_a_block_grew_back_over_with_16_kib_pages() {
+    a_zeroed_block_never_finds_what_a_block_grew_back_over::<Kernel16k>();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_zeroed_block_never_finds_what_a_block_grew_back_over_with_64_kib_pages() {
+    a_zeroed_block_never_finds_what_a_block_grew_back_over::<Kernel64k>();
+}
+
 /// A kernel's real sizes are the same rules' on every kernel: a block with headroom on 16 KiB pages
 /// is charged what it wrote, as it is on 4 KiB, not its room.
 #[test]

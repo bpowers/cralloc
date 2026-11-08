@@ -30,9 +30,9 @@ copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-08;
 or below its stagger, which nothing has written) set one, each by the slot's holder (only the holder of every slot a bit describes
 writes it); the claim (`region::settle_slot`) clears the bits under
 what the new tenant may write, from its first page, and so does any change that widens it
-(`region::cover`, from the slot's start where the slot is advised for huge pages, since a huge
-fault makes the pages below a block resident; a tenant at the slot's start cleared those at its
-claim).
+(`region::cover`, from the first page the tenant may write, by its real start, and from the
+slot's start where the slot is advised for huge pages, since a huge fault makes the pages below
+a block resident).
 Clean bits only steer the retained count and the purge walk; no zero bit is set by any of
 this, and a claim takes a slot for zero only from its zero bit, which only a purge sets. So a
 claim never reports pages as zero that are not
@@ -265,9 +265,8 @@ zero (step 5).
    either a part already copied that ends at such a multiple (from the slot's start for the
    first, which takes the pages a stagger passed over, whose contents no one needs, and an
    earlier tenant may have left; and from the previous multiple after that, which is
-   page-aligned; to `into + boundary`) or, once and for an outgrown slot not kept only, everything from the last
-   multiple at or below
-   `from + len` (or from the slot's start, if there is none) to the end of the slot. Every
+   page-aligned; to `into + boundary`) or, once and for an outgrown slot not kept only, everything from where
+   the last of those ended (or from the slot's start, if there was none) to the end of the slot. Every
    byte of the block before that start has been copied. A block of one piece or less that
    crosses no multiple gives back only that last range, the whole slot, after its one
    copy. In a slot advised for huge pages
