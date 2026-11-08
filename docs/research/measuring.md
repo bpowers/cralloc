@@ -295,9 +295,10 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   disables it. Runs say `idle_states: free`. A tail the report flags cannot be read as the allocator's.
 - **Placement moved jobs mostly through the routines.** Five pads moved `tree depth=20` 6.1% and `map
   btree 1M` 5.3%, at level instructions and 0.1 to 0.5% noise, when routines formed addresses inside
-  their sequences (`ebe126a`). With every address formed before the arming store (`62be25d`) they
-  moved 0.5 and 2.0%, with noise of 0.2 and 0.7%, where mimalloc moves 0.2 and 0.9%. The cause is not
-  traced; an `adrp` inside the sequence is the suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
+  their sequences (`ebe126a`). With every address formed before the arming store they moved 0.5 and
+  2.0% (`62be25d`), and with the generated routines 0.2 and 0.8% (`66dfb90`), noise 1.3 and 1.5%,
+  where mimalloc moves 0.1 and 0.4%. The cause is not traced; an `adrp` inside the sequence is the
+  suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
   its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
   landed than on the Ryzen, but too few have been swept to drop the rule.
 - **Other work is low enough for the same limits.** A run's other work had a median of -0.01 CPUs. Of
