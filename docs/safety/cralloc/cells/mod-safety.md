@@ -2,8 +2,9 @@
 
 `Cells<T, N>` holds `[T; N]` in an `UnsafeCell` so that Miri sees one interior-mutable range
 where it would see `N` (the module documentation says why). Its accessor `get` is proved in
-bounds by Kani (`cells::verify::every_index_names_an_entry`); this entry covers the one other
-`unsafe` site, the `Sync` impl.
+bounds by Kani (`cells::verify::every_index_names_an_entry`) for a table of eight entries; for
+any other length the same mask does it, since a length that is not a power of two does not
+compile. This entry covers the one other `unsafe` site, the `Sync` impl.
 
 **What a `Cells` offers.** Its field is private to the module. The module makes the cell once,
 in `new`, from an owned array, and has one method that reads it, `get(&self, index) -> &T`,
@@ -28,3 +29,5 @@ The one difference from a plain array, that the entries are reached through `Uns
 raw pointer, changes no thread's view: a shared reference made from it is a shared reference
 like any other, and the entries the tables hold (`AtomicU8`, `AtomicUsize`, the back end's
 atomic words and headers made of them) are accessed only through their own atomic operations.
+
+Reviewed: 5a8ade1
