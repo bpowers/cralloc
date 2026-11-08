@@ -70,14 +70,15 @@ this under interleaving.
    (`units_touch_exactly_their_slots_on_the_tiny_heap`, every class, watermark, cursor and
    huge-page part), and the unit test `purge_passes_tile_the_carved_pages` checks it against
    direct arithmetic in the standard and native geometries, huge-page parts included.
-   Before the call, `purge_unit` claimed every one of them with `claim_exact`, word by word,
-   each a compare-and-swap that succeeds only if all the word's bits for those slots are set
+   Before the call, `purge_unit` claimed every one of them with `tree::ExactRun::claim`, word by
+   word, each a compare-and-swap that succeeds only if all the word's bits for those slots are set
    (free) and clears them. If any claim failed it released what it
    had and returned before the call. A cleared bit is held by exactly the thread whose
    compare-and-swap cleared it, until that thread sets it again: every other path that clears
-   bits (`tree::claim`, `tree::claim_next`, `claim_exact`) is a compare-and-swap against a value
-   with the bit set, and every path that sets one (`tree::release`, `tree::release_one`, the ORs
-   of a `tree::Release`) aborts if the bit was already set.
+   bits (`tree::claim`, `tree::claim_next`, `tree::ExactRun::claim`) is a compare-and-swap against
+   a value with the bit set, and every path that sets one (`tree::release_one`, the ORs of a
+   `tree::Release`) aborts if the bit was already set. Summary bits play no part: `ExactRun` clears
+   those above the words it emptied, a group at a time, before the call, and they are hints.
 
    That last check does not make the claim exclusive by itself. If the program frees a slot,
    a purge claims it, and the program frees it again, the second `release` finds the bit clear
@@ -186,7 +187,7 @@ that is policy, not safety.
 writes the range during the call.
 
 **Proof.** The call is made in `purge_unit_as` after the loop that claims every slot touching
-the unit (`tree::claim_exact` over `touching(unit)`) has succeeded and before any release: the
+the unit (`tree::ExactRun::claim` over `touching(unit)`) has succeeded and before any release: the
 same point and the same range as BACK-REGION-01's purge, whose step 1 shows that this thread
 then holds every slot touching the range, and that every byte of the range lies in one of
 them. A slot's bytes are written only by its holder, so

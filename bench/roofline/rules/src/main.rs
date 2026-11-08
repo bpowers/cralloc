@@ -15,12 +15,13 @@
 //! rules request CPU [MiB]  each allocation and first write of 1 KiB blocks, carved past the class's
 //!                          huge-page threshold: how long the worst requests take, as the program
 //!                          sees it
-//! rules step CPU SLOT MiB clock|grow|rush|large single|bg
+//! rules step CPU SLOT MiB clock|grow|rush|large|maintain single|bg [small]
 //!                          a class of SLOT bytes carved and freed, then requests in another class
 //!                          while steps of returning memory reach its wholly free huge pages: how
 //!                          long the worst requests take. `single` wants CRALLOC_BACKGROUND=0 in
 //!                          the environment; `bg` starts the thread before pinning to CPU, so run
-//!                          it under `taskset` with other CPUs to spare
+//!                          it under `taskset` with other CPUs to spare; `small` forbids the process
+//!                          huge pages, so that the same units are mapped by small pages
 //! ```
 //!
 //! For `split`, run under `strace -f -e trace=madvise,write` to see which thread calls
@@ -43,6 +44,7 @@ unsafe extern "C" {
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn munmap(addr: *mut u8, len: usize) -> i32;
     fn clock_gettime(clock: i32, time: *mut [i64; 2]) -> i32;
+    fn prctl(option: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
 }
 
 fn page() -> usize {
@@ -414,7 +416,7 @@ fn on_cpu() -> u64 {
     time[0] as u64 * 1_000_000_000 + time[1] as u64
 }
 
-/// How long requests took: a count for each power of two of nanoseconds, and each one over 20 us
+/// How long requests took: a count for each power of two of nanoseconds, and each one over 5 us
 /// with when it ran, how far resident memory fell since the last such request, and how long the
 /// thread was off its CPU since then, which says that a request was preempted and not working.
 struct Times {
@@ -436,13 +438,21 @@ impl Times {
         }
     }
 
+    /// Starts counting from here. Separate from `new`, whose list is large enough to be growth,
+    /// and growth over the cap pays: it goes before the class is freed.
+    fn begin(&mut self) {
+        self.start = Instant::now();
+        self.rss = rss_quiet();
+        self.looked = (Instant::now(), on_cpu());
+    }
+
     #[inline]
     fn time<T>(&mut self, request: impl FnOnce() -> T) -> T {
         let start = Instant::now();
         let out = request();
         let ns = start.elapsed().as_nanos() as u64;
         self.by_log2[(64 - ns.leading_zeros()) as usize] += 1;
-        if ns >= 20_000 && self.over.len() < self.over.capacity() {
+        if ns >= 5_000 && self.over.len() < self.over.capacity() {
             // Off the CPU since the last look, a millisecond ago at most, up to the request's end.
             let cpu = on_cpu();
             let wall = (start + Duration::from_nanos(ns) - self.looked.0).as_nanos() as u64;
@@ -500,8 +510,14 @@ impl Times {
 /// heartbeats running through the intervals the frontier makes the pass wait. `grow`: the same
 /// blocks kept and written, 256 MiB of them, which pays for growth over the cap at once. `rush`:
 /// `grow` unwritten, so that growth outruns a thread paying for it. `large`: blocks of 64 MiB
-/// unwritten, each of which owes more than a thread's limit in one carve.
-fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str) {
+/// unwritten, each of which owes more than a thread's limit in one carve. `maintain`: no requests,
+/// but `Cralloc::maintain_step` for 16 s, as a program's timer calls it, each step timed.
+fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str, small: bool) {
+    if small {
+        const PR_SET_THP_DISABLE: i32 = 41;
+        // SAFETY: the call takes these four words and only sets a flag on this process.
+        assert_eq!(unsafe { prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0) }, 0);
+    }
     if thread == "bg" {
         Cralloc::start_background().expect("a thread for the allocator");
     }
@@ -509,6 +525,8 @@ fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str) {
     let huge = page() * page() / 8;
     println!("# step: CPU {cpu}, {slot}-byte slots, {} MiB, {mode}, {thread}", total / MIB);
     println!("# free blocks by order: {}", free_blocks());
+    let mut live = Vec::with_capacity(1 << 16);
+    let mut times = Times::new();
     let layout = Layout::from_size_align(slot, slot.min(8)).unwrap();
     let count = total / slot;
     // The pointers lie outside the heap: on the heap they would be a class as large as this one.
@@ -555,8 +573,7 @@ fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str) {
     );
 
     let block = Layout::from_size_align(8 * KIB, 8).unwrap();
-    let mut live = Vec::with_capacity(1 << 16);
-    let mut times = Times::new();
+    times.begin();
     match mode {
         "clock" => {
             let mut held = [std::ptr::null_mut(); 256];
@@ -587,6 +604,12 @@ fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str) {
             for _ in 0..64 {
                 // SAFETY: the layout's size is not zero.
                 live.push(times.time(|| unsafe { HEAP.alloc(large) }));
+            }
+        }
+        "maintain" => {
+            while times.start.elapsed() < Duration::from_secs(16) {
+                while times.time(Cralloc::maintain_step) {}
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
         _ => panic!("no mode {mode}"),
@@ -627,10 +650,11 @@ fn main() {
             arg(4).unwrap().parse::<usize>().unwrap() * MIB,
             arg(5).unwrap(),
             arg(6).unwrap(),
+            arg(7) == Some("small"),
         ),
         _ => {
             eprintln!(
-                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n] | request CPU [MiB] | step CPU SLOT MiB clock|grow|rush|large single|bg"
+                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n] | request CPU [MiB] | step CPU SLOT MiB clock|grow|rush|large|maintain single|bg [small]"
             );
             std::process::exit(2);
         }

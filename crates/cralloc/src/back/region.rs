@@ -434,10 +434,8 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId, floor: u32) -> (usize,
         return (0, words);
     };
     let until = first + count - 1;
-    for w in first / BITS..=until / BITS {
-        tree::release(host, region, w, bits_in_word(w, first, until));
-        words += 1;
-    }
+    release_range(host, region, first, until, first / BITS, until / BITS + 1);
+    words += (until / BITS + 1 - first / BITS) as usize;
     (layout.bytes_of(count), words)
 }
 
@@ -974,12 +972,16 @@ pub(crate) fn purge_unit_as<H: Host>(
         }
     }
     let read = (high - low + 1) as usize;
+    let mut claims = tree::ExactRun::new();
     for w in low..=high {
-        if !tree::claim_exact(host, region, w, bits_in_word(w, first, last)) {
+        if !claims.claim(host, region, w, bits_in_word(w, first, last)) {
+            claims.finish(host);
             release_range(host, region, first, last, low, w);
             return (Purge::Busy, read);
         }
     }
+    // Before anything that can take long, so that no fill finds these words under set bits.
+    claims.finish(host);
     let outgrown = outgrown_dirty(host, region, unit, first, last);
     let page = layout.page_size();
     let (offset, len) = (
@@ -1148,9 +1150,11 @@ fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
 }
 
 /// Releases the bits of slots `first..=last` in leaf words `from..to`, which this thread
-/// claimed.
+/// claimed: one atomic OR a word, and one walk up the tree for words that share summary words.
 fn release_range<H: Host>(host: &H, region: RegionId, first: u32, last: u32, from: u32, to: u32) {
+    let mut release = tree::Release::new(host, region);
     for w in from..to {
-        tree::release(host, region, w, bits_in_word(w, first, last));
+        release.leaf(region, w, bits_in_word(w, first, last));
     }
+    release.finish();
 }

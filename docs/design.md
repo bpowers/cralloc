@@ -540,7 +540,9 @@ or above it have never been allocated, and their memory has never been touched.
   sets the word's bits and then sets every summary bit above it that it finds clear. A small class's
   claim that empties a word clears its summary bit and then reads the word again, and sets the bit
   back if the word is no longer empty. A large class's claim leaves the bit set, and the next search
-  that finds the word empty clears it. A free does not assume that the first free into an empty word set the summary
+  that finds the word empty clears it. A purge's claim, in any class, clears as a fill does, a group
+  of words at a time, and has done so before it returns the pages, so a fill passes over what a
+  purge holds and does not wait for it. A free does not assume that the first free into an empty word set the summary
   bit, because that thread may have vanished in a fork before it could.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before carving
@@ -672,14 +674,25 @@ the dearest memory to return and the likeliest to be refilled. So most passes ta
 least 16 KiB, and one pass in every few takes a run of any length. Growth over the cap, and
 `collect`, take any run.
 
-**A step on a request's slow path is bounded.** Every step a slow path takes, of the clocked pass,
-of the hold or of a growth payment, returns at most a fixed amount of memory, since a millisecond
-spent there once a second is a server's tail. A free large slot bigger than that goes back in
-pieces, from its top down, in whole huge pages where a huge page is 2 MiB and its class that large.
-It counts as zero only once every page of it has gone. A slow path splits only a huge page of 2 MiB.
-One of 32 MiB takes over a millisecond, so splitting it is left to the background thread and
-`collect`, and `maintain` takes one a step. `collect` and `malloc_trim` are the program's own calls
-and are not bounded.
+**A step on a request's slow path returns a bounded amount, and finishes the unit it began.** Every
+step a slow path takes, of the clocked pass, of the hold or of a growth payment, returns at most a
+fixed amount of memory, since a millisecond spent there once a second is a server's tail. A free
+large slot bigger than that goes back in pieces, from its top down, in whole huge pages where a huge
+page is 2 MiB and its class that large. It counts as zero only once every page of it has gone. A slow
+path splits only a huge page of 2 MiB. One of 32 MiB takes over a millisecond, so splitting it is left
+to the background thread and `collect`, and `maintain` takes one a step. `collect` and `malloc_trim`
+are the program's own calls and are not bounded.
+
+The bound is on what a step returns, not on how long it takes. A wholly free huge page goes back
+whole, so a step that reaches one claims and releases every bitmap word under it, and the smaller the
+slots the more words there are. For a class of a kilobyte that is little. For the smallest classes on
+a kernel with a large huge page it is the tail this section is about, one request for each huge page
+returned. We accept that. Passing those huge pages on a request would hold the bound, but in a program
+with no background thread their memory would then stay resident until it called `collect`, and
+returning it matters more than a pause that only a shrinking heap of tiny objects pays. While the
+thread runs these steps are its own, and a request takes one only when growth outruns the thread
+("The background thread"). `docs/research/memory.md`, "Returning memory off request paths", has what
+they cost.
 
 **Free large slots do not wait for the frontier.** A large class's region serves one size, so a
 program that frees blocks of many large sizes between phases holds them all for the two intervals
@@ -912,7 +925,7 @@ that finds such work due records it and wakes the thread if it sleeps. What a re
 is what its own call decides: the trim at the claim of a large slot, the tail of a block that
 shrinks in place, the pieces behind a block that moves, and a freed slot that was under huge-page
 advice or left unwritten. Slow paths keep the clocked work where there is no thread, which is why
-every step stays bounded. The bound on retained memory does not rest on the scheduler either: when
+every step returns a bounded amount. The bound on retained memory does not rest on the scheduler either: when
 growth has gone unpaid past a limit the carves and heartbeats that find it pay a step each, and a
 pass nobody has stepped for an interval is the slow paths' again. The thread does not give up the
 CPU between its steps, or it falls behind on a busy machine (`docs/research/memory.md`, "Returning

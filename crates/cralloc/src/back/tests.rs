@@ -4374,6 +4374,9 @@ mod hold;
 /// Purge steps bounded in pages whatever the unit: large slots returned in pieces.
 mod pieces;
 
+/// What a fill pays for the words a purge holds.
+mod purge_claim;
+
 /// The slots blocks outgrow: kept within their bound, and counted exactly.
 mod outgrown;
 
