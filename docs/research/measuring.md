@@ -301,13 +301,26 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
   its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
   landed than on the Ryzen, but too few have been swept to drop the rule.
-- **A kernel job's limit on other work stands; a server's reads high.** A kernel run's other work has a
-  median of -0.01 CPUs: of 402 valid runs the highest was 0.15, and three went over the limit of 0.25.
-  Server segments under load read -0.19 to 0.25, by job and segment and alike across allocators
-  (`orders axum` at 30% has a median of 0.13), where the threads named on those CPUs add up to under
-  0.08 at the same moments. So the clocks disagree by more than the Ryzen's limit of 0.1, which threw
-  out a third of quiet runs, and the limit here is 0.3. Why they disagree is not traced. Three seconds of
-  a busy CPU, 0.55 and up on the Ryzen, should still show.
+- **A server's meter for other work is off by more than the Ryzen's limit, so the limit here is 0.3.**
+  With heavy work frozen, the median reading of a job's segment still runs from -0.10 to 0.16 CPUs,
+  alike across allocators, and 4 of 1,200 segments exceed 0.25 (six server jobs, three rounds,
+  `870d687`, 2026-11-08). Against a log of every context switch on `connect log grpc h2`, three runs,
+  the meter reads 0.11 low at 30% load, 0.03 to 0.05 high at 70%, and within 0.04 with no load. So
+  0.1 threw out a third of runs for the meter's offset, and 0.3 is that offset plus about 0.14. Real
+  other work does reach 0.18 in a segment, a browser's or another agent's burst, and a run with that
+  little passes. It costs the time ranking nothing: runs reading over 0.03 above their job's usual take
+  a median 0.996 of the cycles of the same allocator's other runs (0.98 to 1.05). A kernel job's limit
+  stands: its median is -0.01, of 402 valid runs the highest was 0.15, and three exceeded 0.25.
+- **A tail here is the desktop's unless the run was quiet, and no limit on CPU time can tell.** Heavy
+  work is frozen and the generator's cluster is clean, under 0.004 CPUs of other work in any segment
+  logged. But kernel threads, a browser and other agents' shells still land on both clusters for a
+  millisecond or more. Three runs of one build at 70% had 0.001 to 0.003 CPUs of other work. The one
+  with a 2.9 ms `btrfs-transaction`, 1 ms of `HeapHelper` on three of the four CPUs at once and the
+  generator preempted twice for a millisecond read p99.9 of 9.2 ms; the two whose longest was 1.0 and
+  0.8 ms read 63 and 67 us. Over 90 runs, 39 exceed 1 ms, on every allocator, at rates this few runs
+  cannot separate (3 to 10 of 15). This noise only adds, so a job's tail is its quietest run, and
+  ranking tails takes a session with the machine otherwise idle. The log needs no root here:
+  `perf record -C 2-9 --switch-events -e dummy`, with `perf_event_paranoid` at -1.
 
 ## Reusable techniques
 
