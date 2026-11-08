@@ -43,6 +43,14 @@ def inBody (i : Instr) : String := why printer setupA (.rseq armA [.instr i, com
 #guard why printer setupA (.seq (.rseq armA [commit]) (.block [.mov .x .x0 (.reg .x3)])) == ""
 #guard why printer setupA (.seq (.rseq armA [commit]) (.jump [.mov .x .x2 (.reg .x4)] "t")) == ""
 
+-- No store in a setup, which is not armed, though a load is what it is for.
+#guard why printer (.str .x .x6 { base := .x7 } :: setupA) (.rseq armA [commit]) ==
+  "f's setup stores to memory, before its sequence is armed"
+#guard why printer (.stpz .x6 0 :: setupA) (.rseq armA [commit]) ==
+  "f's setup stores to memory, before its sequence is armed"
+#guard why printer (.str .b .x6 { base := .x7 } :: setupA) (.block []) ==
+  "f's setup stores to memory, before its sequence is armed"
+
 -- Nothing a linker writes or may move, in a body.
 #guard inBody (.adrp .x5 (.sym "S")) ==
   "f's sequence has an instruction the linker writes, which it may also move"
@@ -132,6 +140,14 @@ def commitX : Step Instr Cond := .instr (.store { base := .rdi } .rax)
 #guard why printer [] (.rseq armX [commitX]) == ""
 #guard why printer [] (.rseq armX [.instr (.leaSym .r9 "S"), commitX]) == ""
 #guard why printer [] (.seq (.rseq armX [commitX]) (.jump [.mov .rdx (.reg .rax)] "t")) == ""
+
+-- No store in a setup here either, though no routine here has one.
+#guard why printer [.store { base := .rax } .rdx] (.rseq armX [commitX]) ==
+  "f's setup stores to memory, before its sequence is armed"
+#guard why printer [.store8 { base := .rax } .rdx] (.block []) ==
+  "f's setup stores to memory, before its sequence is armed"
+#guard why printer [.push [.rdx]] (.block []) ==
+  "f's setup stores to memory, before its sequence is armed"
 
 -- After the commit, and in an exit's code, the same as on AArch64.
 #guard why printer [] (.seq (.rseq armX [commitX]) (.jump [.mov .rdx (.mem { base := .rax })] "t")) ==
