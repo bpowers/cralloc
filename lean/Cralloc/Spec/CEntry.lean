@@ -285,6 +285,9 @@ structure Layout : Prop where
   disj : (c.fixed s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1)
   slabs : ∀ x ∈ c.fixed s, x.1.Disjoint (c.slabs s)
   res : ∀ x ∈ c.fixed s, ∀ q ∈ c.A.reserved 0 s, x.1.Disjoint q
+  /-- On a target whose code forms the slabs' address from its page alone, the
+  slabs start on a page. -/
+  page : c.A.slabsOnPage = true → (c.slabs s).base.toNat % 4096 = 0
 
 /-- The state's regions are the routine's, which do not wrap around,
 overlap where one is written, or overlap the reserved stack. -/
@@ -372,7 +375,8 @@ def PushAbort (p : M.State) : Prop :=
 As the slab routines': `__rseq_offset` read (`o`), `rseq_cs` written
 (`d`), `cpu_id` read (`i`); then, for a CPU number with a slab, the reads
 that find the class, each of the values it read, and for the class `k`
-found the slab word (`w`) and the mask (`m`); then the pop's slot read
+found the slab word (`w`) and the mask's entry (`m`, of which a routine reads
+`Abi.maskBytes` bytes and tests the low 32 bits); then the pop's slot read
 (`v`) and commit, or the push's store of its pointer in the free slot and
 commit. The commit is the last access and the only store to a slab word. -/
 
@@ -388,7 +392,7 @@ def head (o d i : Nat) : List Event :=
 `w`, the mask `m` and the slot `v` it read. -/
 def popTail (i k w m v : Nat) : List Event :=
   [rd (wordAddr (c.sym s SLABS) i k) 8 w,
-    rd (c.sym s SLABS + BitVec.ofNat 64 (8 * k + MASK_DISP)) 4 m] ++
+    rd (c.sym s SLABS + BitVec.ofNat 64 (8 * k + MASK_DISP)) c.A.maskBytes m] ++
   if BitVec.ofNat 32 w &&& BitVec.ofNat 32 m ≠ 0 then
     [rd (BitVec.ofNat 64 w - 8) 8 v, wr (wordAddr (c.sym s SLABS) i k) 8 (BitVec.ofNat 64 w - 8).toNat]
   else []
@@ -396,7 +400,7 @@ def popTail (i k w m v : Nat) : List Event :=
 /-- The accesses of a push of `x` to the class `k` on the CPU `i`. -/
 def pushTail (x : BitVec 64) (i k w m : Nat) : List Event :=
   [rd (wordAddr (c.sym s SLABS) i k) 8 w,
-    rd (c.sym s SLABS + BitVec.ofNat 64 (8 * k + MASK_DISP)) 4 m] ++
+    rd (c.sym s SLABS + BitVec.ofNat 64 (8 * k + MASK_DISP)) c.A.maskBytes m] ++
   if BitVec.ofNat 32 (w + 8) &&& BitVec.ofNat 32 m ≠ 0 then
     [wr (BitVec.ofNat 64 w) 8 x.toNat, wr (wordAddr (c.sym s SLABS) i k) 8 (BitVec.ofNat 64 w + 8).toNat]
   else []
@@ -467,7 +471,7 @@ def contract {M : ISA} (c : Ctx M) (post : M.State → M.State → Prop)
     post := post
     exit := exit
     abort := fun s p => abort s p ∧ c.inv p
-    trace := trace
+    trace := fun s evs => trace s (c.slab.attemptEvents s evs)
     env := fun p p' => c.A.rd p' = c.ro p' ∧ c.A.wr p' = c.rw p' ∧
       Kept (c.rsVar p :: c.A.reserved 0 p) (c.mem p) (c.mem p') ∧ (c.inv p → c.inv p') }
   c.sig.contract A (post := Curry.const (fun _ _ _ => True) _) (x := x)
@@ -543,11 +547,17 @@ def tablePath (n : String) : String := "crate::c::table::" ++ n
 
 /-- What every C routine requires: of the thread, of where things are, and
 of the invariant. -/
-def safety (tables : List String) : List String :=
-  [registeredDoc,
-  s!"None of `SLABS` (the slabs, `{SLAB_COUNT} * {SLAB_BYTES}` bytes), the thread's `rseq_cs` \
+def safety (tables : List String) (d : Docs := {}) : List String :=
+  let stack := match d.stack false with
+    | some st => s!"overlap {st} or wrap"
+    | none => "wrap"
+  let magStack := match d.stack false with
+    | some st => s!", {st},"
+    | none => ""
+  [registeredDoc] ++ d.slabs ++
+  [s!"None of `SLABS` (the slabs, `{SLAB_COUNT} * {SLAB_BYTES}` bytes), the thread's `rseq_cs` \
     and `cpu_id`, `__rseq_offset`, the masks' table (2048 bytes {MASK_DISP} bytes above \
-    `SLABS`), {englishList "and" tables} may overlap the return address on the stack or wrap \
+    `SLABS`), {englishList "and" tables} may {stack} \
     around the end of the address space, and `rseq_cs` must not overlap any of the others; \
     nor may any but the slabs overlap the slabs (`VG.Spec.CEntry.Ctx.Layout`). Their contents \
     may be anything but as the next item says.",
@@ -556,8 +566,8 @@ def safety (tables : List String) : List String :=
     {MAG_LOG_MIN} ≤ j ≤ {MAG_LOG_MAX}; if it is not 0, in each of the {SLAB_COUNT} slabs the \
     word `8 * k` must be 0, a marker (a word whose low {MARKER_SHIFT} bits are 1), or the \
     address of a slot other than slot 0 of a magazine of that size (`8 * n` bytes, aligned to \
-    `8 * n`) that overlaps none of the memory the previous item names, the return address on \
-    the stack, or another slab's magazine of the class, nor wraps around the end of the \
+    `8 * n`) that overlaps none of the memory the previous item names{magStack} or another \
+    slab's magazine of the class, nor wraps around the end of the \
     address space. Every thread and the drainer must keep this from when the function is \
     called until it returns: the function may be aborted and restarted on any CPU in between \
     (`VG.Spec.CEntry.Ctx.inv`)."]
@@ -582,7 +592,7 @@ def rustConsts : List (String × IntTy × Nat) :=
     ("MASK_DISP", .usize, MASK_DISP), ("MASK_COUNT", .usize, MASK_COUNT),
     ("SLAB_COUNT", .usize, SLAB_COUNT), ("SLAB_BYTES", .usize, SLAB_BYTES)]
 
-def mallocApi : Api where
+def mallocApi (d : Docs := {}) : Api where
   module := "centry"
   name := "c_malloc"
   sig := mallocSig
@@ -593,14 +603,14 @@ def mallocApi : Api where
     magazine has none to give. `malloc_slow` starts with the thread's `rseq_cs` still pointing \
     at this function's sequence, which it has left.\n\n\
     Contract: `VG.Spec.CEntry.mallocContract`."
-  safety := safety [s!"the {MALLOC_LEN} bytes {TABLE_OFF} bytes into `C_SIZES`"]
+  safety := safety [s!"the {MALLOC_LEN} bytes {TABLE_OFF} bytes into `C_SIZES`"] d
   operands := operands (some SIZES) (slowPath "malloc_slow")
   rustConsts := rustConsts
   exports := [("c", "malloc")]
 
 /-- A free's `Api`: its name, mirror, slow path and the symbols it is exported as. -/
-def freeApiOf (name : String) (m : Mirror) (slow : String) (exports : List (String × String)) :
-    Api where
+def freeApiOf (name : String) (m : Mirror) (slow : String) (exports : List (String × String))
+    (d : Docs := {}) : Api where
   module := "centry"
   name := name
   sig := freeSig
@@ -611,14 +621,14 @@ def freeApiOf (name : String) (m : Mirror) (slow : String) (exports : List (Stri
     `{slow}(ptr)` if the index is not below 4096, the CPU number has no slab, the \
     class's mask is 0 or its magazine has no free slot to spare.\n\n\
     Contract: `VG.Spec.CEntry.freeContract`."
-  safety := safety (regionDoc m)
+  safety := safety (regionDoc m) d
   operands := operands none slow
   rustConsts := rustConsts
   exports := exports
 
 /-- A sized free's `Api`. -/
 def freeSizedApiOf (name : String) (m : Mirror) (slow : String)
-    (exports : List (String × String)) : Api where
+    (exports : List (String × String)) (d : Docs := {}) : Api where
   module := "centry"
   name := name
   sig := freeSizedSig
@@ -630,17 +640,17 @@ def freeSizedApiOf (name : String) (m : Mirror) (slow : String)
     below 4096, the CPU number has no slab, the class's mask is 0 or its magazine has no free \
     slot to spare. A wrong size frees exactly what the plain free would.\n\n\
     Contract: `VG.Spec.CEntry.freeSizedContract`."
-  safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc m)
+  safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc m) d
   operands := operands (some SIZED) slow
   rustConsts := rustConsts
   exports := exports
 
 /-- C's `free` and `free_sized`. -/
-def freeApi : Api := freeApiOf "c_free" .c (slowPath "free_slow") [("c", "free")]
-def freeSizedApi : Api :=
-  freeSizedApiOf "c_free_sized" .c (slowPath "free_sized_slow") [("c", "free_sized")]
+def freeApi (d : Docs := {}) : Api := freeApiOf "c_free" .c (slowPath "free_slow") [("c", "free")] d
+def freeSizedApi (d : Docs := {}) : Api :=
+  freeSizedApiOf "c_free_sized" .c (slowPath "free_sized_slow") [("c", "free_sized")] d
 
-def callocApi : Api where
+def callocApi (d : Docs := {}) : Api where
   module := "centry"
   name := "c_calloc"
   sig := callocSig
@@ -651,7 +661,7 @@ def callocApi : Api where
     returns it; otherwise, or if the CPU number has no slab, the class's mask is 0 or its \
     magazine has none to give, tail-calls `c::slow::calloc_slow_args(n, size)`.\n\n\
     Contract: `VG.Spec.CEntry.callocContract`."
-  safety := safety [s!"the {CALLOC_LEN} bytes {TABLE_OFF} bytes into `C_CALLOC_SIZES`"]
+  safety := safety [s!"the {CALLOC_LEN} bytes {TABLE_OFF} bytes into `C_CALLOC_SIZES`"] d
   operands := operands (some CALLOC_SIZES) (slowPath "calloc_slow_args") ++
     [(ZERO, .sym (slowPath "calloc_zero_tail"))]
   rustConsts := rustConsts ++ [("CALLOC_MAX", .usize, CALLOC_MAX), ("CALLOC_LEN", .usize, CALLOC_LEN)]

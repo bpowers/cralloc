@@ -684,9 +684,11 @@ them. The copy's operands name the same items as the function's, through
 expanded; so `checkExports` allows exports only of code whose operands are
 all paths into that crate (`crate::…`), that calls no function and reads no
 table of constants (which `function` names relative to its own module), and
-that no `cfg` predicate selects (a `cfg` in an expansion would read the
-features of the crate that invokes it). The copy is the printed code
-`function` emits, and the symbol the only difference. -/
+that no cargo feature selects (a `cfg` of one in an expansion would read the
+features of the crate that invokes it). The target's C library is the same in
+every crate of a build, so it may select a copy, and a pair of functions it
+selects (`checkUnique`) may export one symbol. The copy is the printed code
+`function` emits under the function's `cfg`, and the symbol the only difference. -/
 
 /-- The operand declaration `operandText` gives, with a path into the crate
 (`crate::…`) made one through `$crate`, for a macro. -/
@@ -700,6 +702,7 @@ def macroOperand (text : String) : String :=
 def exportFunction (a : Artifact) (lines : List Line) (sym : String) : String :=
   let body := unwindLines a.target.printer lines ++ a.target.printer.funcAlign.map .text
   let refs := dedup (body.flatMap Line.refs)
+  (match cfgAttr a.cfg with | "" => "" | c => "        " ++ c) ++
   "        #[unsafe(naked)]\n" ++
   "        #[unsafe(no_mangle)]\n" ++
   s!"        unsafe extern \"{a.target.rustAbi}\" fn {sym}{a.sig.rust} " ++ "{\n" ++
@@ -730,16 +733,17 @@ def exportsFile (t : String) (ps : List Prepared) : String :=
     "    };\n}\n")
 
 /-- `p`'s exports are as the module docs require: each group and symbol a
-Rust identifier, no symbol exported twice on the target (by `ps`), and the
-artifact one whose code a macro can copy: out of line, selected by no `cfg`
-predicate, calling no function, reading no table of constants, and naming
+Rust identifier, no symbol exported twice on the target (by `ps`) but by a function's
+pair, and the artifact one whose code a macro can copy: out of line, selected by no
+cargo feature, calling no function, reading no table of constants, and naming
 only operands that are paths into the crate. -/
 def checkExports (ps : List Prepared) (p : Prepared) : Except String Unit := do
   let a := p.art
   if a.exports.isEmpty then return
   let n := s!"{a.target.name}: {a.name}"
   if a.target.inline then throw s!"{n} is inline but has exports"
-  if a.cfg.isSome then throw s!"{n} is selected by a `cfg` predicate but has exports"
+  if a.cfg.any fun (cs, _) => cs.any fun | .feature _ => true | .targetEnv _ => false then
+    throw s!"{n} is selected by a cargo feature but has exports"
   unless a.code.calls.isEmpty do throw s!"{n} calls a function but has exports"
   unless a.consts.isEmpty do throw s!"{n} reads tables of constants but has exports"
   for (_, op) in a.operands do
@@ -750,9 +754,9 @@ def checkExports (ps : List Prepared) (p : Prepared) : Except String Unit := do
   for (g, sym) in a.exports do
     unless rustIdent g && rustIdent sym do
       throw s!"{n}'s export `{sym}` of group `{g}` is not named by Rust identifiers"
-    let all := ps.flatMap fun q =>
-      if q.art.target.name == a.target.name then q.art.exports.map (·.2) else []
-    unless (all.filter (· == sym)).length == 1 do
+    let others := ps.filter fun q => q.art.target.name == a.target.name && q.art.name != a.name &&
+      q.art.exports.any (·.2 == sym)
+    unless others.isEmpty && (a.exports.filter (·.2 == sym)).length == 1 do
       throw s!"{a.target.name}: the symbol `{sym}` is exported more than once"
 
 /-- Whether `c`, or the code of a function it calls, has a restartable

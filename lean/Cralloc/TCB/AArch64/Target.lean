@@ -69,6 +69,7 @@ def abi : Abi isa where
   tp := some fun s => s.tpidr
   setupFindsArea := true
   slabsOnPage := true
+  maskBytes := 8
 
 /-! ## Restartable sequences
 
