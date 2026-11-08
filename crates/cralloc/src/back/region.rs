@@ -27,15 +27,20 @@
 //!   64 MiB halved RSS, 67 to 35 MiB, but took the charge only to 56). It is bounded at under
 //!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
 //!   those pages clean, so the retained count does not see them. A purge of a free slot may
-//!   return it in pieces across steps (`purge::piece`); in a class of a huge page or more the
-//!   pieces start at huge-page boundaries and are a huge page at least, so a slot whose
-//!   advice the OS refused to take back is never left with a huge page partly returned.
+//!   return it in pieces across steps (`purge::piece`); where a huge page is 2 MiB, in a class of
+//!   a huge page or more the pieces start at huge-page boundaries and are a huge page at least, so
+//!   a slot whose advice the OS refused to take back is not left with a huge page partly returned
+//!   (`policy::whole_huge_pieces`).
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
-//!   purge, the first claim of a carved slot (`mark_fresh`, for the pages past its block) and a
+//!   purge, the first claim of a carved slot (`mark_fresh`, for the pages outside its block) and a
 //!   holder's return of pages of its own slot (`mark_clean`: a shrink's tail, the pieces behind
 //!   a move, the slack a claim trims) set them; a claim and anything that widens a held block
 //!   clear them under what it may write (`settle_slot`, `cover`). The retained count of a free
-//!   large slot is its pages that are not clean (`charge`).
+//!   large slot is its pages that are not clean (`charge`). So the pages a block's stagger passes
+//!   over stay clean, as they were: nothing wrote them. A tenant at the slot's start clears them
+//!   at its claim and when it grows back over them (`cover`), and a slot advised for huge pages at
+//!   `cover`, since a huge fault makes them resident. Left to count as written, they would charge a free slot for up to half a megabyte
+//!   that was never resident, against the floor, the cap and the hold.
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident. The claim of a large slot also finds, in the same pass, the
@@ -54,13 +59,13 @@
 
 use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
-    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_MAX_HUGE_PAGES, COMMIT_AHEAD_PAGES, commit_ahead,
+    COMMIT_AHEAD_HUGE_PAGES, PAGE_STAGGER, commit_ahead, commit_ahead_least, commit_ahead_most,
     grown_huge, huge_after, wants_huge,
 };
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
 use crate::os::HugePages;
-use crate::space::RegionId;
+use crate::space::{Geometry, RegionId};
 
 /// What a carve got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -128,8 +133,9 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
     let layout = host.layout();
     let huge = switch_to_huge(host, region, need);
     let used = now.committed.saturating_sub(layout.origin_page());
-    let far = commit_target(layout, huge, need, used);
-    let near = commit_target(layout, huge, need, 0);
+    let geometry = host.geometry();
+    let far = commit_target(geometry, layout, huge, need, used);
+    let near = commit_target(geometry, layout, huge, need, 0);
     match commit_range(host, region, now, far) {
         None if near < far => commit_range(host, region, now, near),
         done => done,
@@ -139,18 +145,24 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
 /// The page a commit for a carve that needs pages up to `need` makes the region writable up
 /// to, in a region with `used` pages committed above its origin and its huge-page part, if it
 /// has one, starting at page `huge`.
-fn commit_target(layout: &Layout, huge: Option<u32>, need: u32, used: u32) -> u32 {
-    let most = COMMIT_AHEAD_MAX_HUGE_PAGES as u32 * layout.huge_pages();
+fn commit_target(
+    geometry: Geometry,
+    layout: &Layout,
+    huge: Option<u32>,
+    need: u32,
+    used: u32,
+) -> u32 {
+    let most = commit_ahead_most(geometry);
     let target = match huge {
         Some(from) if need > from => {
             let least = COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages();
             layout.huge_ceil(need) + layout.huge_ceil(commit_ahead(used, least, most))
         }
-        _ => need + commit_ahead(used, COMMIT_AHEAD_PAGES as u32, most),
+        _ => need + commit_ahead(used, commit_ahead_least(geometry), most),
     };
     // A small-page commit never runs into the huge-page part, whose pages are committed and
     // faulted whole, nor, before the region has one, past the threshold where it will start.
-    let limit = huge.or_else(|| huge_threshold(layout));
+    let limit = huge.or_else(|| huge_threshold(geometry, layout));
     let target = match limit {
         Some(from) if need <= from => target.min(from),
         _ => target,
@@ -183,8 +195,8 @@ fn commit_range<H: Host>(host: &H, region: RegionId, now: Grow, target: u32) -> 
 /// The page at which a region of this layout's class switches to huge pages
 /// (`policy::huge_after`), a huge-page boundary; `None` if the class never gets them or the
 /// region ends there.
-fn huge_threshold(layout: &Layout) -> Option<u32> {
-    if !wants_huge(layout.size(), layout.page_size()) {
+fn huge_threshold(geometry: Geometry, layout: &Layout) -> Option<u32> {
+    if !wants_huge(layout.size(), geometry) {
         return None;
     }
     let region_huge_pages = layout.region_pages() / layout.huge_pages();
@@ -207,7 +219,7 @@ fn switch_to_huge<H: Host>(host: &H, region: RegionId, need: u32) -> Option<u32>
     if let Some(from) = Hints::unpack(seen).huge_from {
         return Some(from);
     }
-    let at = huge_threshold(layout)?;
+    let at = huge_threshold(host.geometry(), layout)?;
     if need <= at {
         return None;
     }
@@ -559,16 +571,23 @@ fn count(bits: u64) -> usize {
     }
 }
 
-/// For the thread that has just carved large slot `slot` for a block of `size` bytes: marks the
-/// slot's pages past what the block may write (`extent_of`) clean. They have never been
-/// written: a carved slot's pages are fresh. This is the one place a clean bit is set without
-/// a purge, and a slot is carved once. A block that moved in with room to grow is then
-/// charged, when it is freed, what it can have touched, not four or five times as much.
-pub(crate) fn mark_fresh<H: Host>(host: &H, region: RegionId, slot: u32, size: usize) {
+/// For the thread that has just carved large slot `slot` for a block of `size` bytes, `into`
+/// bytes into the slot: marks the slot's pages outside what the block may write clean, those past
+/// its extent (`extent_of`) and those its stagger passes over. They have never been written: a
+/// carved slot's pages are fresh. This is the one place a clean bit is set without a purge, and a
+/// slot is carved once. A block that moved in with room to grow is then charged, when it is freed,
+/// what it can have touched, not four or five times as much.
+pub(crate) fn mark_fresh<H: Host>(host: &H, region: RegionId, slot: u32, size: usize, into: usize) {
     let layout = host.layout();
     let Some(unit) = layout.slot_unit(slot) else {
         return;
     };
+    let first = layout.first_page(slot, unit, into);
+    if first > unit.start {
+        for (w, mask) in page_words(unit.start, first) {
+            host.meta(region, layout.clean_word(w)).fetch_or(mask);
+        }
+    }
     let end = extent_of(layout, slot, unit, size, false);
     if end >= unit.end {
         return;
@@ -600,16 +619,27 @@ pub(crate) fn mark_clean<H: Host>(host: &H, region: RegionId, slot: u32, from: u
 /// which clears them up to the size it was claimed for (`settle_slot`), this keeps every clean
 /// bit of a held slot true. Only a resize, a grown move or a claim of a slot that kept its
 /// advice calls it.
-pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
+///
+/// From the first page the tenant, `into` bytes into the slot, may write: below that it writes
+/// nothing, and the pages stay clean. A tenant at the slot's start may write them, and a shrink
+/// may have marked them clean again since its claim, so they are cleared by its real start and
+/// not by the slot's stagger. From the slot's start in a slot advised for huge pages, since there
+/// a huge fault makes the pages below the block resident too.
+pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32, into: usize) {
     let layout = host.layout();
     let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
         return;
     };
     let end = extent_of(layout, slot, unit, now.size, now.huge);
-    if end <= unit.start {
+    let from = if now.huge {
+        unit.start
+    } else {
+        layout.first_page(slot, unit, into)
+    };
+    if end <= from {
         return;
     }
-    for (w, inside) in page_words(unit.start, end) {
+    for (w, inside) in page_words(from, end) {
         let word = host.meta(region, layout.clean_word(w));
         if word.load() & inside != 0 {
             word.fetch_and(!inside);
@@ -624,7 +654,8 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
 /// may need; past it, only what tenants before the last one wrote. Both extents are in whole
 /// huge pages if the slot is still advised for them, which only a refused call to take the
 /// advice back leaves (`unadvise`). Every extent counts from the slot's stagger, whether or
-/// not its block was staggered, so it errs toward keeping a page.
+/// not its block was staggered, so it errs toward keeping the stagger's pages, for the rare tenant
+/// aligned past a line.
 pub(crate) const fn keep_from(
     layout: &Layout,
     slot: u32,
@@ -637,21 +668,26 @@ pub(crate) const fn keep_from(
     if new > old { new } else { old }
 }
 
-/// `settle` for one large slot, just claimed for a block of `size` bytes: tests and clears its
-/// zero bit, and clears the clean bits of the pages the block may write (`extent_of`),
-/// writing only words that change; the pages past them stay clean, which is true as long as
-/// nothing writes them. Its `resident` is the slot's pages that were not clean, counted as
-/// `charge` counts them, which is what the free or purge that left it counted; a claim of one
-/// large slot revives no other slot's pages, since a large slot is whole pages.
+/// `settle` for one large slot, just claimed for a block of `size` bytes that starts `into` bytes
+/// into it: tests and clears its zero bit, and clears the clean bits of the pages the block may
+/// write, from its first page to its extent (`extent_of`), writing only words that change; the
+/// pages outside them stay clean, which is true as long as nothing writes them. Its `resident` is
+/// the slot's pages that were not clean, counted as `charge` counts them, which is what the free
+/// or purge that left it counted; a claim of one large slot revives no other slot's pages, since a
+/// large slot is whole pages.
 ///
 /// With `last`, the size word the slot's last tenant left, its `slack` is the pages past
 /// `keep_from` that are not clean, found in the same pass over the slot's clean words, which
-/// the claimer returns.
+/// the claimer returns. Pages an earlier tenant at the slot's start wrote below this block's first
+/// stay as they are, resident and in no count until the block's free counts them: at most the
+/// stagger's pages, and only where tenants aligned past a line and tenants that are not share a
+/// slot.
 pub(crate) fn settle_slot<H: Host>(
     host: &H,
     region: RegionId,
     slot: u32,
     size: usize,
+    into: usize,
     last: Option<Recorded>,
 ) -> Settled {
     let layout = host.layout();
@@ -680,6 +716,7 @@ pub(crate) fn settle_slot<H: Host>(
     // the pages past what the claim keeps that are not clean. `keep` is at or past `end`, so
     // the bits cleared and the slack found never overlap.
     let end = extent_of(layout, slot, unit, size, false);
+    let first = layout.first_page(slot, unit, into);
     let keep = match last {
         Some(last) => keep_from(layout, slot, unit, size, last),
         None => unit.end,
@@ -691,6 +728,11 @@ pub(crate) fn settle_slot<H: Host>(
         let seen = word.load() & mask;
         clean += count(seen);
         let inside = mask & below(w, end);
+        let inside = if PAGE_STAGGER {
+            inside & !below(w, first)
+        } else {
+            inside
+        };
         if seen & inside != 0 {
             word.fetch_and(!inside);
         }
@@ -779,8 +821,7 @@ pub(crate) fn advise_grown<H: Host>(
     let layout = host.layout();
     let now = recorded(host, region, slot)?;
     let page = layout.page_size();
-    let huge = page * layout.huge_pages() as usize;
-    if !grown_huge(old, new, huge) {
+    if !grown_huge(old, new, host.geometry()) {
         return None;
     }
     let unit = layout.huge_interior(slot)?;

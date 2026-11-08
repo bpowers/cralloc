@@ -46,6 +46,8 @@ mod interleave;
 mod magazine;
 mod maintain;
 #[cfg(test)]
+mod ordering;
+#[cfg(test)]
 mod rules;
 mod shed;
 pub(crate) mod siblings;

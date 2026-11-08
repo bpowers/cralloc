@@ -31,8 +31,12 @@ lto = "fat"
 static ALLOCATOR: cralloc::Cralloc = cralloc::Cralloc;
 ```
 
-A binary can add the `executable` feature, which saves a load on the fast path and does not
-link into a shared library. The `allocator-api` feature implements the `Allocator` trait for
+On aarch64, also build for a CPU with the large-system atomics, such as with
+`RUSTFLAGS=-Ctarget-cpu=native` for a program that runs where it is built, so that the slow
+paths' atomics are inline. The generic target works, and calls outlined atomics instead.
+
+On x86-64 a binary can add the `executable` feature, which saves a load on the fast path and
+does not link into a shared library; on aarch64 it changes nothing. The `allocator-api` feature implements the `Allocator` trait for
 `Cralloc`, on toolchains that have the trait (nightly, until it is stable).
 `Cralloc::collect()` returns to the OS everything the heap can give back now, for a program
 that knows it is idle, and `Cralloc::inspect` reports where the heap's memory is.
@@ -64,8 +68,10 @@ LD_PRELOAD=$PWD/target/release/libcralloc_preload.so some-program
 
 Limits worth knowing:
 
-- x86-64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older versions are
-  untested. It needs glibc 2.35 or later (the first that registers restartable sequences for its
+- x86-64 and aarch64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older
+  versions are untested. On aarch64 it finds the kernel's page size when it starts: kernels with
+  pages of 16 KiB and 4 KiB are tested, and one with 64 KiB has only been simulated. It needs
+  glibc 2.35 or later (the first that registers restartable sequences for its
   threads), dynamically or statically linked, or musl. On musl the allocator registers its own, in
   executables only: a musl shared library or preload library is not supported. A thread without a registration,
   as under valgrind, is served correctly but slowly.

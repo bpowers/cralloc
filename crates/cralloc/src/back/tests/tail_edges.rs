@@ -5,7 +5,7 @@
 //! on the code.
 
 use super::super::layout::{Grow, Hints};
-use super::super::policy::TAIL_HEADROOM_HUGE_PAGES;
+use super::super::policy::tail_headroom;
 use super::super::purge::Scope;
 use super::super::tail::{self, Change, Tail};
 use super::super::tree::Host;
@@ -98,7 +98,7 @@ fn a_counting_step_that_resumes_inside_a_huge_page_returns_nothing() {
         true,
         Scope::Idle,
         false,
-        true,
+        crate::back::purge::Splits::One,
     );
     assert!(purged != 0 && !done);
     assert_eq!(os.calls(Call::SplitHuge), 1);
@@ -117,7 +117,7 @@ fn a_counting_step_that_resumes_inside_a_huge_page_returns_nothing() {
         true,
         Scope::Idle,
         true,
-        true,
+        crate::back::purge::Splits::One,
     );
     assert_eq!(
         (
@@ -150,12 +150,12 @@ fn a_step_past_its_limit_returns_no_more_than_a_run_over() {
         true,
         Scope::IdleAnyRun,
         true,
-        false,
+        crate::back::purge::Splits::Any,
     );
     // It may finish the run it is on: one run of the goal's length, rounded to the shortest
     // run a pass takes.
     assert!(
-        purged <= super::super::policy::PURGE_MIN_RUN_PAGES as usize * page(),
+        purged <= super::super::policy::PURGE_MIN_RUN_PAGE_UNITS as usize * page(),
         "a step with a goal of one page returned {} pages",
         purged / page()
     );
@@ -452,7 +452,7 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
 }
 
 /// The headroom of a raise: the advice goes back on up to the frontier and
-/// `TAIL_HEADROOM_HUGE_PAGES` beyond, "never further". The standard shape's regions are four
+/// `tail_headroom` beyond, "never further". The standard shape's regions are four
 /// huge pages, fewer than the headroom, so no other test reaches a raise that stops short of
 /// the region's end. It is here because nothing else fails when the headroom, or the boundary a
 /// partial raise writes, is wrong.
@@ -482,7 +482,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
     let from = Hints::unpack(host.hints(region).load()).huge_from.unwrap();
     let first = from / hp;
     assert!(
-        first + 2 + TAIL_HEADROOM_HUGE_PAGES < units.min(top.div_ceil(hp)),
+        first + 2 + tail_headroom(Standard::GEOMETRY) < units.min(top.div_ceil(hp)),
         "the region is too short for a partial raise: {first} of {units}, carved to {top}"
     );
     // The frontier aged: the advice may come off above it only.
@@ -497,7 +497,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
         Change::Done
     );
     let word = Tail::unpack(host.tail(region).load());
-    let to = first + 2 + TAIL_HEADROOM_HUGE_PAGES;
+    let to = first + 2 + tail_headroom(Standard::GEOMETRY);
     assert_eq!(word.from, to, "{word:?}");
     let region_base = back.space().region(region);
     for unit in first..units {
@@ -514,13 +514,21 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
 /// The kernel's part, on the host itself: nothing else runs `LinuxOs::split_huge`, so a wrong
 /// advice number there (`MADV_FREE` or `MADV_DONTNEED` would destroy a run that a fill may
 /// claim between the split and the purge's own claim) passes every other test.
+#[cfg(cralloc_os)]
 mod kernel {
     use crate::os::linux::LinuxOs;
     use crate::os::{HugePages, Os};
     use std::string::String;
 
-    const PAGE: usize = 4096;
-    const HUGE: usize = 2 << 20;
+    /// The kernel's page size.
+    fn page() -> usize {
+        LinuxOs::geometry().page_size()
+    }
+
+    /// The kernel's huge page size.
+    fn huge() -> usize {
+        LinuxOs::geometry().huge_page_size()
+    }
 
     /// `AnonHugePages` of the mapping that holds `addr`, in KiB.
     fn anon_huge_kb(addr: usize) -> usize {
@@ -549,32 +557,36 @@ mod kernel {
     #[cfg_attr(miri, ignore)]
     fn split_huge_keeps_contents_and_splits_the_huge_page() {
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let base = os.reserve(2 * huge(), huge()).unwrap();
         let p = base.as_ptr();
-        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        let run = base.map_addr(|a| a.saturating_add(page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
-            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
-            for i in 0..HUGE / PAGE {
-                p.add(i * PAGE + 7).write(i as u8 | 1);
+            os.commit(base, 2 * huge()).unwrap();
+            if os.advise_huge(base, 2 * huge(), HugePages::Prefer).is_err() {
+                std::eprintln!("this kernel has no transparent huge pages: nothing to show");
+                os.unmap(base, 2 * huge()).unwrap();
+                return;
+            }
+            for i in 0..huge() / page() {
+                p.add(i * page() + 7).write(i as u8 | 1);
             }
             let before = anon_huge_kb(base.addr().get());
-            os.split_huge(run, 4 * PAGE).unwrap();
+            os.split_huge(run, 4 * page()).unwrap();
             let after = anon_huge_kb(base.addr().get());
             std::eprintln!("AnonHugePages {before} kB before the split, {after} after");
-            for i in 0..HUGE / PAGE {
-                assert_eq!(p.add(i * PAGE + 7).read(), i as u8 | 1, "page {i}");
+            for i in 0..huge() / page() {
+                assert_eq!(p.add(i * page() + 7).read(), i as u8 | 1, "page {i}");
             }
-            if before >= HUGE / 1024 {
+            if before >= huge() / 1024 {
                 assert!(after < before, "{before} kB huge before, {after} after");
             }
-            os.purge(run, 4 * PAGE).unwrap();
-            for i in 0..HUGE / PAGE {
+            os.purge(run, 4 * page()).unwrap();
+            for i in 0..huge() / page() {
                 let want = if (1..5).contains(&i) { 0 } else { i as u8 | 1 };
-                assert_eq!(p.add(i * PAGE + 7).read(), want, "page {i}");
+                assert_eq!(p.add(i * page() + 7).read(), want, "page {i}");
             }
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 
@@ -594,42 +606,46 @@ mod kernel {
     fn mincore_follows_a_return_a_rebuild_and_a_split() {
         const MADV_COLLAPSE: i32 = 25;
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let base = os.reserve(2 * huge(), huge()).unwrap();
         let p = base.as_ptr();
-        let at = |page: usize| base.map_addr(|a| a.saturating_add(page * PAGE));
+        let at = |n: usize| base.map_addr(|a| a.saturating_add(n * page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
-            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
-            for i in 0..HUGE / PAGE {
-                p.add(i * PAGE + 7).write(i as u8 | 1);
-            }
-            // The walk returns pages 8..72 of the huge page.
-            os.split_huge(at(8), 64 * PAGE).unwrap();
-            os.purge(at(8), 64 * PAGE).unwrap();
-            assert_eq!(os.resident(at(8), 64 * PAGE), Ok(0), "returned pages");
-            assert_eq!(os.resident(at(72), 8 * PAGE), Ok(8), "kept pages");
-            if madvise(p.cast(), HUGE, MADV_COLLAPSE) != 0 {
-                std::eprintln!("no MADV_COLLAPSE here: the rebuild is not shown");
-                os.unmap(base, 2 * HUGE).unwrap();
+            os.commit(base, 2 * huge()).unwrap();
+            if os.advise_huge(base, 2 * huge(), HugePages::Prefer).is_err() {
+                std::eprintln!("this kernel has no transparent huge pages: nothing to show");
+                os.unmap(base, 2 * huge()).unwrap();
                 return;
             }
-            let rebuilt = os.resident(at(8), 64 * PAGE);
+            for i in 0..huge() / page() {
+                p.add(i * page() + 7).write(i as u8 | 1);
+            }
+            // The walk returns pages 8..72 of the huge page.
+            os.split_huge(at(8), 64 * page()).unwrap();
+            os.purge(at(8), 64 * page()).unwrap();
+            assert_eq!(os.resident(at(8), 64 * page()), Ok(0), "returned pages");
+            assert_eq!(os.resident(at(72), 8 * page()), Ok(8), "kept pages");
+            if madvise(p.cast(), huge(), MADV_COLLAPSE) != 0 {
+                std::eprintln!("no MADV_COLLAPSE here: the rebuild is not shown");
+                os.unmap(base, 2 * huge()).unwrap();
+                return;
+            }
+            let rebuilt = os.resident(at(8), 64 * page());
             std::eprintln!("after the rebuild: {rebuilt:?} of 64 returned pages resident");
             assert_eq!(rebuilt, Ok(64), "rebuilt pages");
             // The walk asks, splits over its first run of 32 and returns it; then asks about
             // the next run.
-            os.split_huge(at(8), 32 * PAGE).unwrap();
-            os.purge(at(8), 32 * PAGE).unwrap();
-            let rest = os.resident(at(40), 32 * PAGE);
+            os.split_huge(at(8), 32 * page()).unwrap();
+            os.purge(at(8), 32 * page()).unwrap();
+            let rest = os.resident(at(40), 32 * page());
             std::eprintln!("after the split: {rest:?} of the next 32 clean pages resident");
-            assert_eq!(os.resident(at(8), 32 * PAGE), Ok(0));
+            assert_eq!(os.resident(at(8), 32 * page()), Ok(0));
             assert_eq!(
                 rest,
                 Ok(32),
                 "the rest of a rebuilt huge page after its split"
             );
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 
@@ -640,22 +656,22 @@ mod kernel {
     #[cfg_attr(miri, ignore)]
     fn a_locked_mapping_refuses_the_split() {
         let os = LinuxOs;
-        let base = os.reserve(2 * HUGE, HUGE).unwrap();
-        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        let base = os.reserve(2 * huge(), huge()).unwrap();
+        let run = base.map_addr(|a| a.saturating_add(page()));
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * HUGE).unwrap();
+            os.commit(base, 2 * huge()).unwrap();
             base.as_ptr().write(1);
-            if mlock(base.as_ptr().cast(), HUGE) != 0 {
+            if mlock(base.as_ptr().cast(), huge()) != 0 {
                 // No allowance to lock memory here: nothing to show.
                 std::eprintln!("mlock refused: nothing shown");
-                os.unmap(base, 2 * HUGE).unwrap();
+                os.unmap(base, 2 * huge()).unwrap();
                 return;
             }
-            let split = os.split_huge(run, 4 * PAGE);
+            let split = os.split_huge(run, 4 * page());
             std::eprintln!("split of a locked mapping: {split:?}");
             assert!(split.is_err());
-            os.unmap(base, 2 * HUGE).unwrap();
+            os.unmap(base, 2 * huge()).unwrap();
         }
     }
 }
@@ -752,7 +768,7 @@ fn every_class_with_huge_pages_starts_past_the_first_page() {
     for geometry in [crate::space::Geometry::DESIGN] {
         let plan = geometry.largest_plan();
         for class in crate::classes::SmallClass::all() {
-            if !super::super::policy::wants_huge(class.size(), geometry.page_size()) {
+            if !super::super::policy::wants_huge(class.size(), geometry) {
                 continue;
             }
             assert!(
@@ -888,6 +904,9 @@ mod protocol {
 
         fn layout(&self) -> &Layout {
             self.host.layout()
+        }
+        fn geometry(&self) -> crate::space::Geometry {
+            self.host.geometry()
         }
         fn region(&self, index: usize) -> Option<RegionId> {
             self.host.region(index)

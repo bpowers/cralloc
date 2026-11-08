@@ -44,12 +44,13 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 /// long as the `Space` exists.
 ///
 /// Every field is a whole word. Every slow path makes a `Space` from the published word and
-/// copies it around, and a [`Plan`], whose geometry is eleven bytes of odd-sized fields, was
+/// copies it around, and a [`Plan`], whose geometry is a dozen bytes of odd-sized fields, was
 /// written a few bytes at a time and read back eight at a time: a load that spans several
 /// stores waits for all of them to retire instead of taking its value from the store buffer,
 /// which cost each slow path about fifty cycles. So a `Space` keeps only the region shift, and
-/// [`Space::plan`] rebuilds the plan from the geometry, which is a constant of the OS, and the
-/// shift, which folds to arithmetic on one register.
+/// [`Space::plan`] rebuilds the plan from the geometry, which is fixed for the process (a
+/// constant on x86-64, one load on aarch64), and the shift, which folds to arithmetic on one
+/// register.
 pub struct Space<'os, O: Os> {
     base: NonNull<u8>,
     /// `log2` of the region size: the plan's, kept as a whole word (see above).
@@ -102,7 +103,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// half that, and so on down to the floor, with the same number of regions each time. The
     /// error is the OS's answer at the floor: below it the heap cannot start.
     pub fn reserve(os: &'os O) -> Result<Space<'os, O>, OsError> {
-        let geometry = O::GEOMETRY;
+        let geometry = O::geometry();
         let mut shift = geometry.max_region_shift();
         loop {
             let Some(plan) = geometry.plan(shift) else {
@@ -129,11 +130,11 @@ impl<'os, O: Os> Space<'os, O> {
     }
 
     /// The layout, including the region size this reservation got: the OS's geometry with this
-    /// reservation's region shift. Every `Space` is made on `O::GEOMETRY`, by
+    /// reservation's region shift. Every `Space` is made on `O::geometry()`, by
     /// [`Space::reserve`] and [`SpaceCell`], whose plans come from it.
     #[inline(always)]
     pub fn plan(&self) -> Plan {
-        Plan::new(O::GEOMETRY, self.region_shift as u8)
+        Plan::new(O::geometry(), self.region_shift as u8)
     }
 
     #[inline(always)]
@@ -223,7 +224,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// Whether `start..start + len` is a range the OS calls accept: inside this reservation,
     /// page-aligned, a whole number of pages and not empty.
     pub fn is_callable_range(&self, start: NonNull<u8>, len: usize) -> bool {
-        let page = O::GEOMETRY.page_size();
+        let page = O::geometry().page_size();
         let offset = start.addr().get().wrapping_sub(self.base.addr().get());
         let size = self.plan().size();
         // The base is region-aligned, so an aligned offset is an aligned address.
@@ -256,6 +257,11 @@ impl<'os, O: Os> Space<'os, O> {
         advice: HugePages,
     ) -> Result<(), OsError> {
         self.check(start, len);
+        // A plan without huge pages reaches here with its regions' units, which are no huge
+        // pages to the kernel.
+        if advice == HugePages::Prefer && !self.plan().geometry().huge_pages_usable() {
+            return Ok(());
+        }
         // SAFETY: RESERVATION-01. as in `commit`.
         unsafe { self.os.advise_huge(start, len, advice) }
     }
@@ -373,7 +379,7 @@ impl<O: Os> SpaceCell<O> {
         if let Some(space) = self.get() {
             return Ok(space);
         }
-        let geometry = O::GEOMETRY;
+        let geometry = O::geometry();
         let mut shift = geometry.max_region_shift();
         let mut patience = PATIENCE;
         loop {
@@ -454,7 +460,7 @@ impl<O: Os> SpaceCell<O> {
         // Clearing the shift leaves the base, which is not zero. `unwrap_or` keeps this total
         // for a word no `encode` made, which cannot be stored.
         let base = word.map_addr(|w| NonZeroUsize::new(unpack(w.get()).0).unwrap_or(w));
-        Space::new(base, Plan::new(O::GEOMETRY, shift as u8), &self.os)
+        Space::new(base, Plan::new(O::geometry(), shift as u8), &self.os)
     }
 }
 
@@ -502,7 +508,7 @@ mod tests {
     type Sim = SimOs<Standard>;
 
     fn largest() -> Plan {
-        Sim::GEOMETRY.largest_plan()
+        Sim::geometry().largest_plan()
     }
 
     #[test]
@@ -534,7 +540,7 @@ mod tests {
         let os = Sim::new();
         os.set_faults(Call::Reserve, Faults::ALWAYS);
         assert_eq!(Space::reserve(&os), Err(OsError::ENOMEM));
-        let g = Sim::GEOMETRY;
+        let g = Sim::geometry();
         let attempts = g.max_region_shift() - g.min_region_shift() + 1;
         assert_eq!(os.calls(Call::Reserve), attempts as u64);
     }
@@ -590,7 +596,7 @@ mod tests {
         let os = Sim::new();
         let space = Space::reserve(&os).unwrap();
         let region = space.region(space.plan().region(0).unwrap());
-        let page = Sim::GEOMETRY.page_size();
+        let page = Sim::geometry().page_size();
         space.commit(region, 2 * page).unwrap();
         assert!(os.is_writable(region, 2 * page));
         // SAFETY: the two pages were just committed and nothing else uses them.
@@ -608,7 +614,7 @@ mod tests {
         let os = Sim::new();
         let space = Space::reserve(&os).unwrap();
         let page = space.process_page();
-        let size = Sim::GEOMETRY.page_size();
+        let size = Sim::geometry().page_size();
         space.commit(page, size).unwrap();
         space.wipe_on_fork(page, size).unwrap();
         // SAFETY: committed, and nothing else uses it.
@@ -623,7 +629,7 @@ mod tests {
     fn ranges_outside_the_reservation_are_refused() {
         let os = Sim::new();
         let space = Space::reserve(&os).unwrap();
-        let page = Sim::GEOMETRY.page_size();
+        let page = Sim::geometry().page_size();
         let base = space.base();
         let size = space.plan().size();
         assert!(space.is_callable_range(base, page));
@@ -667,7 +673,7 @@ mod tests {
 
     #[test]
     fn the_published_word_keeps_a_shrunken_region_size() {
-        let g = Sim::GEOMETRY;
+        let g = Sim::geometry();
         let floor = g.smallest_plan();
         let cell = SpaceCell::new(Sim::with_capacity(
             floor.size().next_multiple_of(largest().region_size()),
@@ -709,7 +715,7 @@ mod tests {
 
     /// Room for regions half the largest size, as under an address-space limit.
     fn half_room() -> SpaceCell<Sim> {
-        let g = Sim::GEOMETRY;
+        let g = Sim::geometry();
         let half = g.plan(g.max_region_shift() - 1).unwrap();
         SpaceCell::new(Sim::with_capacity(
             half.size().next_multiple_of(largest().region_size()),
@@ -750,7 +756,7 @@ mod tests {
         let space = cell.get_or_reserve().unwrap();
         assert_eq!(
             space.plan().region_shift(),
-            Sim::GEOMETRY.max_region_shift() - 1
+            Sim::geometry().max_region_shift() - 1
         );
         assert_eq!(cell.os().calls(Call::Reserve), 2);
         assert_eq!(cell.reserving.load(Ordering::Relaxed), 0);
@@ -766,7 +772,7 @@ mod tests {
         let space = cell.get_or_reserve().unwrap();
         assert_eq!(
             space.plan().region_shift(),
-            Sim::GEOMETRY.max_region_shift() - 1
+            Sim::geometry().max_region_shift() - 1
         );
         assert_eq!(cell.os().calls(Call::Reserve), u64::from(PATIENCE) + 2);
     }

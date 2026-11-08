@@ -34,8 +34,9 @@
 //!
 //! Every one of these operations, the push's compare-and-swap included, is sequentially
 //! consistent, so of a push and a clear that race, either the clear's second read sees the push
-//! or the push's read sees the clear; either way the bit ends set. On x86-64 that costs nothing:
-//! every read-modify-write is a full barrier there and every load is already ordered.
+//! or the push's read sees the clear; either way the bit ends set. A pop's compare-and-swap is
+//! not, and need not be: a second read that misses a pop finds a stack holding a magazine it no
+//! longer holds, which is the bit left set, the harmless way.
 //!
 //! A fork can cut a push off between its compare-and-swap and its bits, leaving the child a stack
 //! with no bit; the child's `collect` and that domain's own heartbeats, which look at each class

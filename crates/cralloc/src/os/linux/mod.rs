@@ -12,6 +12,8 @@ mod kernel;
 pub(crate) mod rseq;
 mod syscall;
 
+#[cfg(test)]
+pub(crate) use kernel::CACHE_INDEXES;
 pub use kernel::LinuxOs;
 #[cfg(any(test, feature = "sim"))]
 pub(crate) use kernel::protect_none;

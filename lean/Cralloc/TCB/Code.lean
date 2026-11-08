@@ -57,15 +57,29 @@ points the thread's `rseq_cs` field at the sequence's descriptor (which
 start to just past its last step, the commit. If the thread is preempted,
 migrated or signalled with its instruction pointer inside `body`, the
 operating system aborts the sequence: the thread resumes at the abort
-handler, which jumps back to `arm`. `body` may leave early by an exit
-(`Step.exit`): to code after the sequence, or to an external target, such
-as a slow path that is a function of its own (`ExecExit`).
+handler, which jumps back to `arm`, with the registers it was interrupted
+with. What runs before `arm` does not run again (`Artifact.setup`). `body` may
+leave early by an exit (`Step.exit`): to code after the sequence, or to an
+external target, such as a slow path that is a function of its own (`ExecExit`).
 
 `Exec` describes the run that is not aborted, which the operating system
 guarantees nothing else interferes with. Where an abort may happen, before
 each step of `body`, is `Code.abortStates` (`TCB/Artifact.lean`); what
 `Verified` requires there, and how a run with any number of aborts follows,
 is in `TCB/Artifact.lean` and `Proof/Framework/Rseq.lean`.
+
+That is true of the machine only for what lies in the sequence's range as it was
+linked, one instruction to a step, and only there. So the emitter refuses a step
+that is two instructions, or that a linker may move out of the range, and any
+memory access outside the range after the sequence (`Rust.checkRseq`).
+
+## What the model leaves out
+
+A run is one thread's, one instruction at a time, and its memory accesses happen in
+that order: other threads appear only in what `Contract.env` lets them change while the
+thread is aborted. That the routines are right under the processors' weaker orders, with
+the kernel and other threads reading and writing the same words, is argued, not proved
+here: docs/research/memory-ordering.md.
 
 ## Semantics and safety
 
@@ -140,7 +154,8 @@ structure ISA where
 inductive Step (I C : Type) where
   | instr (i : I)
   /-- If `c` holds, leave the sequence: run the instructions `cold` (laid
-  out of line), then continue after the sequence (`ext = none`), or jump to
+  out of line, outside the sequence's range, so the emitter allows them no
+  memory access), then continue after the sequence (`ext = none`), or jump to
   the external target `ext` (`some t`), code outside the routine that the
   model does not run. -/
   | exit (c : C) (cold : List I) (ext : Option String)
@@ -173,8 +188,9 @@ inductive Code (I C : Type) where
   target `t`: a tail call of code outside the routine, which the model does
   not run, with the registers as `is` leaves them. The emitter allows one
   only right after a restartable sequence, `.seq (.rseq arm body) (.jump is
-  t)` (`Rust.checkRseq`): the code that runs after the commit, outside the
-  sequence, where it cannot be aborted. -/
+  t)`, and `is` to touch only registers (`Rust.checkRseq`): the code runs after
+  the commit, outside the sequence, where it cannot be aborted, and so another
+  thread may run between the commit and any memory access in it. -/
   | jump (is : List I) (t : String)
 
 /-- `if c then t else e`, with `t` laid out after the function's return

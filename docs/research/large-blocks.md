@@ -197,8 +197,8 @@ An object that outgrows its slot moves into one with room: sixteen times its siz
 full reservation where that slot is at most a sixteenth of a region, so to about 16 MiB; else four
 times where that fits a region; else none.
 
-**Bytes copied.** A doubling buffer lands in the class above H times its size plus the stagger's 4
-KiB. That class is 1.25 H times the size, so for H = 2^k it moves once every k + 1 doublings and
+**Bytes copied.** A doubling buffer lands in the class above H times its size plus the stagger's
+room, 4 KiB on x86-64. That class is 1.25 H times the size, so for H = 2^k it moves once every k + 1 doublings and
 copies about 1/(k + 1) of its final size, averaged over final sizes. Any one final size sees a
 sawtooth: right after a move it has just copied half of itself.
 
@@ -293,7 +293,7 @@ growing to 256 MiB, written a stripe a MiB past 64 MiB: 1.0 GiB with the whole s
 
 **The spilled huge page.** Large blocks start a little way into their slots, so that they do not
 share cache sets ([program-effects.md](program-effects.md)), and a block of whole huge pages ends a
-few bytes into the next one. Advice rounds down, so those bytes fault a small page, and that page
+few bytes into the next one, or on aarch64 up to the stagger's pages. Advice rounds down, so those bytes fault a small page, and that page
 table keeps the huge page small when the block grows over it: 504 of about 722 small faults a vector
 per repetition on the 64 Vecs. So an in-place growth over a page the block only started asks
 `mincore` whether the rest is resident, and if not copies the page aside, returns the huge page,
@@ -352,6 +352,24 @@ so a tenant that writes what it is given pays what it always did.
 - **Rejected: returning the pages at the claim above a fixed size.** A tenant that writes all of its
   block pays a fault a page, 12 to 14 times slower from 1 to 16 MiB. Asking `mincore` first bounds
   that but costs 25 to 37% where it should win.
+
+## A stagger of many pages
+
+**A block on aarch64 also moves by whole pages (`docs/research/machine-aarch64.md`, "Blocks written in
+turn"), and that costs address space and no memory, because the pages it passes over stay clean.** Up
+to 516 KiB of a slot lies below its block on a 16 KiB kernel. Those pages were never resident, but a
+free slot is charged the pages not marked clean, and the rule that cleared bits from the slot's start
+would have charged them, against the floor, the cap and the hold. So a claim clears from the block's
+first page, a carve marks those below clean, and only a tenant at the slot's start, at its claim and
+whenever it grows back over them, or a slot under advice, whose huge fault does make them resident,
+clears them. A block aligned past 64 bytes starts
+at the slot's start, and its extent still counts from the stagger, so it may be charged up to the
+stagger's pages it did not write; a slot whose tenants mix the two can hold that much resident
+below a staggered block until its free. A move that returns a slot whole returns those pages too,
+which an earlier tenant may have written, or the slot could not say it reads as zero.
+
+26% of request sizes from 33 KiB to 2 GiB land one class higher for the room, and none two. Commit
+charge rises only there.
 
 ## Moving a block
 

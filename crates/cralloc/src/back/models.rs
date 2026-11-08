@@ -30,7 +30,7 @@ use super::tree::{self, Host, Node};
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::classes::MagazineSize;
-use crate::os::sim::{Shape, Standard, Tiny};
+use crate::os::sim::{PAGE_SCALE, Shape, Standard, Tiny};
 use crate::space::{Geometry, Plan, RegionId};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -349,7 +349,7 @@ fn summary_deep_bounded(preemptions: usize) {
         },
         2,
         || {
-            let host = Host8::new(standard(), class(8), 1);
+            let host = Host8::new(standard(), class(8 * PAGE_SCALE), 1);
             assert_eq!(host.layout().height(), 2);
             let r0 = host.region_at(0);
             host.carve_all(r0, host.layout().slots());
@@ -392,7 +392,7 @@ fn summary_deep_bounded_fully() {
 /// The deep host of `summary_deep_bounded`: 8-byte slots in a 64 KiB region, two summary
 /// levels, slots 0 and `64 * 64` free.
 fn deep_setup() -> Host8 {
-    let host = Host8::new(standard(), class(8), 1);
+    let host = Host8::new(standard(), class(8 * PAGE_SCALE), 1);
     assert_eq!(host.layout().height(), 2);
     let r0 = host.region_at(0);
     host.carve_all(r0, host.layout().slots());
@@ -1292,7 +1292,7 @@ fn merged_debts_race_claims_on_deep_trees(preemptions: usize) {
         },
         3,
         || {
-            let host = Host8::new(standard(), class(8), 2);
+            let host = Host8::new(standard(), class(8 * PAGE_SCALE), 2);
             assert_eq!(host.layout().height(), 2);
             for r in 0..2 {
                 host.carve_all(host.region_at(r), host.layout().slots());
@@ -1422,7 +1422,7 @@ fn direct_frees_race_claims_on_deep_trees(preemptions: usize, wide: bool) {
         },
         3,
         || {
-            let host = Host8::new(standard(), class(8), 2);
+            let host = Host8::new(standard(), class(8 * PAGE_SCALE), 2);
             assert_eq!(host.layout().height(), 2);
             for r in 0..2 {
                 host.carve_all(host.region_at(r), host.layout().slots());
@@ -2115,7 +2115,7 @@ fn purge_sets_zero_bits_only_inside() {
 /// them, and nothing is free. The slots the claims took (64 and `64 * 64` of region 0, 0 of
 /// region 1) are the program's.
 fn stale_bits_setup() -> Host8 {
-    let host = Host8::new(standard(), class(8), 2);
+    let host = Host8::new(standard(), class(8 * PAGE_SCALE), 2);
     assert_eq!(host.layout().height(), 2);
     for r in 0..2 {
         host.carve_all(host.region_at(r), host.layout().slots());
@@ -2250,7 +2250,7 @@ fn a_single_free_looks_above_a_word_it_found_empty(alone: bool, preemptions: Opt
         },
         2,
         || {
-            let host = Host8::new(standard(), class(8), 1);
+            let host = Host8::new(standard(), class(8 * PAGE_SCALE), 1);
             assert_eq!(host.layout().height(), 2);
             let r0 = host.region_at(0);
             host.carve_all(r0, host.layout().slots());
@@ -2362,7 +2362,8 @@ fn large_tenant(host: &Host8) {
     let slot = taken.word * BITS + taken.bits.trailing_zeros();
     let last = region::recorded(host, region, slot);
     let size = host.layout().size() / 3;
-    let settled = region::settle_slot(host, region, slot, size, last);
+    let into = host.layout().stagger(slot);
+    let settled = region::settle_slot(host, region, slot, size, into, last);
     if settled.zeroed != 0 {
         assert!(host.is_zero(region, slot), "a zeroed claim reads non-zero");
     }

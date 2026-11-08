@@ -160,11 +160,17 @@ pub fn siblings(cpu: usize) -> Vec<usize> {
     bench_harness::Cpus::parse(s.trim()).map(|c| c.0).unwrap_or_else(|| vec![cpu])
 }
 
-/// The CPUs that share `cpu`'s last-level cache.
-pub fn l3_domain(cpu: usize) -> Vec<usize> {
-    let p = format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list");
-    let s = std::fs::read_to_string(p).unwrap_or_default();
-    bench_harness::Cpus::parse(s.trim()).map(|c| c.0).unwrap_or_else(|| vec![cpu])
+/// The CPUs that share `cpu`'s last-level cache: its highest cache index, whatever the number.
+pub fn cache_domain(cpu: usize) -> Vec<usize> {
+    let dir = format!("/sys/devices/system/cpu/cpu{cpu}/cache");
+    let top = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("index")?.parse::<u32>().ok())
+        .max();
+    let s = top.and_then(|i| std::fs::read_to_string(format!("{dir}/index{i}/shared_cpu_list")).ok());
+    s.and_then(|s| bench_harness::Cpus::parse(s.trim())).map(|c| c.0).unwrap_or_else(|| vec![cpu])
 }
 
 pub fn loadavg() -> [f64; 3] {
@@ -186,11 +192,34 @@ pub fn read_trim(path: &str) -> String {
     std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
+/// On aarch64, the implementer and part numbers of the last core, which on a machine with two
+/// kinds of core is a big one: what names the CPU, for what is measured per kind of machine.
+pub fn cpu_key() -> Option<String> {
+    let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    let last = |name: &str| s.lines().rfind(|l| l.starts_with(name))?.split(':').nth(1).map(|v| v.trim().to_string());
+    Some(format!("{}-{}", last("CPU implementer")?, last("CPU part")?))
+}
+
+/// The CPU's name, where /proc/cpuinfo has one. On aarch64 it does not, so the machine's name from
+/// the device tree, if any, and the implementer and part numbers of the first core and the last.
 pub fn cpu_model() -> String {
     let s = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    s.lines()
-        .find_map(|l| l.strip_prefix("model name").and_then(|r| r.split(':').nth(1)).map(|m| m.trim().to_string()))
-        .unwrap_or_default()
+    let field = |name: &str| -> Vec<String> {
+        s.lines()
+            .filter(|l| l.starts_with(name))
+            .filter_map(|l| l.split(':').nth(1).map(|v| v.trim().to_string()))
+            .collect()
+    };
+    if let Some(model) = field("model name").into_iter().next() {
+        return model;
+    }
+    let tree = std::fs::read_to_string("/proc/device-tree/model").unwrap_or_default();
+    let (parts, implementer) = (field("CPU part"), field("CPU implementer"));
+    let first = |v: &[String]| v.first().cloned().unwrap_or_default();
+    let last = parts.last().cloned().unwrap_or_default();
+    format!("{} (implementer {}, parts {} to {last})", tree.trim_end_matches('\0'), first(&implementer), first(&parts))
+        .trim()
+        .to_string()
 }
 
 /// The machine's transparent-huge-page and compaction counters (`/proc/vmstat`), whose change
