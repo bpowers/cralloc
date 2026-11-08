@@ -69,6 +69,7 @@ def abi : Abi isa where
   tp := some fun s => s.tpidr
   setupFindsArea := true
   slabsOnPage := true
+  maskBytes := 8
 
 /-! ## Restartable sequences
 
@@ -86,10 +87,6 @@ A routine forms the descriptor's and the area's addresses once, in registers
 (`Artifact.setup`), and its arm is the one store, as the emitter requires
 (`Printer.armOneStore`): the abort handler jumps back to it, so a retry finds those
 registers as the abort left them, which is what a retry's precondition asks of it. -/
-
-/-- The name of glibc's variable holding the rseq area's offset from the
-thread pointer. -/
-def rseqOffsetSym : String := "__rseq_offset"
 
 /-- The address of the thread's rseq area. -/
 def rseqArea (s : State) : Addr := s.tpidr + s.mem.readW (s.syms rseqOffsetSym) 64
@@ -119,6 +116,39 @@ def rely (p p' : State) : Prop :=
   p'.gpr = p.gpr ∧ p'.sp = p.sp ∧ p'.nf = p.nf ∧ p'.zf = p.zf ∧ p'.cf = p.cf ∧ p'.vf = p.vf ∧
   p'.tpidr = p.tpidr ∧ p'.syms = p.syms ∧ p'.csDesc = p.csDesc
 
+/-! ## The rseq area on musl
+
+musl registers no rseq area for its threads, so the crate defines its own in the executable's
+thread-local data and registers it itself (`crates/cralloc/src/front/area.rs`). A routine has
+the area's distance from the thread pointer in its instructions (`Instr.addAreaHi`,
+`TCB/AArch64/Isa.lean`), as there is no way to write it as data.
+
+On this architecture the static thread-local data starts above the thread pointer, at the 16
+bytes the ABI keeps there rounded up to the data's alignment, and the C library aligns the thread
+pointer to it too: a page here, so the area lies at the same page offset in every thread, away
+from the slab words the routines store to (docs/research/portability.md, "The area's page
+offset"). -/
+
+/-- The area, for musl: data, with the layout of `VG.X86_64.ownRseqArea`, whose constants the crate
+asserts against. -/
+def ownRseqArea : OwnArea where
+  cfg := [.targetEnv "musl"]
+  lines := [
+    ".pushsection .tdata.cralloc_rseq_area,\"awT\",%progbits",
+    s!".balign {ownAreaAlign}",
+    s!".skip {ownAreaPageOffset}",
+    s!".globl {ownAreaSym}",
+    s!".hidden {ownAreaSym}",
+    s!".type {ownAreaSym},%object",
+    s!".size {ownAreaSym}, {ownAreaLen}",
+    s!"{ownAreaSym}:",
+    -- cpu_id_start, cpu_id; rseq_cs; flags, node_id, mm_cid and padding.
+    s!".long 0, {hexLit ownAreaUnregistered}",
+    ".quad 0",
+    ".long 0, 0, 0, 0",
+    ".popsection"]
+  consts := ownAreaConsts
+
 abbrev target : Target where
   name := "aarch64"
   isa := isa
@@ -131,6 +161,7 @@ abbrev target : Target where
   arms := arms
   armed := armed
   rely := rely
+  ownArea := some ownRseqArea
   consts := [("RSEQ_SIGNATURE_AARCH64", .u32, rseqSignature)]
 
 /-! ## Inline functions
@@ -186,6 +217,8 @@ abbrev inlineFor (r : Reg) : Target :=
     retReg := r.x
     regs := clobberable.map Reg.x
     preservedExcept := preservedExcept
+    -- The area is the target's; emitted once, with `target`.
+    ownArea := none
     printer := { printer with stubExits := false, coldFar := true } }
 
 abbrev inlineTarget : Target := inlineFor .x0

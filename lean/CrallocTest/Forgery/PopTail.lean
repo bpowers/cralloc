@@ -169,14 +169,14 @@ theorem restartsOkT : ∀ s s', attempt.pre s → Restarts inlineTarget codeT at
   restartsOk_inline (ret := .x0) verifiedT (fun _ hs => (clobbersOkT hs).2.2)
     fun _ _ hpe => argsKept_regs hX (by decide) fun r hr => hpe r (by revert r; decide)
 
-def art : Artifact := (popInlineApi a64Docs).artifact VG.AArch64.inlineTarget {
+def art : Artifact := popInlineApi.artifact VG.AArch64.inlineTarget {
   cfg := some ([.targetEnv "musl"], false)
   setup := setup
   code := codeT
   attempt := attempt
   verified := verifiedT
   restartsOk := restartsOkT
-  setupOk := PopInline.setupOk
+  setupOk := PopInline.setupOk setupArea
   clobbers := clobbers
   clobbersOk := fun _ _ hs => clobbersOkT hs
   witnesses := witnesses

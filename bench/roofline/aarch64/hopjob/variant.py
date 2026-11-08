@@ -2,8 +2,12 @@
 """Rewrites the inlined routines of a scratch copy of the repository into a variant, to ask whether
 real jobs feel the store-to-load hop on the hot word: variant.py COPY VARIANT
 
-  plain    the routines as they are; `lld` and `direct` are this too, and differ by how build.sh
-           builds them
+  plain    the routines as they are
+  relaxed  the bitmap words' operations relaxed, to size what their order costs a single thread;
+           wrong with more than one
+  huge1    a class's growth switches to huge pages after one, not eight: the same bytes as on x86-64,
+           where a kernel's huge pages are 32 MiB
+  nostretch a launder and a fill with no dense path, to compare with them over placements
   area     the thread's rseq area read by a block the compiler may share and hoist, so a routine
            does not reload it: fewer instructions and two loads off the way to the pointer
   chainK   K more cycles on the hop: K ALU instructions between the new word and its commit, on the
@@ -26,7 +30,8 @@ import sys
 copy, variant = sys.argv[1], sys.argv[2]
 crate = os.path.join(copy, "crates/cralloc/src")
 files = {name: os.path.join(crate, name) for name in
-         ("front/provisional/aarch64_inline/slab.rs", "front/real.rs", "lib.rs")}
+         ("front/provisional/aarch64_inline/slab.rs", "front/real.rs", "lib.rs", "back/word.rs",
+          "back/class.rs", "back/policy.rs")}
 text = {}
 for name, path in files.items():
     if not os.path.exists(path + ".orig"):
@@ -104,7 +109,7 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
                 $($p => unsafe {
                     core::arch::asm!(
                         "adrp x12, {SLABS}",
-                        a64_arm_direct!(),
+                        crate::cralloc_a64_arm!(),
                         "mov x0, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
@@ -121,7 +126,7 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
                         "ldr x0, [x1, #-8]",
                         "sub x1, x1, #8",
                         "str x1, [x18, #{w}]",
-                        a64_end_direct!(),
+                        crate::cralloc_a64_end!(),
                         SLABS = sym crate::front::SLABS,
                         w = const $p * 8,
                         in("x2") mask,
@@ -156,7 +161,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
                 $($p => unsafe {
                     core::arch::asm!(
                         "adrp x12, {SLABS}",
-                        a64_arm_direct!(),
+                        crate::cralloc_a64_arm!(),
                         "mov x4, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
@@ -174,7 +179,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
                         "str x0, [x1]",
                         "mov x4, x9",
                         "str x9, [x18, #{w}]",
-                        a64_end_direct!(),
+                        crate::cralloc_a64_end!(),
                         SLABS = sym crate::front::SLABS,
                         w = const $p * 8,
                         in("x0") p,
@@ -212,17 +217,37 @@ elif variant == "area":
     s = text[inline]
     cut = s.index("pub(crate) unsafe fn current_cpu")
     head, tail = s[:cut], s[cut:]
-    assert head.count("a64_arm_direct!(),") == 2 and head.count("a64_end_direct!(),") == 2
-    head = head.replace("a64_arm_direct!(),", '''"adrp x11, 3f",
+    assert head.count("crate::cralloc_a64_arm!(),") == 2 and head.count("crate::cralloc_a64_end!(),") == 2
+    head = head.replace("crate::cralloc_a64_arm!(),", '''"adrp x11, 3f",
             "add x11, x11, :lo12:3f",
             "5:",
             "str x11, [x10, #8]",
             "6:",''')
-    head = head.replace("a64_end_direct!(),", "crate::cralloc_a64_end_bare!(),")
+    head = head.replace("crate::cralloc_a64_end!(),", "crate::cralloc_a64_end_bare!(),")
     assert head.count('out("x10") _,') == 2
     head = head.replace('out("x10") _,', 'in("x10") area(),')
     text[inline] = head + tail + AREA
-elif variant not in ("plain", "lld", "direct"):
+elif variant == "relaxed":
+    text["back/word.rs"] = text["back/word.rs"].replace("SeqCst", "Relaxed").replace("Release", "Relaxed")
+    text["back/word.rs"] = text["back/word.rs"].replace("{Relaxed, Relaxed}", "Relaxed")
+elif variant == "huge1":
+    text["back/policy.rs"] = sub(text["back/policy.rs"], "pub const HUGE_AFTER_HUGE_PAGES: usize = 8;",
+                                 "pub const HUGE_AFTER_HUGE_PAGES: usize = 1;")
+elif variant == "nostretch":
+    s = text["back/class.rs"]
+    s = sub(s, "const STRETCH_MISSES: u32 = 2;", "const STRETCH_MISSES: u32 = 0;")
+    a = s.index("        // Two at a time, each from a pointer stepping two strides")
+    b = s.index("    #[inline(always)]\n    fn put(&mut self, at: usize, slot: *mut u8) {\n        let index")
+    s = s[:a] + """        let mut next = first;
+        for slot in part.iter().rev() {
+            slot.store(next, Relaxed);
+            next = next.wrapping_byte_add(stride);
+        }
+    }
+
+""" + s[b:]
+    text["back/class.rs"] = s
+elif variant != "plain":
     sys.exit(f"unknown variant {variant}")
 
 for name, path in files.items():

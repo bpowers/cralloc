@@ -98,14 +98,14 @@ structure Registration (api : Api) (target : Target) where
 
 /-- The artifact of the implementation `r` of `api` on `target`: its module,
 signature and `writeArgs` are `api`'s, its name `api`'s followed by
-`r.suffix`, its documentation `api`'s with `r.notes` (`Api.doc`), and its
+`r.suffix`, its documentation `api`'s for `target` with `r.notes` (`Api.doc`), and its
 contract `api`'s on `target`, for `r.consts` and `r.stack` (`Api.contract`). -/
 def Api.artifact (api : Api) (target : Target) (r : Registration api target) : Artifact where
   target := target
   module := api.module
   name := api.name ++ r.suffix
   sig := api.sig
-  doc := api.doc r.notes
+  doc := api.doc target.abi r.notes
   consts := r.consts
   operands := api.operands
   generics := api.generics

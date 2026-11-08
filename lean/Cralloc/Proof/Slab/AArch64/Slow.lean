@@ -276,12 +276,14 @@ theorem not_mem_three {r : Reg} (h : ¬ r ∈ [Reg.x9, .x10, .x11, .x13]) :
   rcases hm with rfl | rfl | rfl <;> simp)
 
 /-- A register the setup does not write. -/
-theorem s6_s0_keeps {r : Reg} (h : ¬ r ∈ [Reg.x9, .x10, .x11, .x13]) : (s6 (s0 s)).gpr r = s.gpr r := by
-  rw [s6_keeps (not_mem_three h), s0, RegUpd.gpr_setReg_of_ne _ _ (fun h' => h (by simp [h']))]
+theorem AreaSetup.keeps0 {l : List Instr} {g : State → State} (hl : AreaSetup l g) {r : Reg}
+    (h : ¬ r ∈ [Reg.x9, .x10, .x11, .x13]) : (g (s0 s)).gpr r = s.gpr r := by
+  rw [hl.keeps (not_mem_three h), s0, RegUpd.gpr_setReg_of_ne _ _ (fun h' => h (by simp [h']))]
 
 /-- From an entry state satisfying the contract of a routine `c`, whose arguments are in none of
 the registers the setup writes, the setup runs to a state where an attempt may start. -/
-theorem slowSetup_ok {regs : List Reg} {c : Spec.Slab.Ctx isa} (hA : A64 c.A regs)
+theorem slowSetup_ok {l : List Instr} {g : State → State} (hl : AreaSetup l g)
+    {regs : List Reg} {c : Spec.Slab.Ctx isa} (hA : A64 c.A regs)
     {post : State → State → Prop} {exit : String → State → State → Prop}
     {abort : State → State → Prop} {trace : State → List Event → Prop}
     {vals : State → List (BitVec 64)}
@@ -291,8 +293,8 @@ theorem slowSetup_ok {regs : List Reg} {c : Spec.Slab.Ctx isa} (hA : A64 c.A reg
     (hlen : (c.sig.words 64).length ≤ regs.length)
     (hargs : ∀ r ∈ regs.take (c.sig.words 64).length, ¬ r ∈ [Reg.x9, .x10, .x11, .x13])
     (hp : (contract c post exit abort trace).pre s) :
-    execBlock isa slowSetup s = some (s6 (s0 s)) ∧
-      (withReadyS (contract c post exit abort trace)).pre (s6 (s0 s)) := by
+    execBlock isa (slowOf l) s = some (g (s0 s)) ∧
+      (withReadyS (contract c post exit abort trace)).pre (g (s0 s)) := by
   have hpre := ((pre_iff c hv (hb s) (ha s)).mp hp).2.2
   have hpage : (s.syms "SLABS").toNat % 4096 = 0 := by
     have := hpre.2.2.2.1.page hA.slabsPage
@@ -302,11 +304,11 @@ theorem slowSetup_ok {regs : List Reg} {c : Spec.Slab.Ctx isa} (hA : A64 c.A reg
   have hp0 : (contract c post exit abort trace).pre (s0 s) :=
     pre_of_same hv hb ha (by rw [hA.wf]; trivial) hp hsame (by rw [mem_of hA, mem_of hA]; rfl)
       (by rw [hA.rd, hA.rd]; rfl) (by rw [hA.wr, hA.wr]; rfl)
-  obtain ⟨he, hk, hr⟩ := setup_ok hA hv hb ha hlen (fun r hr => not_mem_three (hargs r hr))
+  obtain ⟨he, hk, hr⟩ := setup_ok hl hA hv hb ha hlen (fun r hr => not_mem_three (hargs r hr))
     (s := s0 s) hp0
   refine ⟨?_, hk, hr, ?_⟩
-  · rw [slowSetup, execBlock_cons_some (exec_slabs hpage), he]
-  · rw [s6_keeps (by decide), s0, RegUpd.gpr_setReg_self]
+  · rw [slowOf, execBlock_cons_some (exec_slabs hpage), he]
+  · rw [hl.keeps (by decide), s0, RegUpd.gpr_setReg_self, hl.syms]
     rfl
 
 end Setup

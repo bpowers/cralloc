@@ -345,11 +345,12 @@ theorem rseqOk (hs : attempt.pre s) : RseqOk target cas attempt s := by
 
 /-! ### The setup -/
 
-theorem setupOk : SetupOk target contract attempt casSig [] slowSetup := by
+theorem setupOk {l : List Instr} {g : State → State} (hl : AreaSetup l g) :
+    SetupOk target contract attempt casSig [] (slowOf l) := by
   refine .inr ⟨⟨readyS, rfl⟩, fun s hp => ?_⟩
-  obtain ⟨he, hpre⟩ := slowSetup_ok hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
-  exact ⟨s6 (s0 s), he, hpre, rfl, ⟨fun r hr => s6_s0_keeps (by revert r; decide), rfl⟩,
-    argsKept_regs hX (by decide) (fun r hr => s6_s0_keeps (by revert r; decide)),
+  obtain ⟨he, hpre⟩ := slowSetup_ok hl hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
+  exact ⟨g (s0 s), he, hpre, hl.mem, ⟨fun r hr => hl.keeps0 (by revert r; decide), hl.sp⟩,
+    argsKept_regs hX (by decide) (fun r hr => hl.keeps0 (by revert r; decide)),
     fun h => absurd h (by decide)⟩
 
 end Contract
