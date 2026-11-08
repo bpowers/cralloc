@@ -88,6 +88,11 @@ const PAGE_SHIFT: u32 = match option_env!("CRALLOC_SIM_PAGE_SHIFT") {
     None => 12,
 };
 
+/// How many of the pages of 4 KiB that a test's sizes were written for fit a page of the [`Standard`]
+/// and [`Native`] shapes: what a test multiplies its sizes by to keep their proportion to a page.
+#[cfg(test)]
+pub const PAGE_SCALE: usize = 1 << (PAGE_SHIFT - 12);
+
 /// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
 /// (128 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions
 /// (2 MiB at the floor: 255 of the largest magazines, which hold 1,022 objects each, so that

@@ -7,7 +7,7 @@ use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::depot::siblings::{SIBLINGS, stride};
 use crate::lined::LINE;
 use crate::os::OsError;
-use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
+use crate::os::sim::{Call, Faults, PAGE_SCALE, SIM_THREADS, SimOs};
 use crate::space::Plan;
 
 /// The simulated shape: one with large classes natively, the small one Miri can afford.
@@ -19,6 +19,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use std::thread;
 use std::vec::Vec;
+
+/// A kibibyte as a test states it, on pages of 4 KiB (`PAGE_SCALE`).
+const KIB: usize = PAGE_SCALE << 10;
 
 fn layout(size: usize, align: usize) -> Layout {
     Layout::from_size_align(size, align).unwrap()
@@ -858,13 +861,13 @@ fn a_block_resized_back_and_forth_across_its_slot_boundary_settles() {
 fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
     use crate::back::policy::{STAGGER_ROOM, kept_outgrown};
     // The block's charge must fit the bound for the slot to be kept.
-    const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 << 10));
+    const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 * KIB));
     use crate::os::HugePages;
     use crate::os::sim::Shape as _;
     let heap = SimHeap::<crate::os::sim::Native>::new();
     let geometry = crate::os::sim::Native::GEOMETRY;
     let huge = geometry.huge_page_size();
-    let grown = layout(80 << 10, 8);
+    let grown = layout(80 * KIB, 8);
     // SAFETY: valid layouts; each block is written within its size and freed once with the
     // layout it has.
     unsafe {
@@ -879,7 +882,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
             q
         };
         let advised = |q: *mut u8| heap.os().huge_pages(ptr::NonNull::new(q).unwrap());
-        let q = grow(40 << 10);
+        let q = grow(40 * KIB);
         let back = heap.heap.back().unwrap();
         assert_eq!(advised(q), Some(HugePages::Prefer));
         let slot = match back.lookup(q) {
@@ -898,7 +901,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
         );
         assert_eq!(advised(q), Some(HugePages::Avoid));
         // Outgrown, the same: no kept slot holds an advised range.
-        let q = grow(40 << 10);
+        let q = grow(40 * KIB);
         assert_eq!(advised(q), Some(HugePages::Prefer));
         let (before, counted) = (back.retained_large(), back.outgrown());
         let r = heap.realloc(q, grown, slot + 1);
@@ -911,7 +914,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
         // charged what the block may have written. (A trim first, so that the move's new slot
         // takes nothing out of the count.)
         back.trim();
-        let q = grow(16 << 10);
+        let q = grow(16 * KIB);
         assert_eq!(advised(q), Some(HugePages::Avoid));
         let (before, counted) = (back.retained_large(), back.outgrown());
         let r = heap.realloc(q, grown, slot + 1);
@@ -950,7 +953,7 @@ fn buffers_growing_into_reused_slots_leave_a_trail_within_the_bound() {
     let heap = SimHeap::<crate::os::sim::Native>::new();
     let bound = kept_outgrown(crate::os::sim::Native::GEOMETRY);
     const N: usize = 48;
-    let (start, end) = (16usize << 10, 432usize << 10);
+    let (start, end) = (16 * KIB, 432 * KIB);
     let mut trails = std::vec::Vec::new();
     for round in 0..3 {
         // SAFETY: valid layouts; each block is written within its size and freed once with the
@@ -1398,25 +1401,25 @@ fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
 #[test]
 fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
     let heap = SimHeap::<Shape>::new();
-    let page = 4 << 10;
+    let page = 4 * KIB;
     // Small enough that its slot, room for a stagger included, is outgrown below.
-    let mut size = 33 << 10;
+    let mut size = 33 * KIB;
     // SAFETY: valid layouts; the block is freed once with the layout it has.
     unsafe {
         let mut p = heap.alloc(layout(size, 8));
         // Outgrow the slot once, into a block with headroom (which fits a region of every shape).
-        p = heap.realloc(p, layout(size, 8), 50 << 10);
-        size = 50 << 10;
+        p = heap.realloc(p, layout(size, 8), 50 * KIB);
+        size = 50 * KIB;
         for _ in 0..16 {
             let q = heap.realloc(p, layout(size, 8), size + page);
             assert_eq!(q, p, "growth within the headroom stays put at {size}");
             size += page;
         }
         // An over-aligned layout grows in place too.
-        let small = layout(8, 64 << 10);
+        let small = layout(8, 64 * KIB);
         let a = heap.alloc(small);
         assert_eq!(heap.realloc(a, small, 16), a);
-        heap.dealloc(a, layout(16, 64 << 10));
+        heap.dealloc(a, layout(16, 64 * KIB));
         heap.dealloc(p, layout(size, 8));
     }
 }
@@ -1452,11 +1455,11 @@ fn large_frees_find_the_class_from_the_address() {
     let heap = SimHeap::<Shape>::new();
     // A layout far smaller than the block still frees the whole slot, and a block moved into
     // a roomier slot by `realloc` is freed with the caller's layout.
-    let l = layout(33 << 10, 8);
+    let l = layout(33 * KIB, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
-        let q = heap.realloc(p, l, 50 << 10);
+        let q = heap.realloc(p, l, 50 * KIB);
         assert!(!q.is_null());
         let slot = match heap.heap.back().unwrap().lookup(q).unwrap() {
             crate::back::Kind::Slot(class) => class.size(),
@@ -1465,7 +1468,7 @@ fn large_frees_find_the_class_from_the_address() {
             }
         };
         let plan = heap.heap.back().unwrap().space().plan();
-        let room = growth_rooms(50 << 10, plan).next().unwrap();
+        let room = growth_rooms(50 * KIB, plan).next().unwrap();
         assert!(slot >= room, "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
@@ -1476,10 +1479,10 @@ fn large_frees_find_the_class_from_the_address() {
             .plan()
             .geometry()
             .page_size();
-        assert_eq!(heap.usable(q), Some((50usize << 10).next_multiple_of(page)));
-        heap.dealloc(q, layout(50 << 10, 8));
+        assert_eq!(heap.usable(q), Some((50 * KIB).next_multiple_of(page)));
+        heap.dealloc(q, layout(50 * KIB, 8));
     }
-    assert!(!Class::of_size(40 << 10).unwrap().is_small());
+    assert!(!Class::of_size(40 * KIB).unwrap().is_small());
 }
 
 /// Where a heap's parked objects are, by `inspect`.
@@ -1636,7 +1639,14 @@ fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
 #[cfg_attr(miri, ignore = "reads every simulated page dozens of times")]
 fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     let heap = SimHeap::<Shape>::new();
-    burst(&heap, if cfg!(miri) { 3000 } else { 100_000 });
+    burst(
+        &heap,
+        if cfg!(miri) {
+            3000
+        } else {
+            100_000 * PAGE_SCALE
+        },
+    );
     light_work(&heap);
     let quiet = resident(&heap);
     let purges = heap.os().calls(Call::Purge);
@@ -2488,8 +2498,11 @@ mod lean_realloc {
             ((100, 8), (300, 8)),
             ((3000, 8), (40_000, 8)),
             ((100, MAX_SMALL_SIZE * 2), (200, 8)),
-            ((40_000, 8), (40_000, 1 << 16)),
-            ((40_000, 8), (300_000, 8)),
+            (
+                (40_000 * PAGE_SCALE, 8),
+                (40_000 * PAGE_SCALE, 1 << 16 << PAGE_SCALE.trailing_zeros()),
+            ),
+            ((40_000 * PAGE_SCALE, 8), (300_000 * PAGE_SCALE, 8)),
         ];
         for ((asked, from_align), (grown, to_align)) in cases {
             let (lo, ln) = (layout(asked, from_align), layout(grown, to_align));

@@ -266,7 +266,7 @@ fn a_claim_above_the_boundary_marks_and_a_heartbeat_raises() {
     assert_ne!(before.from, 0);
     // The fills take the lowest free slots, which are in the tail now.
     let advised = os.calls(Call::AdviseHuge);
-    let again = fill(&back, class(), 4096);
+    let again = fill(&back, class(), 4096 * PAGE_SCALE);
     assert!(!again.is_empty());
     assert_eq!(
         os.calls(Call::AdviseHuge),
