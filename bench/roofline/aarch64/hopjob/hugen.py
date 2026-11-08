@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """The jobs under the switched binary: hugen.py FILE.jsonl... Each job's metric at each value of N
 against N = 8, the control's difference (a second allocator with N = 8), the spread of the rounds, the
-peak resident and huge memory, and for a server its rates' latencies. The allocators are cralloc-nN."""
+peak resident and huge memory, and for a server its rates' latencies. The allocators are cralloc-nN.
+With --loose, a run marked invalid only for a little other work on its CPUs counts too."""
 import collections
 import json
 import statistics as st
 import sys
 
+loose = "--loose" in sys.argv
 rows = collections.defaultdict(lambda: collections.defaultdict(list))
-for path in sys.argv[1:]:
+for path in [a for a in sys.argv[1:] if a != "--loose"]:
     for line in open(path):
         r = json.loads(line)
         job, alloc = r.get("job"), r.get("allocator")
-        if not job or not alloc or not r.get("valid", True) or r.get("mode") != "native":
+        if not job or not alloc or r.get("mode") != "native":
+            continue
+        problems = r.get("problems") or []
+        if not r.get("valid", True) and not (loose and all(q.startswith("other work on") for q in problems)):
             continue
         rows[job][alloc.removeprefix("cralloc-")].append(r)
 
