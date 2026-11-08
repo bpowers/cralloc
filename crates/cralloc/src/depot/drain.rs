@@ -228,7 +228,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     .abort("a spare stack names something that is not a magazine"),
             };
             // The link must be read before the depot overwrites it.
-            next = magazine.link().load(Relaxed).addr();
+            next = magazine.link().load(Acquire).addr();
             magazine.set_level(magazine.level());
             self.dispose(domain, class, magazine, disposal);
         }

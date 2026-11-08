@@ -24,8 +24,9 @@ pub(crate) const BITS: u32 = u64::BITS;
 /// (`docs/research/memory-ordering.md`).
 ///
 /// `store` is a release store. It writes only words no protocol races on: a large slot's size
-/// word, which only the slot's holder reads or writes, and a slot changes holder only through a
-/// sequentially consistent operation on its leaf word (the free's OR, the next claim's
+/// word, which only the slot's holder writes, and only it reads but for the stamp of a free slot,
+/// which the hold's walk reads as a hint (`hold::walk_aged`), and a slot changes holder only through
+/// a sequentially consistent operation on its leaf word (the free's OR, the next claim's
 /// compare-and-swap), which orders the old holder's accesses before the new one's; and a region's
 /// `Grow` word when `assign` takes or gives back the region, which the table's and the carving
 /// word's compare-and-swaps that follow publish to any thread that later reads it.

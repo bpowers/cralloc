@@ -50,7 +50,7 @@ use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::clock::{DONE, REPEATED, Step};
 use crate::front::Routines;
 use crate::os::Os;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 /// The steps of a round, by number. The idle looks are steps `0..` the number of CPUs a slow
 /// path has used, one slab each; then one step for the looks at the depot's stacks; then a
@@ -111,7 +111,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let counted = self.source.clock();
         let clock = Clock::new(self.os(), counted);
         if index < DEPTHS {
-            let cpus = self.depot.common.cpus.load(Relaxed).min(DEPTHS as usize) as u32;
+            let cpus = self.depot.common.cpus.load(Acquire).min(DEPTHS as usize) as u32;
             let mut work = false;
             if generation::drains_enabled(self.depot)
                 && index < cpus
