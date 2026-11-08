@@ -2644,42 +2644,14 @@ mod cache_domains {
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
-    unsafe extern "C" {
-        fn sched_getaffinity(pid: i32, len: usize, mask: *mut u64) -> i32;
-        fn sched_setaffinity(pid: i32, len: usize, mask: *const u64) -> i32;
-    }
-
-    /// The CPU numbers the sets hold, up to this.
-    const CPUS: usize = 1024;
-
     /// The CPUs online.
     fn online() -> Vec<usize> {
         let text = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap();
         let mut cpus = Vec::new();
-        assert!(crate::depot::domain::each_cpu(text.as_bytes(), |cpu| cpus.push(cpu)));
+        assert!(crate::depot::domain::each_cpu(text.as_bytes(), |cpu| {
+            cpus.push(cpu);
+        }));
         cpus
-    }
-
-    /// The CPUs this thread may run on.
-    fn allowed() -> Vec<usize> {
-        let mut mask = [0u64; CPUS / 64];
-        // SAFETY: the call writes at most `len` bytes of `mask`, a live local of that size.
-        let done = unsafe { sched_getaffinity(0, size_of_val(&mask), mask.as_mut_ptr()) };
-        assert_eq!(done, 0);
-        (0..CPUS)
-            .filter(|cpu| mask[cpu / 64] & (1 << (cpu % 64)) != 0)
-            .collect()
-    }
-
-    /// Moves this thread to `cpu`, and shows that the routines see it there.
-    fn pin(cpu: usize) {
-        let mut mask = [0u64; CPUS / 64];
-        mask[cpu / 64] = 1 << (cpu % 64);
-        // SAFETY: the call reads `len` bytes of `mask`, a live local of that size, and changes
-        // only where this thread runs.
-        let done = unsafe { sched_setaffinity(0, size_of_val(&mask), mask.as_ptr()) };
-        assert_eq!(done, 0, "moving to CPU {cpu}");
-        assert_eq!(Real.cpu().map(|cpu| cpu.index()), Some(cpu));
     }
 
     /// The list of CPUs that share CPU `cpu`'s last-level cache, as sysfs prints it, if any: the
@@ -2753,7 +2725,7 @@ mod cache_domains {
         }
         // Two CPUs of one domain and one of another, if this process may use them: `scripts/heavy`
         // keeps tests off the cores measurements use.
-        let allowed = allowed();
+        let allowed = crate::fresh::allowed_cpus();
         let usable: Vec<Vec<usize>> = groups
             .iter()
             .map(|group| {
@@ -2788,7 +2760,7 @@ mod cache_domains {
         };
 
         // Frees on one CPU fill magazines that go to its domain's stack and no other's.
-        pin(third);
+        crate::fresh::pin(third);
         let held: Vec<*mut u8> = (0..6 * capacity)
             .map(|_| {
                 // SAFETY: a valid layout of a non-zero size.
@@ -2799,7 +2771,7 @@ mod cache_domains {
                 block
             })
             .collect();
-        pin(first);
+        crate::fresh::pin(first);
         let (before, others) = (touched(ours, class), touched(theirs, class));
         let freed: std::collections::BTreeSet<usize> = held.iter().map(|p| p.addr()).collect();
         for &block in &held {
@@ -2816,7 +2788,7 @@ mod cache_domains {
         );
 
         // Another CPU of that domain, with nothing of its own, takes one of them.
-        pin(second);
+        crate::fresh::pin(second);
         let before = touched(ours, class);
         // SAFETY: a valid layout of a non-zero size.
         let block = unsafe { Cralloc.alloc(l) };
@@ -2832,7 +2804,7 @@ mod cache_domains {
         unsafe { Cralloc.dealloc(block, l) };
 
         // A CPU of another domain leaves that stack alone, whatever it has to do instead.
-        pin(third);
+        crate::fresh::pin(third);
         let (before, others) = (touched(ours, class), touched(theirs, class));
         let elsewhere: Vec<*mut u8> = (0..2 * capacity)
             // SAFETY: a valid layout of a non-zero size.
