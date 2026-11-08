@@ -641,7 +641,41 @@ struct Served {
     rates: (u32, u32),
 }
 
+/// A server's fixed rates are measured, not derived, and the ones written in the jobs below are
+/// the Ryzen's. A machine with rates of its own has them in `bench/rates/`, in a file named after
+/// its CPU (`sys::cpu_key`): for each job, 70% of the slowest allocator's saturated rate, which
+/// `standings/rates.py` computes from a session of `servers-sat` and `servers-large-sat`.
+fn machine_rates() -> &'static std::collections::BTreeMap<String, u32> {
+    static RATES: OnceLock<std::collections::BTreeMap<String, u32>> = OnceLock::new();
+    RATES.get_or_init(|| {
+        let Some(key) = crate::sys::cpu_key() else { return Default::default() };
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rates/").to_string() + &key + ".toml";
+        match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| crate::die(&format!("{path}: {e}"))),
+            Err(_) => {
+                eprintln!("benchrun: no {path}, so servers use the Ryzen's rates here; standings/rates.py makes one");
+                Default::default()
+            }
+        }
+    })
+}
+
+/// 30% and 70% of a rate, from its 70%.
+fn thirty_seventy(r70: u32) -> (u32, u32) {
+    (r70 * 3 / 7, r70)
+}
+
 fn served() -> Vec<Served> {
+    let mut v = served_at_the_ryzens_rates();
+    for s in &mut v {
+        if let Some(&r70) = machine_rates().get(s.id) {
+            s.rates = thirty_seventy(r70);
+        }
+    }
+    v
+}
+
+fn served_at_the_ryzens_rates() -> Vec<Served> {
     let order = |path| OpenLoad {
         path,
         content_type: "application/json",
@@ -861,6 +895,16 @@ struct Large {
 /// preloaded with `preload` keys (about 1.1 KiB live a key) and churned by overwrites of mixed
 /// sizes, some with an expiry.
 fn large() -> Vec<Large> {
+    let mut v = large_at_the_ryzens_rates();
+    for l in &mut v {
+        if let Some(&r70) = machine_rates().get(&l.id) {
+            l.r70 = r70;
+        }
+    }
+    v
+}
+
+fn large_at_the_ryzens_rates() -> Vec<Large> {
     let order = OpenLoad {
         path: "/orders",
         content_type: "application/json",

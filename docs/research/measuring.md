@@ -206,13 +206,15 @@ moves under about 2%.
   builds it as asking for snmalloc's Debug configuration, and `cc` as asking for frame pointers. The
   suite's release profile has `debug = 1`, so snmalloc ran unoptimized with its assertions on, 158
   ns a pipeline allocation and 502 cycles a `churn live=1k` operation on the M1 Max against 13.8 and
-  21.0 in Release, and the crates' jemalloc and mimalloc kept frame pointers. Those crates now build
-  as a default release profile does (2026-11-07 at `69dd363`), and every figure of them on the Ryzen
-  is from before. A thread whose first jemalloc call is a free gets no thread cache: tikv's prefixed
-  build ran 181% and 104% slower than Fedora's on jobs with free-only threads, and 1 to 4% faster
-  elsewhere, hence the `all-alloc` and `free-only` forms. tcmalloc's shared library through TLS
-  descriptors understated it by 14 to 26%. A program that compiles in its own allocator hides under
-  preload: difftastic's spread was 2.7% until its jemalloc came out, then 18%.
+  21.0 in Release, and the crates' jemalloc and mimalloc kept frame pointers and nothing else of a
+  debug build (the mimalloc crate's debug mode needs a feature; the mimalloc built from third_party
+  was never touched). All three now build as a default release profile does (2026-11-07 at
+  `69dd363`), and every figure of them on the Ryzen is from before. A thread whose first jemalloc
+  call is a free gets no thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's
+  on jobs with free-only threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and
+  `free-only` forms. tcmalloc's shared library through TLS descriptors understated it by 14 to 26%.
+  A program that compiles in its own allocator hides under preload: difftastic's spread was 2.7%
+  until its jemalloc came out, then 18%.
 - **Some jobs run in two modes, and their medians compare mode counts:** xmalloc-test, glibc on
   larson, DataFusion on two L3s, the order service over HTTP/2 (4 to 6% more instructions, not tied
   to a build), Qdrant's search routing. Look at the runs before reading a median.
@@ -291,6 +293,13 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
 - **Nothing holds a core out of deep idle without root.** There is no SMT sibling for a spinner, so
   `CPU PD` (10 us to leave, 10 ms residency) stays in a server's tails until `scripts/deep-idle off`
   disables it. Runs say `idle_states: free`. A tail the report flags cannot be read as the allocator's.
+- **Placement moved jobs mostly through the routines.** Five pads moved `tree depth=20` 6.1% and `map
+  btree 1M` 5.3%, at level instructions and 0.1 to 0.5% noise, when routines formed addresses inside
+  their sequences (`ebe126a`). With every address formed before the arming store (`62be25d`) they
+  moved 0.5 and 2.0%, with noise of 0.2 and 0.7%, where mimalloc moves 0.2 and 0.9%. The cause is not
+  traced; an `adrp` inside the sequence is the suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
+  its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
+  landed than on the Ryzen, but too few have been swept to drop the rule.
 - **Other work is low enough for the same limits.** A run's other work had a median of -0.01 CPUs. Of
   402 valid runs the highest was 0.15, and three runs went over the limit of 0.25 and were left out.
   The gate waited at most 6 s.

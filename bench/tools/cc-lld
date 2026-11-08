@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The C compiler as rustc's linker on aarch64, told to link with the lld that comes with rustc
+# (bench/.cargo/config.toml says why).
+exec cc -fuse-ld=lld -B"$(rustc --print sysroot)/lib/rustlib/aarch64-unknown-linux-gnu/bin/gcc-ld" "$@"

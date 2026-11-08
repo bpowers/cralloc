@@ -36,18 +36,6 @@ pub const PADS: &str =
 /// variant's RUSTFLAGS would replace.
 const CONFIGURED: &str = if cfg!(target_arch = "aarch64") { "-Ctarget-cpu=native" } else { "" };
 
-/// What makes the link use lld, which a shuffle needs. rustc's own is the default on x86-64;
-/// on aarch64 the C compiler is told where it is.
-fn lld_flags() -> String {
-    if !cfg!(target_arch = "aarch64") {
-        return String::new();
-    }
-    let out = std::process::Command::new("rustc").args(["--print", "sysroot"]).output().expect("rustc runs");
-    let sysroot = String::from_utf8_lossy(&out.stdout);
-    let triple = "aarch64-unknown-linux-gnu";
-    format!("-C link-arg=-fuse-ld=lld -C link-arg=-B{}/lib/rustlib/{triple}/bin/gcc-ld", sysroot.trim())
-}
-
 /// Every timed measurement on the machine takes this lock (CLAUDE.md, "How we work").
 const MEASURE_LOCK: &str = "/tmp/cralloc-measure.lock";
 
@@ -93,7 +81,7 @@ pub fn parse(list: &str) -> Result<Vec<Layout>, String> {
             }
             _ => match name.strip_prefix("shuffle").and_then(|n| n.parse::<u64>().ok()) {
                 // Seed 0 would ask lld for a random seed, which could not be rebuilt.
-                Some(seed) if seed > 0 => format!("{} -C link-arg=-Wl,--shuffle-sections=.text*={seed}", lld_flags()),
+                Some(seed) if seed > 0 => format!("-C link-arg=-Wl,--shuffle-sections=.text*={seed}"),
                 _ => {
                     return Err(format!("--layouts: {name} is not default, loops64, shuffleN (N from 1) or padN"));
                 }
