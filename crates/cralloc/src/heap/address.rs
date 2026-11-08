@@ -135,7 +135,7 @@ impl<O: Os> Heap<O> {
 
 /// The process's heap, for the C layer: the operations above on the one static heap. A large
 /// allocation or free here is a slow path, and runs a heartbeat as the Rust ones do.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) mod process {
     use super::super::global;
     use super::super::resize::Caller;

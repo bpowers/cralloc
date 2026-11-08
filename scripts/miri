@@ -47,8 +47,8 @@ fi
 filter="${1:-}"
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance}"
 # The environment outranks .cargo/config.toml; point it back at Miri's own runner.
-CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$(rustup which cargo-miri --toolchain nightly) runner"
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER
+host_var="CARGO_TARGET_$(rustc -vV | sed -n 's/^host: //p' | tr 'a-z-' 'A-Z_')_RUNNER"
+export "$host_var=$(rustup which cargo-miri --toolchain nightly) runner"
 export MIRI_CPU="${MIRI_CPU:-600}"
 out="${MIRI_OUT:-$PWD/target/miri-check}"
 rm -rf "$out"
@@ -56,7 +56,7 @@ mkdir -p "$out/logs"
 
 list() {
   cargo +nightly miri test -q -p cralloc --lib -- --list --format terse "$@" |
-    sed -n 's/: test$//p' | sort
+    sed -n 's/: test$//p' | sort -u # Unique: `-Zmiri-many-seeds` lists them once a seed.
 }
 # Building happens here, once; the tests below only run.
 list > "$out/all.txt"

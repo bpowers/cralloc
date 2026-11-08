@@ -6,6 +6,10 @@
 set -euo pipefail
 allocs=("$@")
 [ ${#allocs[@]} -gt 0 ] || allocs=(cra jem tcm mim gli)
+case "$(uname -m)" in
+  aarch64) default_pads="000 032 064 096 128" ;;
+  *) default_pads="00 16 32 48 64" ;;
+esac
 for a in "${allocs[@]}"; do
   case "$a" in
     cra) name=cralloc feature=cralloc extra='expect = { allocator = "cralloc", library = "executable" }' ;;
@@ -17,7 +21,7 @@ expect = { allocator = "tcmalloc", mode = "per-cpu", library = "executable" }' ;
     gli) name=glibc feature="" extra='expect = { allocator = "glibc", library = "libc.so.6" }' ;;
     *) echo "pad-entries: unknown allocator $a" >&2; exit 2 ;;
   esac
-  for pad in 00 16 32 48 64; do
+  for pad in ${PADS:-$default_pads}; do
     cat <<EOF
 
 [[allocator]]

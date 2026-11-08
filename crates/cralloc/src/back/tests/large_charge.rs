@@ -643,7 +643,7 @@ fn a_tenant_that_asked_for_nothing_leaves_a_resident_slot_to_the_purge() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
-    let class = large(Native::GEOMETRY.huge_page_size());
+    let class = large_of(Native::GEOMETRY.huge_page_size());
     let first = back.alloc(class, class.size()).unwrap().ptr;
     paint(first.as_ptr(), class.size(), 0x77);
     back.free(first, class);

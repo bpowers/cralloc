@@ -27,8 +27,14 @@ use std::path::Path;
 /// The variants `benchrun layout` builds when `--layouts` is not given.
 pub const DEFAULT: &str = "default,loops64,shuffle1,shuffle2";
 
-/// What `--layouts pads` stands for: a line's worth of 16-byte steps, and a whole line.
-pub const PADS: &str = "pad00,pad16,pad32,pad48,pad64";
+/// What `--layouts pads` stands for: a 64-byte line's worth of 16-byte steps, and a whole line;
+/// on aarch64, where a line may be 128 bytes, 32-byte steps. The padded lengths are of equal digits.
+pub const PADS: &str =
+    if cfg!(target_arch = "aarch64") { "pad000,pad032,pad064,pad096,pad128" } else { "pad00,pad16,pad32,pad48,pad64" };
+
+/// What the repository's `.cargo/config.toml` gives every build on this architecture, which a
+/// variant's RUSTFLAGS would replace.
+const CONFIGURED: &str = if cfg!(target_arch = "aarch64") { "-Ctarget-cpu=native" } else { "" };
 
 /// Every timed measurement on the machine takes this lock (CLAUDE.md, "How we work").
 const MEASURE_LOCK: &str = "/tmp/cralloc-measure.lock";
@@ -52,13 +58,13 @@ pub struct Layout {
 /// - `padN`: N bytes of code ahead of the allocator and the program, N a multiple of 16 (the
 ///   functions' alignment) written with at least two digits, so that the variants' binaries
 ///   have paths of one length; `pad00` is the normal build in a directory of its own.
-/// - `pads`: `pad00,pad16,pad32,pad48,pad64`.
+/// - `pads`: [`PADS`].
 pub fn parse(list: &str) -> Result<Vec<Layout>, String> {
     let mut v: Vec<Layout> = Vec::new();
     let expanded = list.replace("pads", PADS);
     for name in expanded.split(',').filter(|s| !s.is_empty()) {
         let mut pad = None;
-        let rustflags = match name {
+        let extra = match name {
             "default" => String::new(),
             "loops64" => "-C llvm-args=-align-loops=64".into(),
             _ if name.starts_with("pad") => {
@@ -84,6 +90,7 @@ pub fn parse(list: &str) -> Result<Vec<Layout>, String> {
         if v.iter().any(|l| l.name == name) {
             return Err(format!("--layouts: {name} is listed twice"));
         }
+        let rustflags = format!("{CONFIGURED} {extra}").trim().to_string();
         v.push(Layout { name: name.to_string(), rustflags, pad });
     }
     if v.len() < 2 {
@@ -280,15 +287,16 @@ mod tests {
     fn layouts() {
         let v = parse(DEFAULT).unwrap();
         assert_eq!(v.len(), 4);
-        assert_eq!(v[0].rustflags, "");
+        assert_eq!(v[0].rustflags, CONFIGURED);
         assert!(v[2].rustflags.ends_with("=1"));
         assert!(parse("default").is_err());
         assert!(parse("default,shuffle0").is_err());
         assert!(parse("default,default").is_err());
         assert!(parse("default,align").is_err());
         let pads = parse("pads").unwrap();
-        assert_eq!(pads.iter().map(|l| l.pad).collect::<Vec<_>>(), [0, 16, 32, 48, 64].map(Some));
-        assert!(pads.iter().all(|l| l.rustflags.is_empty() && l.name.len() == 5));
+        let step = if cfg!(target_arch = "aarch64") { 32 } else { 16 };
+        assert_eq!(pads.iter().map(|l| l.pad).collect::<Vec<_>>(), [0, 1, 2, 3, 4].map(|i| Some(i * step)));
+        assert!(pads.iter().all(|l| l.rustflags == CONFIGURED && l.name.len() == pads[0].name.len()));
         assert_eq!(parse("default,pad128").unwrap()[1].pad, Some(128));
         assert!(parse("default,pad8").is_err(), "one digit, and not a multiple of 16");
         assert!(parse("default,pad24").is_err());

@@ -126,8 +126,8 @@ impl Stack {
             };
             // Sequentially consistent so that the hint of which stacks hold magazines, which
             // a push onto an empty stack sets after this and a look clears before reading the
-            // head, is never left clear on a stack that holds one (`held.rs`). On x86-64 every
-            // compare-and-swap is.
+            // head, is never left clear on a stack that holds one (`held.rs`). A failure only
+            // reads the head for the next try, whose link and contents go by that try's release.
             match self
                 .head
                 .compare_exchange(head.to_word(), new.to_word(), SeqCst, Acquire)

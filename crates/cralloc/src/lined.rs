@@ -13,17 +13,26 @@
 //! time that its size is the number of lines it means to use (`lines`), so that a field added
 //! later without a line of its own fails the build instead of quietly sharing one.
 //!
-//! Lines are 64 bytes. The measurement behind this is in `docs/research/program-effects.md`,
-//! "False sharing": in a two-thread pipeline of large objects, six of every ten cache lines one
-//! core took from the other were shared by accident.
+//! Lines are 64 bytes on x86-64, and 128 on aarch64. That is an upper bound over the CPUs of each
+//! architecture rather than a measurement of this one: `repr(align)` takes a literal, false
+//! sharing needs only a bound, and 128 is Apple's lines, and harmless on a core with lines of 64.
+//! The measurement behind this is in `docs/research/program-effects.md`, "False sharing": in a
+//! two-thread pipeline of large objects, six of every ten cache lines one core took from the
+//! other were shared by accident.
 
 use core::ops::Deref;
 
-/// Bytes in a cache line.
-pub(crate) const LINE: usize = 64;
+/// Bytes in a cache line. The attributes that must agree with it: [`Lined`], and in `front::slab`
+/// `Stamps` and `OwnLine`.
+pub(crate) const LINE: usize = if cfg!(target_arch = "aarch64") {
+    128
+} else {
+    64
+};
 
 /// A value that starts a cache line and shares none with anything else.
-#[repr(C, align(64))]
+#[cfg_attr(target_arch = "aarch64", repr(C, align(128)))]
+#[cfg_attr(not(target_arch = "aarch64"), repr(C, align(64)))]
 pub(crate) struct Lined<T>(pub(crate) T);
 
 impl<T> Lined<T> {

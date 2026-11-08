@@ -1,0 +1,12 @@
+# What `tests/musl_exports.rs` builds: a static musl program whose C allocator is cralloc. Outside
+# the workspace, since it builds for another target.
+[package]
+name = "musl-exports"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cralloc = { path = "../.." }
+
+[workspace]

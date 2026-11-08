@@ -722,7 +722,7 @@ static long rss_mib(void) {
     FILE *f = fopen("/proc/self/statm", "r");
     if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
     if (f) fclose(f);
-    return rss * 4096 / (1 << 20);
+    return rss * sysconf(_SC_PAGESIZE) / (1 << 20);
 }
 
 static void run_quiet(void) {
@@ -1112,9 +1112,13 @@ static int find_sequences(struct dl_phdr_info *info, size_t size, void *data) {
         die("reading the section names of %s", info->dlpi_name);
     for (size_t i = 0; i < shn; i++)
         if (sh[i].sh_name < strs->sh_size && !strcmp(names + sh[i].sh_name, "__rseq_cs")) {
-            // Mapped and relocated: the descriptors hold run-time addresses.
-            sequences = (RseqCs *)(info->dlpi_addr + sh[i].sh_addr);
-            n_sequences = sh[i].sh_size / sizeof(RseqCs);
+            // Mapped and relocated: the descriptors hold run-time addresses. On aarch64 a routine
+            // keeps a word 32 bytes past its descriptor, which reads as an entry with no start.
+            const RseqCs *found = (const RseqCs *)(info->dlpi_addr + sh[i].sh_addr);
+            size_t count = sh[i].sh_size / sizeof(RseqCs);
+            sequences = map(sizeof(RseqCs) * count);
+            for (size_t k = 0; k < count; k++)
+                if (found[k].start_ip != 0) sequences[n_sequences++] = found[k];
             object_base = info->dlpi_addr;
         }
     if (n_sequences) load_insns(info->dlpi_addr);
@@ -1156,7 +1160,11 @@ static void arm_at(uint64_t at) {
     a.sigtrap = 1;
     a.bp_type = HW_BREAKPOINT_X;
     a.bp_addr = at;
+#ifdef __aarch64__
+    a.bp_len = 4;  // an instruction
+#else
     a.bp_len = sizeof(long);
+#endif
     trap_fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
     if (trap_fd < 0) die("perf_event_open for a breakpoint failed: %d", errno);
 }

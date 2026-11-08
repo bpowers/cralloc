@@ -32,7 +32,7 @@
 
 use super::{Bound, Grant, Heap, Zero, small};
 use crate::back::Move;
-use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP, unwritten_floor};
+use crate::back::policy::{STAGGER_LINES, STAGGER_STEP, stagger_room, unwritten_floor};
 use crate::classes::Class;
 use crate::front::Routines;
 use crate::os::Os;
@@ -109,12 +109,26 @@ pub(crate) const fn shrink_moves_below_for(len: usize, plan: Plan) -> usize {
     shrink_moves_below(headroom_of(len, plan))
 }
 
+/// The smallest class with room for a block of `size` bytes at any stagger of its slots, a multiple
+/// of `mask + 1` bytes: the smallest `c` with `c - stagger_room(c) >= size`. The class for the size
+/// and the lines' room, or where that class's slots stagger by pages and the block with their room
+/// does not fit, the next one that does. That is the next class up, and never more: a class is at
+/// least 8/7 of the one below, and its pages' room at most an eighth of it (`policy::stagger_pages`).
+fn roomy_class(size: usize, mask: usize, plan: Plan) -> Option<Class> {
+    let with_room = |room: usize| size.saturating_add(room).saturating_add(mask) & !mask;
+    let class = Class::of_size(with_room(STAGGER_LINES))?;
+    let room = stagger_room(plan.geometry(), class.size());
+    if room <= STAGGER_LINES || class.size() - room >= size {
+        return Some(class);
+    }
+    Class::of_size(with_room(room))
+}
+
 /// The most a slot for a block with `room` bytes of room may be: its class with the stagger's
 /// room, which `place` takes for a block that may be staggered and else takes less.
-fn slot_for(room: usize) -> usize {
-    room.checked_add(STAGGER_ROOM)
-        .and_then(Class::of_size)
-        .map_or(usize::MAX, Class::size)
+fn slot_for(room: usize, plan: Plan) -> usize {
+    let mask = plan.geometry().page_size() - 1;
+    roomy_class(room, mask, plan).map_or(usize::MAX, Class::size)
 }
 
 /// The rooms to try, most first, for a block growing out of its slot to `size` bytes, in a heap
@@ -123,7 +137,7 @@ fn slot_for(room: usize) -> usize {
 /// commits all its memory at once. With none, the caller takes a block of the size.
 pub(crate) fn growth_rooms(size: usize, plan: Plan) -> impl Iterator<Item = usize> {
     let room = move |factor: usize| size.checked_mul(factor).filter(|&room| room > size);
-    let first = room(HEADROOM).filter(move |&r| headroom_of(slot_for(r), plan) == HEADROOM);
+    let first = room(HEADROOM).filter(move |&r| headroom_of(slot_for(r, plan), plan) == HEADROOM);
     let second =
         room(FALLBACK_HEADROOM).filter(move |&r| r <= plan.region_size() && Some(r) != first);
     first.into_iter().chain(second)
@@ -145,22 +159,25 @@ enum Place {
 }
 
 /// Where an object with a layout that has no small class goes in a heap laid out as `plan`.
-/// A layout that may be staggered (`policy::STAGGER_STEP`) gets a slot with
-/// `policy::STAGGER_ROOM` to spare, so that its stagger always fits, unless only a slot
-/// without the room fits a region.
+/// A layout that may be staggered (`policy::STAGGER_STEP`) gets a slot with the stagger's room to
+/// spare (`policy::stagger_room`), so that its stagger always fits, unless only a slot without the
+/// room fits a region.
+///
+/// A large slot is whole pages: the back end purges, charges and reports a large block's room by
+/// the pages from its slot's start. So the size is rounded up to a page before the class is
+/// found, and a size that is a multiple of a power of two has a class that is too. With 4 KiB
+/// pages that changes nothing, every large class being a multiple of them; with larger pages the
+/// classes that are not (56 KiB on 16 KiB pages, 160 KiB on 64 KiB) are not used, which costs no
+/// memory, since a block's last page is resident whole either way.
 fn place(layout: Layout, plan: Plan) -> Place {
     let slot = |class: Option<Class>| class.filter(|&c| plan.fits_region(c));
-    // An alignment that may be staggered is at most a cache line, so the size with the room,
-    // rounded up to it, cannot overflow: a layout's size is at most `isize::MAX`.
+    let align = layout.align().max(plan.geometry().page_size());
     let roomy = if layout.align() <= STAGGER_STEP {
-        let mask = layout.align() - 1;
-        slot(Class::of_size(
-            (layout.size().max(1) + STAGGER_ROOM + mask) & !mask,
-        ))
+        slot(roomy_class(layout.size().max(1), align - 1, plan))
     } else {
         None
     };
-    match roomy.or_else(|| slot(Class::of_layout(layout))) {
+    match roomy.or_else(|| slot(Class::of_aligned(layout.size(), align))) {
         Some(class) => Place::Slot(class),
         // The size asked for, which the run records: the alignment is met by where the run
         // starts, so rounding the size up to it would only report, and commit, room nobody
@@ -418,6 +435,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classes::MAX_SMALL_SIZE;
     use crate::space::Geometry;
 
     fn layout(size: usize, align: usize) -> Layout {
@@ -429,7 +447,7 @@ mod tests {
         let plan = Geometry::DESIGN.largest_plan();
         // Room for a stagger: a 40 KiB request takes the class that holds 44 KiB, and one too
         // aligned to be staggered takes its own.
-        let roomy = Class::of_size((40 << 10) + STAGGER_ROOM).unwrap();
+        let roomy = Class::of_size((40 << 10) + STAGGER_LINES).unwrap();
         assert_eq!(place(layout(40 << 10, 8), plan), Place::Slot(roomy));
         let exact = Class::of_size(40 << 10).unwrap();
         assert_eq!(place(layout(40 << 10, 8192), plan), Place::Slot(exact));
@@ -454,6 +472,113 @@ mod tests {
                 align: 1 << 33
             }
         );
+    }
+
+    /// A large slot is whole pages on every kernel, and alignment is still met: the back end
+    /// counts a block's room in pages from its slot's start, and a class that was not whole pages
+    /// made the block's usable size run into the next slot.
+    #[test]
+    fn a_large_block_gets_a_slot_of_whole_pages_on_every_kernel() {
+        for page_shift in [12, 14, 16] {
+            let g = Geometry::of_kernel(page_shift);
+            let plan = g.largest_plan();
+            let mut size = MAX_SMALL_SIZE + 1;
+            while size <= 16 << 20 {
+                for align in [1, 8, 64, 128, 4096, 1 << 17] {
+                    let Place::Slot(class) = place(layout(size, align), plan) else {
+                        panic!("{page_shift} {size} {align}: a run");
+                    };
+                    assert!(class.size() >= size, "{page_shift} {size} {align}");
+                    assert!(
+                        class.size().is_multiple_of(g.page_size()),
+                        "{page_shift} {size} {align}: {}",
+                        class.size()
+                    );
+                    assert!(class.size().is_multiple_of(align), "{size} {align}");
+                }
+                size += size / 7;
+            }
+        }
+    }
+
+    /// On every kernel a block that may be staggered gets a slot any stagger fits in, the class
+    /// its room needs and no more than one step above the class of the size with the lines' room;
+    /// x86-64's slots have the lines' room alone.
+    #[test]
+    fn every_stagger_fits_the_slot_a_block_gets_and_costs_at_most_one_class() {
+        use crate::back::policy::STAGGER_PAGES_MAX;
+        for shift in [12, 14, 16] {
+            let g = Geometry::of_kernel(shift);
+            let plan = g.largest_plan();
+            let (mut moved, mut most) = (0, 0);
+            let mut size = MAX_SMALL_SIZE + 1;
+            while size < plan.region_size() - (4 << 20) {
+                let Place::Slot(class) = place(layout(size, 64), plan) else {
+                    panic!("{shift} {size}: a run");
+                };
+                let room = stagger_room(g, class.size());
+                assert!(size + room <= class.size(), "{shift} {size}");
+                assert!(class.size().is_multiple_of(g.page_size()), "{shift} {size}");
+                most = most.max(room);
+                let mask = g.page_size() - 1;
+                let lines = Class::of_size((size + STAGGER_LINES + mask) & !mask).unwrap();
+                if class != lines {
+                    moved += 1;
+                    let mut above = (lines.size() + 1 + mask) & !mask;
+                    above = Class::of_size(above).unwrap().size();
+                    assert_eq!(class.size(), above, "{shift} {size}");
+                }
+                size += size / 16;
+            }
+            assert!(moved > 0, "{shift}");
+            assert_eq!(
+                most,
+                STAGGER_LINES + STAGGER_PAGES_MAX as usize * g.page_size()
+            );
+        }
+        let plan = Geometry::DESIGN.largest_plan();
+        for size in [40 << 10, 1 << 20, 64 << 20] {
+            let Place::Slot(class) = place(layout(size, 64), plan) else {
+                panic!("{size}: a run");
+            };
+            assert_eq!(class, Class::of_size(size + STAGGER_LINES).unwrap());
+        }
+    }
+
+    /// The smallest slot that staggers by pages on each kernel, and the room it comes to.
+    #[test]
+    fn a_kernels_slots_stagger_by_pages_from_sixteen_pages() {
+        for (shift, first, most) in [
+            (12, 64 << 10, 132 << 10),
+            (14, 256 << 10, 516 << 10),
+            (16, 1 << 20, 2052 << 10),
+        ] {
+            let g = Geometry::of_kernel(shift);
+            let below = first - g.page_size();
+            assert_eq!(stagger_room(g, below), STAGGER_LINES, "{shift}");
+            assert_eq!(
+                stagger_room(g, first),
+                STAGGER_LINES + 2 * g.page_size(),
+                "{shift}"
+            );
+            assert_eq!(stagger_room(g, 4 << 30), most, "{shift}");
+        }
+        assert_eq!(stagger_room(Geometry::DESIGN, 4 << 30), 4 << 10);
+    }
+
+    /// With 4 KiB pages the rounding changes no class.
+    #[test]
+    fn four_kibibyte_pages_use_every_large_class() {
+        let plan = Geometry::DESIGN.largest_plan();
+        for class in Class::all().filter(|class| !class.is_small()) {
+            if !plan.fits_region(class) {
+                continue;
+            }
+            assert_eq!(
+                place(layout(class.size(), 1 << 13), plan),
+                Place::Slot(class)
+            );
+        }
     }
 
     /// Plans of the design's geometry: its full reservation, and ones a limit on address space
@@ -519,7 +644,7 @@ mod tests {
                     };
                     assert!(slot.size() > size);
                     let factor = room / (size + 1);
-                    for len in [slot.size(), slot.size() - STAGGER_ROOM + STAGGER_STEP] {
+                    for len in [slot.size(), slot.size() - STAGGER_LINES + STAGGER_STEP] {
                         met.insert((factor, shrink_moves_below_for(len, plan)));
                         assert!(
                             stays_after_shrink(size, len, plan),
@@ -536,5 +661,38 @@ mod tests {
             (HEADROOM, 2 * HEADROOM),
         ];
         assert_eq!(met.into_iter().collect::<std::vec::Vec<_>>(), want);
+    }
+
+    /// The settling property on every kernel, where a stagger can take most of what room a slot
+    /// has over a block: a block cut back to the size it had before it moved stays, at its slot's
+    /// start or at the most its slot's stagger can be.
+    #[test]
+    fn a_block_stays_when_it_shrinks_back_however_far_it_is_staggered() {
+        use crate::back::policy::stagger_pages;
+        for shift in [12, 14, 16] {
+            let g = Geometry::of_kernel(shift);
+            for plan in [g.largest_plan(), g.smallest_plan()] {
+                for class in Class::all().filter(|&c| !c.is_small() && plan.fits_region(c)) {
+                    let size = class.size();
+                    if !size.is_multiple_of(g.page_size()) {
+                        continue;
+                    }
+                    for room in growth_rooms(size + 1, plan) {
+                        let Place::Slot(slot) = place(layout(room, 16), plan) else {
+                            panic!("a room of at most a region is a slot: {room}");
+                        };
+                        let pages = stagger_pages(g, slot.size()) as usize;
+                        let most =
+                            STAGGER_LINES - STAGGER_STEP + pages.saturating_sub(1) * g.page_size();
+                        for len in [slot.size(), slot.size() - most] {
+                            assert!(
+                                stays_after_shrink(size, len, plan),
+                                "{shift}: {size} into {len}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

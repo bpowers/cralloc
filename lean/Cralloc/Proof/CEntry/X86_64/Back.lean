@@ -23,12 +23,15 @@ namespace VG.Proof.CEntry.X86_64
 
 open VG.X86_64 VG.Spec.Slab VG.Spec.CEntry VG.Proof.Slab.X86_64 VG.Proof.CEntry VG.Proof.Slab
 
+/-- A routine here reads the 32 bits of a mask it tests. -/
+theorem maskBytes_abi : abi.maskBytes = 4 := rfl
+
 /-- Closes an equation of two lists of accesses that differ only in how
 they are grouped and in `Ctx.rd` and `Ctx.wr` unfolded. -/
 macro "events_norm" : tactic =>
   `(tactic| (set_option linter.unusedSimpArgs false in
     simp only [Spec.CEntry.Ctx.rd, Spec.CEntry.Ctx.wr, List.append_assoc, List.cons_append,
-      List.nil_append, List.append_nil]))
+      List.nil_append, List.append_nil, maskBytes_abi]))
 
 /-- The C routines' scratch registers. -/
 def scratchC : List Reg := [.rax, .rcx, .rdx, .r8, .r9, .r10, .r11]

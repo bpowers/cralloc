@@ -7,15 +7,24 @@
 //!
 //! The copies are written only here, and only ever in one direction: a zero becomes the right
 //! value. Every value is all-zero at load, and zero sends every free that reads it to its slow
-//! path (a zero shift or base gives an index of the pointer itself, 4096 or more for any heap
-//! address; a zero class byte has a zero mask). So a copy may lag the truth, which costs a slow
-//! path, but it never disagrees with it in a harmful direction:
+//! path (a zero class byte has a zero mask, and a zero shift or base is below). So a copy may lag
+//! the truth, which costs a slow path, but it never disagrees with it in a harmful direction.
 //!
-//! - The shift and base index are written once, the base index first, from the published
-//!   heap, which never changes for the life of the process (a forked child inherits both). A free
-//!   that sees the shift sees the base index too (stores are not reordered on x86-64, and the
-//!   shift's store is a release); one that sees only the base index computes an index of at
-//!   least the pointer's region number above zero minus the base's, far out of range.
+//! A routine's loads have no order of their own, so a free may read any of these words old and any
+//! other new, on a weakly ordered CPU for as long as a stale read lasts. Every mix has to be safe,
+//! and is:
+//!
+//! - The shift and base index are written once, from the published heap, which never changes for
+//!   the life of the process (a forked child inherits both). A free computes `(ptr >> shift) -
+//!   base index`, and takes the slow path if that is not below [`REGION_COUNT`]. For a pointer of
+//!   the heap, whose base index is at least [`REGION_COUNT`] or it is not mirrored at all
+//!   ([`words_for`]): both old gives the pointer, a heap address; the shift new and the base index
+//!   old gives its region number counted from address zero, at least the base index; the shift old
+//!   and the base index new gives a heap address less a small number. All are out of range. Both
+//!   new is right. Each try of a sequence reads each word once, and a restart begins again with
+//!   nothing kept, so each try is one of these mixes. In `publish` the base index's store comes
+//!   first and the shift's is a release, so that a slow path that finds the shift has the base
+//!   index; a routine relies on none of that, on x86-64 or aarch64.
 //! - They are written from the C allocation slow paths (`note`).
 //! - A region's byte is written only when a small block of that region has just been handed out
 //!   to C, so the region is assigned to that class and has blocks. The back end never takes a
@@ -40,10 +49,20 @@ fn publish() -> Option<(u64, usize)> {
         return Some((shift, base_word.load(Ordering::Relaxed) as usize));
     }
     let (base, region_shift) = process::layout()?;
-    let base_index = base >> region_shift;
+    let (shift, base_index) = words_for(base, region_shift)?;
     base_word.store(base_index as u64, Ordering::Relaxed);
-    shift_word.store(u64::from(region_shift), Ordering::Release);
-    Some((u64::from(region_shift), base_index))
+    shift_word.store(shift, Ordering::Release);
+    Some((shift, base_index))
+}
+
+/// The shift and base index to publish for a heap at `base`, or `None` if it is so low that its base
+/// index is in range for the table, as a small reservation may be on a small address space: a free
+/// that read the shift and not yet the base index would take the pointer's number from zero for
+/// an index, and name another region's class. Such a heap is not mirrored, and its C frees take the
+/// slow path.
+fn words_for(base: usize, region_shift: u32) -> Option<(u64, usize)> {
+    let base_index = base >> region_shift;
+    (base_index >= REGION_COUNT).then_some((u64::from(region_shift), base_index))
 }
 
 /// Records that `block`, a small block of `class` just allocated for C, lives in its region.
@@ -68,6 +87,52 @@ pub(super) fn note(block: *mut u8, class: SmallClass) {
 mod tests {
     use super::*;
     use crate::heap::{Found, process};
+
+    /// The index a generated C free works out from what it read of the two words.
+    fn index(ptr: usize, shift: u64, base_index: usize) -> usize {
+        (ptr >> shift).wrapping_sub(base_index)
+    }
+
+    #[test]
+    fn a_heap_whose_base_index_is_in_range_is_not_mirrored() {
+        for shift in [20, 26, 30] {
+            let at = |base_index: usize| base_index << shift;
+            assert_eq!(words_for(0, shift), None);
+            assert_eq!(words_for(at(1), shift), None);
+            assert_eq!(words_for(at(REGION_COUNT - 1), shift), None);
+            assert_eq!(words_for(at(REGION_COUNT) - 1, shift), None);
+            assert_eq!(
+                words_for(at(REGION_COUNT), shift),
+                Some((u64::from(shift), REGION_COUNT))
+            );
+        }
+    }
+
+    /// Whatever a free reads of the two words, for any pointer of a heap that is mirrored, it gets
+    /// the right index or one out of range, and never another region's.
+    #[test]
+    fn every_mix_of_the_words_is_right_or_out_of_range() {
+        for region_shift in 20..=36 {
+            let lowest = REGION_COUNT << region_shift;
+            let high = lowest.max(0x7f00_0000_0000);
+            for base in [lowest, lowest + (1 << region_shift), high] {
+                // A reservation starts on a region.
+                let base = base & !((1usize << region_shift) - 1);
+                let Some((shift, base_index)) = words_for(base, region_shift) else {
+                    panic!("a heap at {base:#x} is high enough");
+                };
+                for region in [0, 1, REGION_COUNT / 2, REGION_COUNT - 1] {
+                    for inside in [0, 8, (1usize << region_shift) - 8] {
+                        let ptr = base + (region << region_shift) + inside;
+                        assert!(index(ptr, 0, 0) >= REGION_COUNT, "both old");
+                        assert!(index(ptr, shift, 0) >= REGION_COUNT, "the shift new");
+                        assert!(index(ptr, 0, base_index) >= REGION_COUNT, "the base new");
+                        assert_eq!(index(ptr, shift, base_index), region, "both new");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_noted_block_names_its_class_where_the_c_free_reads_it() {

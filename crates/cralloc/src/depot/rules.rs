@@ -577,8 +577,8 @@ fn spares_behind_an_empty_loaded_magazine_are_swept() {
     assert!(spares_behind_an_empty_magazine(false) > 0);
 }
 
-/// A rig of `N` CPUs in which each `width` consecutive simulated CPUs share an L3, which makes
-/// `SIM_THREADS / width` cache domains.
+/// A rig of `N` CPUs in which each `width` consecutive simulated CPUs share a cache domain, which
+/// makes `SIM_THREADS / width` of them. Split, since discovery keeps one domain at a width of one.
 fn domains<const N: usize>(
     width: u32,
     classes: &[SmallClass],
@@ -587,7 +587,9 @@ fn domains<const N: usize>(
 ) -> Rig<SimOs<Small>, N> {
     let os = SimOs::new();
     os.set_topology(crate::os::sim::SimTopology::Blocks(width));
-    Rig::with_os(os, classes, count, tuning)
+    let rig = Rig::with_os(os, classes, count, tuning);
+    rig.depot.split_domains(rig.os(), width as usize);
+    rig
 }
 
 fn domain(n: usize) -> Pool {
@@ -1968,7 +1970,9 @@ fn a_rule_the_budget_turns_away_runs_at_the_next_slow_path_whatever_the_pace() {
 fn roomy<const N: usize>(width: u32, classes: &[SmallClass], count: usize) -> Rig<SimOs<Roomy>, N> {
     let os = SimOs::new();
     os.set_topology(crate::os::sim::SimTopology::Blocks(width));
-    Rig::with_os(os, classes, count, Tuning::DEFAULT)
+    let rig = Rig::with_os(os, classes, count, Tuning::DEFAULT);
+    rig.depot.split_domains(rig.os(), width as usize);
+    rig
 }
 
 /// Whether CPU `n` of `rig` has a magazine of `class` loaded.

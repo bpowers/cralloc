@@ -1,10 +1,10 @@
 # Lean: the assembly routines, their proofs, and the generator
 
-cralloc's assembly is written here as Lean terms over a model of x86-64,
-proved correct against that model, and printed as Rust source. Nothing in the
-allocator is assembly written by hand: the generated files are the only
-assembly it contains, and a check fails if they differ from what Lean
-generates now.
+cralloc's assembly is written here as Lean terms over a model of the
+architecture, x86-64 or AArch64, proved correct against that model, and printed
+as Rust source. Nothing in the allocator is assembly written by hand: the
+generated files are the only assembly it contains, and a check fails if they
+differ from what Lean generates now.
 
 This directory is a fork of the Lean framework of
 [verified-garbage](https://github.com/pyca/verified-garbage), which does the
@@ -30,7 +30,8 @@ Removed:
 
 * every cryptographic specification, implementation and proof, and the
   known-answer tests;
-* the AArch64, ARMv7 and IA-32 models;
+* the ARMv7 and IA-32 models, and upstream's AArch64 model, in whose place
+  `TCB/AArch64/` is written for the routines here, in the shape x86-64's took;
 * the SSE, AVX and AVX-512 instructions and state (vector registers, MXCSR)
   and the instructions that carry their own tables (`aluTbl`,
   `vmovdquTbl`);
@@ -71,6 +72,7 @@ Cralloc/
     Audit.lean      `#assert_no_compiler_overrides`, `#assert_spec_origin`
     Emit.lean       what is emitted, and writing or checking the output
     X86_64/         ISA model, printer, System V ABI target
+    AArch64/        ISA model, printer, AAPCS64 target
   Spec/         Specifications and contracts (trusted, must be reviewed)
   Impl/         Implementations: `Prog`s over an ISA model (untrusted)
   Proof/        Proofs (untrusted)
@@ -97,19 +99,19 @@ scripts/        The checks: imports, registration files, the audit's negative te
    calling convention where the arguments are, the memory the routine may read
    and write, and disjointness; the contract adds a postcondition and any
    further precondition) and its `Api` (Rust module, name, documentation).
-2. **Impl**: `Impl/<Name>/X86_64.lean` defines the code as a `Prog`.
+2. **Impl**: `Impl/<Name>/<Arch>.lean` defines the code as a `Prog`.
 3. **Proof**: `Proof/<Name>/…` proves `Verified target code contract`:
    termination without faults (hence memory safety), the postcondition, the
    calling-convention obligations, and that the precondition is satisfiable.
-4. **Registry**: `Artifacts/<Name>/X86_64.lean` binds them into an
+4. **Registry**: `Artifacts/<Name>/<Arch>.lean` binds them into an
    `Artifact`, which cannot be built without the proof. Registration files
    only bind: no theorems and no tactic proofs but the defaults
    (`scripts/check_registrations.py`).
 5. **Emit**: `Emit.lean` imports the registration files into its own
-   process, audits the lists they define (only the standard axioms, found by
-   walking the declarations; the compiled code it runs is what the kernel
-   checked; `VG.Spec` names come from `Spec/`), and evaluates and renders
-   those same lists. Nothing it audits or emits is elaborated in a file that
+   process, audits the lists they define before any of their code can run (only
+   the standard axioms, found by walking the declarations; no compiler override
+   remains after the build; `VG.Spec` names come from `Spec/`), and evaluates and
+   renders those same lists. Nothing it audits or emits is elaborated in a file that
    imports them, so their syntax cannot change it.
 
 The self-test (`Spec/Selftest*`, `Impl/Selftest/`, `Proof/Selftest/`,
@@ -131,7 +133,11 @@ slow path's routines name, followed by the masks' table),
 and the word itself, from data the emitter writes into `x86_64/area.rs`
 (`Target.ownArea`, `VG.X86_64.ownRseqArea`; data, not code, so not proved),
 and the routines' direct forms, which a musl build always selects
-(`Artifact.cfg`), read that word.
+(`Artifact.cfg`), read that word. On AArch64, where no assembler can write the
+area's offset as data, the area alone is data (`aarch64/area.rs`,
+`VG.AArch64.ownRseqArea`), and the musl forms hold the offset in two instructions
+the linker writes (`Impl.Slab.AArch64.muslSetup`); the contracts' word is then one
+only the model has, which only those two read (`TCB/AArch64/Isa.lean`).
 
 The out-of-line pop's and push's steps after the CPU number's are
 definitions of their own (`Impl.Slab.X86_64.popSteps`, `pushSteps`), taking
@@ -139,14 +145,58 @@ the register that holds the word's address and the exits as parameters, so
 that a longer routine (a C entry point that finds the class first) can end
 with them.
 
+On x86-64 an abort restarts a routine from its first instruction. On AArch64 a
+routine forms the rseq area's and its descriptor's addresses once, in registers,
+and an abort returns to the arming store alone, so a retry runs on the registers
+the abort kept. The code of such a routine is what follows the setup, and an
+artifact states the setup apart (`Artifact.setup`): its attempts have a contract
+of their own, the function's with a further precondition on those registers
+(`Artifact.attempt`), which a retry must prove from what the abort left, and the
+setup must establish (`SetupOk`). So a body that overwrites a register the
+restart needs cannot be verified. `Verified` is the same for both, about attempts.
+
 ## What you need to trust
 
-* `TCB/`: in particular the ISA model, which must match the Intel SDM, and
-  the printers, which must print what the model means.
+* `TCB/`: in particular the ISA models, which must match the Intel SDM and the
+  Arm ARM, and the printers, which must print what the models mean. On an AArch64
+  host `scripts/check_aarch64.py` runs each instruction form on the processor and
+  compares it with the model.
 * For each artifact: its contract and `Api` in `Spec/`.
 * Lean's kernel, and the assembler in `rustc` and LLVM.
+* The linker. It writes each relocation as the printers assume, and it can do more: for
+  Cortex-A53 erratum 843419 it moves a load or store that follows an `adrp` out of line,
+  which rustc asks of it on every AArch64 link. So the emitter refuses a restartable
+  sequence with anything in its body that a linker writes or could move
+  (`Rust.checkRseq`), and an `adrp` near enough before it.
+* That no tool rewrites the linked binary. One like BOLT can move code out of a sequence's range,
+  where a preemption does not abort it, and none has been tested on these routines.
+* The argument about memory order. The model is sequential: a run is one thread's, its
+  memory accesses in order, and other threads appear only while it is aborted. That the
+  routines are right under the processors' weaker orders is argued in
+  `docs/research/memory-ordering.md`, not proved here.
 
 Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
+
+## What the audits defend against
+
+Honest mistakes, each of which would let every proof stand and emit something else. Modules of
+Lean's own (`Init`, `Std`, `Lean`) are exempt; every other is audited, whatever it is called. The
+emitter refuses:
+
+* an axiom, `sorry` or `native_decide` in anything an artifact depends on;
+* a declaration the kernel never saw (`debug.skipKernelTC`): `leanchecker` replays every module
+  under `Cralloc`, and the emitter loads no other but Lean's;
+* an override left on what the emitter runs (`implemented_by`, `extern`, `export`), a `csimp`
+  theorem, or an initializer in any module, before any of that module's code can run;
+* a contract or `Api` named as `Spec/`'s and declared elsewhere, and a target, printer, ABI, ISA,
+  artifact or `Api` built outside the files that may.
+
+They do not defend against an author who runs code during `lake build`. A `run_cmd` in a module can
+change what gets compiled, by setting `implemented_by` while a definition compiles and erasing it
+after, and no scan of the text closes that. So the emitter says what it knows, that no override
+remains after the build, and not that the compiled code is what the kernel checked. The real fix,
+comparing every emitted field with what the kernel reduces it to, is a project of its own. The threat
+here is a mistake, not a hostile author in this repository, who could as well edit `TCB/`.
 
 ## Rules
 
@@ -156,21 +206,28 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
   `leanchecker` replays every module through the kernel, which rejects a
   declaration elaborated without it (`debug.skipKernelTC`).
   `scripts/audit_negative.py` checks each of these against forgeries.
-* No initializers (`initialize`, `@[init]`) under `Cralloc/`: the emitter
-  imports the registration files and must run none of their code.
+* No initializers (`initialize`, `@[init]`) under `Cralloc/`: the emitter imports the registration
+  files to run them, and must run none of their code but that. It audits them first, on an import
+  that runs nothing.
 * Never set `maxHeartbeats` or another resource limit: a proof that hits one
   is too slow, so make it faster.
 * Changes to `TCB/` or `Spec/` are trust changes: keep them small, commit them
-  apart from implementations and proofs, and justify each change to the ISA
-  model by citing the Intel SDM. Never weaken a model or contract to make a
-  proof go through.
+  apart from implementations and proofs, and justify each change to an ISA
+  model by citing the Intel SDM or the Arm ARM. Never weaken a model or contract
+  to make a proof go through.
 * The emitter runs compiled code, so nothing it runs may carry
-  `implemented_by`, `extern` or `export`, and nothing under `Cralloc/` may
+  `implemented_by`, `extern` or `export`, and no module but Lean's may
   declare a `csimp` theorem or an `initialize` (`TCB/Audit.lean`).
+* Only `TCB/` builds a `Target`, `ISA`, `Printer`, `Abi` or `Artifact`, and only `Spec/` an
+  `Api`, which the audit checks of every definition (`TCB/Audit.lean`): a registration
+  chooses among them, and cannot bring a printer of its own to go with its proof.
+* What an artifact depends on is under `Cralloc/` or is Lean's own (`VG.foreignModules`).
+* A routine whose proof goes through but which would run wrong, because the model is not
+  the machine there, goes in `CrallocTest/Forgery/` once the emitter refuses it.
 * Never edit the generated files by hand.
 
 For symbolic execution, step a block with `runBlock_cons`, `runStep_some`
-and `runBlock_nil` (`Proof/Framework/X86_64/Exec.lean`), read registers
+and `runBlock_nil` (`Proof/Framework/<Arch>/Exec.lean`), read registers
 through writes with the `RegUpd` lemmas, give loads and stores their region
 facts with the `Access` lemmas, and read flags and conditions with the
 `Flags` lemmas; never unfold `State.setReg`, `arithFlags` or
