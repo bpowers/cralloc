@@ -68,7 +68,7 @@ pub use domain::{Domain, MAX_DOMAINS};
 pub use drain::Drained;
 pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY, Lone, LoneTurn, lone_count};
-pub use inspect::inspect;
+pub(crate) use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
 pub use maintain::Stepped;
 pub use slow::REFRESH_EVERY;
