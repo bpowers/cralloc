@@ -1112,9 +1112,13 @@ static int find_sequences(struct dl_phdr_info *info, size_t size, void *data) {
         die("reading the section names of %s", info->dlpi_name);
     for (size_t i = 0; i < shn; i++)
         if (sh[i].sh_name < strs->sh_size && !strcmp(names + sh[i].sh_name, "__rseq_cs")) {
-            // Mapped and relocated: the descriptors hold run-time addresses.
-            sequences = (RseqCs *)(info->dlpi_addr + sh[i].sh_addr);
-            n_sequences = sh[i].sh_size / sizeof(RseqCs);
+            // Mapped and relocated: the descriptors hold run-time addresses. On aarch64 a routine
+            // keeps a word 32 bytes past its descriptor, which reads as an entry with no start.
+            const RseqCs *found = (const RseqCs *)(info->dlpi_addr + sh[i].sh_addr);
+            size_t count = sh[i].sh_size / sizeof(RseqCs);
+            sequences = map(sizeof(RseqCs) * count);
+            for (size_t k = 0; k < count; k++)
+                if (found[k].start_ip != 0) sequences[n_sequences++] = found[k];
             object_base = info->dlpi_addr;
         }
     if (n_sequences) load_insns(info->dlpi_addr);

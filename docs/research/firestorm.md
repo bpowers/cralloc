@@ -16,9 +16,19 @@ cycles of work between calls, and a chain, not op count or code layout, is what 
 **Firestorm has memory renaming, and a per-CPU word cannot use it as the routines stand.** A hop is
 free when the load and store use one base register with an immediate offset and nothing writes the
 base between them. A per-CPU word's base is computed afresh by every call. Keeping the slab's
-address in a scratch register would qualify, and costs 7.0 a pair, or 4.5 with the rseq area
-hoisted, but it needs the class as an immediate, which stable Rust cannot hand an `asm!` block
-("Held, not built").
+address in a scratch register would qualify, and costs 8.0 a pair, but it needs the class as an
+immediate, which stable Rust cannot hand an `asm!` block ("Held, not built").
+
+**Real jobs do not wait on the hop, with one exception.** Six more cycles on every hop cost the boa
+JavaScript engine 0.3% and ruff nothing. Taking the hop away at every call whose class the compiler
+knows changes JSON, both maps, churn, the RPC log job, boa and ruff by less than their noise or what
+a placement can move. The exception is a binary tree of `Box`es, whose build gains 24% and whose job
+gains 6.7%, since about half its allocations arrive closer together than the hop takes ("Whether
+real jobs feel the hop").
+
+**A routine forms every address before it arms.** A sequence holds no `adrp`: rustc's links work
+around Cortex-A53 erratum 843419 by replacing a load after an `adrp` near a page's end with a branch
+to a stub, and a preemption in the stub does not abort the sequence ("The recommended shape").
 
 Ranked by what one event costs:
 
@@ -53,6 +63,8 @@ unless shown.
 - `b.cond` reaches 1 MiB and `tbz` 32 KiB, and no linker can extend them, so a routine branches only
   within itself ("Reaching the routine's own code").
 - A direct `adrp` to `__rseq_offset` is refused by GNU ld in a position-independent executable.
+- A sequence holds no relocation, since a linker may rewrite a load after an `adrp` into a branch out
+  of the sequence's range. It costs nothing: the pairs are as they were ("The C entry points").
 - A load or store with writeback costs an extra micro-op and buys nothing here; avoid it.
 
 **From any out-of-order core:** forwarding is what a tight pair waits on unless the core renames
@@ -102,8 +114,9 @@ through two calls each is out of line, and a batch is 32 allocations and then 32
 | Recommended routines, `executable` form | 13.05 | 13.05 | 13.06 |
 | Recommended, a word and mask formed at each site | 12.99 | | |
 | Recommended, the class from the tables each call | 13.16 | | |
-| Held: the slab's address kept in a register | 7.00 | 9.00 | 7.84 (+0.17) |
-| Held, with the rseq area hoisted | 4.50 | 7.00 | 5.06 |
+| Held: the slab's address kept in a register, `ubfiz` | 6.91 | 8.80 | 7.50 |
+| Held, with the compare the routines use | 8.00 | | |
+| Held, `ubfiz`, the rseq area and slabs hoisted | 4.50 | | |
 
 - **Through two calls costs what inlined costs,** unlike Zen 5, where the call is the floor.
 - **A list beats a magazine,** the reverse of Zen 5. A magazine's add costs its hop 2 cycles: the
@@ -129,6 +142,128 @@ A pair adds 4.25 cycles of decode to a width-bound caller, and two calls 4.75. A
 adds under 1. How long a lone call takes to produce its pointer is measured between two `isb`s: pop
 and push together add 40 cycles to a frame of 63, or 44 in the form through the GOT, about 20 a
 call.
+
+## The real allocator against the incumbents
+
+The crate's routines cost what the kernels said. Through `GlobalAlloc` with fat LTO, cycles per
+allocate and free, each allocator linked as `bench-alloc` links it, three interleaved rounds, the
+fastest (`f3e635c`, `bench/roofline/rust-alloc/run_aarch64.sh`). Spreads are under 0.3, but for
+mimalloc sized on the first row (+0.92):
+
+| Workload | cralloc | snmalloc | jemalloc | tcmalloc per-CPU | mimalloc sized | mimalloc | glibc | tcmalloc per-thread | Floor, heap | Floor, TLS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Pair, constant size | 13.01 | 9.49 | 13.31 | 15.42 | 15.17 | 18.14 | 19.00 | 40.03 | 8.99 | 4.49 |
+| `Box` | 13.37 | 10.36 | 13.46 | 16.27 | 15.18 | 17.47 | 21.66 | 40.70 | 8.92 | 5.24 |
+| Pair, run-time size | 13.30 | 9.65 | 13.28 | 15.52 | 15.34 | 17.74 | 19.03 | 40.03 | 9.02 | 8.93 |
+| Batch of 32 | 13.09 | 12.56 | 13.33 | 15.22 | 15.22 | 15.18 | 45.22 | 39.59 | 9.52 | 5.08 |
+| Batch, run-time size | 13.28 | 12.85 | 13.34 | 15.26 | 15.25 | 15.23 | 45.18 | 39.64 | 9.53 | 9.39 |
+| Pair, mixed sizes | 8.19 | 9.58 | 10.46 | 15.94 | 16.66 | 15.00 | 21.56 | 45.91 | 5.31 | 3.49 |
+| Batch, mixed sizes | 9.95 | 11.39 | 12.36 | 16.12 | 14.22 | 13.32 | 32.80 | 42.67 | 6.84 | 6.56 |
+| Churn over 10,000 live blocks | 19.51 | 20.89 | 26.21 | 25.22 | 36.24 | 35.03 | 36.09 | 48.48 | 13.50 | 12.41 |
+
+- **The fast path inlines.** `bench/roofline/fastpath/check.py` finds both sequences inside the loop
+  and no call: 54 instructions and 212 bytes at a constant size, 69 and 272 at a run-time size.
+- **The gaps from 13 are not placement.** Eight placements of each loop (`RA_PAD`, 16 to 128) move
+  every row by at most 0.04. `Box` adds 0.36 and a run-time size 0.29: the program's store and the
+  table's load, beside the hops.
+- **Mixed sizes fall below 13 because the words differ,** which leaves one hop a pair. There the
+  count binds: 62 instructions at 8 a cycle are 7.75 of the 8.19, and the two floors, at 25 and 19
+  instructions, show what the count costs. On churn no hop binds either, by the test below.
+- **snmalloc beats the tight pair by 3.5 cycles, by being a list:** the hop with no add, 4 cycles and
+  not 6. It is not renaming, since a run-time size costs it the same. Of everything here only the
+  thread-local floor renames: 4.49 at a constant size, which an immediate offset allows, and 8.93 at
+  a run-time size, which it does not. No incumbent qualifies. Lose the tight pair's shape and
+  snmalloc loses too, on mixed sizes and churn.
+
+From C, through the preload library and a direct call, cycles per allocate and free
+(`bench/roofline/centry/compare.sh`, `a032091`, the incumbents at `f3e635c`). snmalloc has no preload
+library here:
+
+| Workload | cralloc | mimalloc | glibc | jemalloc | tcmalloc per-CPU | tcmalloc per-thread |
+|---|---:|---:|---:|---:|---:|---:|
+| `malloc(32)`, `free` | 22.00 | 17.71 | 17.14 | 32.89 | 31.53 | 39.60 |
+| `calloc(1, 32)`, `free` | 22.71 | 17.86 | 17.41 | 33.49 | 32.10 | 43.43 |
+| Batch of 32 | 13.53 | 15.33 | 46.53 | 14.93 | 16.87 | 44.20 |
+| Sizes 1 to 512 | 13.54 | 19.20 | 16.43 | 22.18 | 26.89 | 40.75 |
+| Churn over 10,000 live blocks | 15.68 | 33.31 | 31.66 | 25.75 | 21.07 | 46.35 |
+
+The PLT adds 0.1 to a pair, 1.5 to a batch and 1.1 to churn, and linking statically changes nothing
+past 0.2. A C pair is the one place an incumbent wins clearly: `free` finds the class through the
+pointer it was just handed, so the chain runs through the allocation ("The C entry points"). glibc
+and mimalloc pay about 4.5 cycles less for theirs; why was not traced. Only a program that frees what
+it just allocated pays this: on the batch, mixed sizes and churn cralloc leads.
+
+## Whether real jobs feel the hop
+
+Not unless calls come closer together than the hop takes, and of these jobs only a binary tree of
+`Box`es has many that do. Elsewhere misses and the caller's code decide, as on Zen 5.
+
+Two tests, both from `bench/roofline/aarch64/hopjob`, on the suite's own jobs. `chainK` puts K more
+cycles on the hop and nothing else, and `freeK` puts the same instructions off every chain, in the
+same bytes, so their difference is what the hop alone costs. In a tight pair the difference is 2K to
+within 0.2: 17.08 against 13.02, and 25.25 against 13.02. The held form then takes the hop away at
+every site whose class the compiler knows, compared with the plain routines as a mean over five
+placements with their standard deviation, since it changes the code's size. The medians of nine runs
+for the chains on the tree, JSON and RPC, three on the B-tree, three at each placement for the held
+form, and five on boa and ruff at one placement (`948cfa3` to `9eb4705`, 2026-11-07). Calls were
+counted under the probe of "Held, not built". On boa and ruff the chains' figures are Gcycles.
+
+| Job, and what it costs plain | Calls a unit | The whole hop, 6.5 a call | `chain2` − `free2` | `chain6` − `free6` | Held against plain |
+|---|---:|---:|---:|---:|---:|
+| Tree, depth 20: 29.8 cycles a node | 2 | 13 (44%) | +0.89 | +7.14 | −6.73% ±0.16 |
+| Its build, 12.05 | 1 | 6.5 | +0.92 | +4.40 | −24% |
+| Its drop, 12.54 | 1 | 6.5 | 0.00 | +2.73 | +6.7% |
+| JSON, 32 MiB: 11.9 cycles a byte | 0.224 | 1.46 (12%) | +0.11 | +0.15 | +0.03% ±1.09 |
+| Its parse, 9.6 | 0.112 | 0.73 | +0.03 | −0.03 | −0.2% |
+| Its drop, 2.31 | 0.112 | 0.73 | +0.08 | +0.19 | +0.8% |
+| B-tree map, 1 M: 760 cycles an entry | 2.27 | 15 (1.9%) | −2.6 | +4.8 | +0.29% ±0.41 |
+| Hash map, 1 M: 272 cycles an entry | 2 | 13 (4.8%) | | | +0.11% ±0.35 |
+| Churn, 100 k live: 26.3 cycles an operation | 2 | 13 (49%) | | | +0.26% ±0.91 |
+| RPC log, 64 in flight: 102 k server cycles a request | 242 | 1,570 (1.5%) | −600 | +280 | +0.31% ±0.39 |
+| boa, the V8 suite: 31.1 Gcycles | | | | +0.09 | +0.98% |
+| ruff, 4 threads: 14.7 Gcycles | | | | −0.01 | +0.22% |
+
+- **The tree's build is what binds.** Each added cycle costs about half a cycle up to `chain2`, and
+  the held form's 2.87 a node is under half the hop. Allocations of a tree's leaves come a few
+  instructions apart and wait on the hop, and the rest do not. Its drop waits on the walk: the first
+  two cycles of hop cost nothing, and the held form pays for its three more instructions and its
+  taken branch.
+- **JSON's parse feels nothing.** Its drop feels about a third of each added cycle, at sizes known
+  only at run time, where the held form cannot run. If that held all the way down it would be worth
+  0.22 cycles a byte, 1.8% of the job.
+- **The RPC job cannot show it.** The whole hop is 1.5% of a request, and its rounds spread by 3%.
+- **boa and ruff, real programs, feel nothing:** 0.3% and less for six cycles on every hop, within
+  their rounds' spread of 1 to 1.5%.
+- **What a held `x18` is worth:** 6.7% on a tree of `Box`es, nothing to find elsewhere. It stays held.
+
+**What an incumbent's tight pair is worth: nothing here.** snmalloc beats the pair by 3.5 cycles and
+loses every job. The whole job, then the phases, with cralloc the plain routines, five runs at one
+placement; the RPC job's incumbents differ by less than placement moves them (`bench`'s sweeps):
+
+| Job | cralloc | mimalloc | snmalloc | jemalloc | tcmalloc per-CPU |
+|---|---:|---:|---:|---:|---:|
+| Tree, depth 20 | 29.81 | 29.22 | 33.51 | 61.90 | 47.91 |
+| Its build | 12.04 | 11.21 | 14.94 | 29.15 | 17.41 |
+| Its walk | 5.27 | 6.41 | 6.26 | 6.34 | 5.88 |
+| Its drop | 12.51 | 11.59 | 12.28 | 26.40 | 24.62 |
+| JSON, 32 MiB | 11.92 | 11.16 | 13.41 | 16.76 | 14.59 |
+| Its parse | 9.62 | 9.57 | 10.26 | 11.92 | 11.02 |
+| Its drop | 2.30 | 1.59 | 3.15 | 4.83 | 3.57 |
+| B-tree map, 1 M | 763.7 | 760.3 | 803.6 | 815.4 | 860.7 |
+| Hash map, 1 M | 272.5 | 275.6 | 284.2 | 320.3 | 309.8 |
+| Churn, 100 k live | 26.4 | 41.9 | 29.5 | 32.0 | 33.1 |
+
+mimalloc leads on JSON by 6.4%, all of it in the drop. There it retires about 30 fewer instructions a
+`free` (82 against 52 on the 8 MiB job, the walk included), and adding six costs 0.74 cycles a `free`,
+one eighth of a cycle each, so that drop is bound by width and the count matters. It is the one place
+in these jobs where it does. It also leads a tree's allocation and free by 7%, and gives back two
+thirds of that in the walk.
+
+**Rejected: reading the rseq area in a block the compiler can share and hoist.** It takes six
+instructions off a pair and two loads off the way to the pointer, and it helps the loops where width
+binds (churn 18.56 against 19.51, mixed sizes 7.79 against 8.19). On jobs, at one placement, it does
+nothing to find: tree +0.3%, JSON +1.0%, B-tree −1.3%, hash −0.2%, churn +0.8%. And a function holding
+the area across a fiber's move to another thread would arm that thread's sequence.
 
 ## How a load gets a value a store just wrote
 
@@ -194,30 +329,34 @@ load of the first, 2.4 to 3.5 a pass; with the load feeding the store, 6.67 at o
 A routine computes the CPU's slab's address as before, but compares it with what a scratch register
 still holds and loads through that register, which is then not written. Memory safety rests on the
 compare, since the register can hold anything. A CPU number masked by `ubfiz` needs no branch of its
-own if the top two slabs stay unwritten; with `cmp` the held pair costs 7.59 and not 7.00.
+own if the top two slabs stay unwritten; with `cmp` the held pair costs 8.00 and not 6.91.
 
 ```asm
-    ldr   w8, [x10, #4]
-    adrp  x9, SLABS
-    ubfiz x8, x8, #12, #13
-    add   x9, x9, x8
+    ldr   w8, [x10, #4]        ; x13 holds the slabs, from before the sequence
+    cmp   w8, #8192
+    b.hs  7f
+    lsl   x8, x8, #12
+    add   x9, x13, x8
     cmp   x18, x9
-    b.ne  fix                  ; mov x18, x9; b back
+    b.eq  back                 ; inlined, so a conditional branch cannot reach a stub
+    mov   x18, x9
 back:
     ldr   x1, [x18, #WORD]     ; renamed from the last commit to this class's word
 ```
 
-What it buys: the pair above at 7.00, or 4.49 with the area and the slabs' address hoisted, which
-Rust could do by reading the thread pointer in a `pure` block. A lone pop and push add 19 cycles to
-the `isb` frame in place of 40, since the word's load no longer waits on the CPU number. With the
-area and slabs hoisted the two calls cost 5.50 and the batch 4.81. The word's position must be an
-immediate. Through `[x18, x23]` the pair is 13.05 again.
+What it buys: 8.00 a pair in the crate, through `GlobalAlloc`, and 9.02 with a `Box`. With `ubfiz`
+in place of the compare and a stub in place of the branch over the `mov` the kernels reach 6.91, and
+4.50 with the area and the slabs' address hoisted. But `ubfiz` rests memory safety on the kernel's
+numbers, and a stub is out of a conditional branch's reach in a large function. The word's position
+must be an immediate. Through `[x18, x23]` the pair is 13.06 again.
 
-**Why not now.** A class known only after inlining cannot reach `asm!` as an immediate on stable
-Rust. `const` operands need a Rust constant, a `match` over the classes is a jump table at run-time
-sites, and `is_val_statically_known` is unstable. So this waits for that intrinsic. A clobbered
-register sends the call through `fix`: 13.05 when that is steady, and 14.13 when it clobbers at
-random on half the pairs (0.46 mispredicts).
+**Why not.** Real jobs gain nothing from it but a tree of `Box`es ("Whether real jobs feel the hop").
+It also needs an intrinsic: a class known only after inlining cannot reach `asm!` as an immediate on
+stable Rust, since `const` operands need a Rust constant and a `match` over the classes is a jump
+table at run-time sites, so it takes the unstable `is_val_statically_known`. And Neoverse V2 has no
+reported renaming, where it would be three instructions for nothing. A clobbered register sends the
+call through `fix`: 13.05 when that is steady, and 14.13 when it clobbers at random on half the pairs
+(0.46 mispredicts).
 
 **How long a register survives.** A preloaded probe (`bench/roofline/aarch64/stale`) left a sentinel
 in four registers as each `malloc` or `free` returned and checked them at the next call. Percent of
@@ -236,7 +375,7 @@ which a real predictor beats:
 `x17` keeps nothing (0.0 to 0.3%), since every PLT stub writes it. Short runs include cold sites.
 `x18` is the register to use on Linux, except that a program built with a shadow call stack reserves
 it. At 17 to 24 cycles a misprediction, a call pays from nothing to about 2 cycles for it by the
-per-site figures, so whether it pays in a program needs a job, not a loop.
+per-site figures.
 
 **Rejected: keeping the word's address instead,** which needs no immediate and so works on stable
 Rust. It costs a branch on whether the last call had this class, and classes do not repeat
@@ -403,11 +542,11 @@ shared.**
 
 | Pair | Direct | PLT | GOT | 64 sizes |
 |---|---:|---:|---:|---:|
-| `malloc`, `free` | 22.00 | 22.08 | 22.07 | 21.65 |
-| `malloc`, sized free | 13.11 | 13.10 | 13.10 | 13.07 |
-| `calloc(1, 16)`, `free` | 22.08 | | | |
-| `calloc(1, 32)`, `free` | 22.01 | | | |
-| `malloc`, `free`, batch of 32 | 13.15 | | | |
+| `malloc`, `free` | 21.99 | 22.05 | 22.05 | 21.69 |
+| `malloc`, sized free | 13.11 | 13.08 | 13.08 | 13.05 |
+| `calloc(1, 16)`, `free` | 22.18 | | | |
+| `calloc(1, 32)`, `free` | 21.98 | | | |
+| `malloc`, `free`, batch of 32 | 13.19 | | | |
 
 - **The chain through the pointer is 9 cycles of a `free`.** The slot's load feeds a shift, a
   subtract and a table byte, which address the commit, and the next `malloc`'s load waits for that
@@ -420,16 +559,23 @@ shared.**
   add. The same effect as Zen 5's: a predicted branch's operand still costs.
 - **One table with word and mask together saves nothing:** 22.48, 0.08 better than the base, with no
   scaled form.
-- **Share an `adrp` when nothing else binds.** The routine's word after its descriptor, published
-  words and masks in one page, the region table `add`ed from the masks: 13.11 against 13.79 on the
-  sized pair, 13.07 against 13.82 on sizes in a cycle, nothing on `free`. A sized pair has 22
-  micro-ops for the branch units, 11 cycles alone. `Front` keeps these places by construction today;
-  a compile-time assert should say so.
+- **Every address before the arm costs nothing.** All of a routine's `adrp`s ahead of the arming
+  store give the table above, within 0.08 of the same routines with them in the sequence (`a032091`).
+  Whether the tables come ahead of finding the rseq area or after it makes no difference (22.00,
+  13.10), so they come ahead, which keeps every `adrp` at least three instructions from the arm.
+- **Sharing an `adrp` saves only its instructions.** The word after the descriptor, published words
+  and masks in one page, and the region table `add`ed from the masks, against an `adrp` and `add` for
+  each table: 13.11 and 13.10 on the sized pair, 21.99 and 21.98 on `free`. An `adrp` in the sequence
+  would come before the hot word's load, and there separate ones cost 0.7. To a width-bound caller
+  the three more instructions cost their decode, 0.375: 17.25 and 17.63 with 64 nops, 25.25 and 25.63
+  with 128. So sharing stays, and an assert in `aarch64/mod.rs` keeps the places.
 - **`ubfiz` for the CPU check** saves a fused micro-op and 0.5 cycles to a width-bound caller only:
   24.50 and 25.00 with 128 nops a pass. Rejected for the plain routines: memory safety would rest on
   the kernel's numbers for nothing a pair can see.
-- **The slow path's routines:** `slab_cas` 4.03 a call when it succeeds and 5.00 when it fails,
-  `slab_stack_pop` and `slab_stack_push` together 9.09, `current_cpu` 3.00 out of line and 1.00
+- **The overflow check is `umulh` and `cbnz`:** exact, one instruction fewer than a bound on both
+  arguments, and no slower: `calloc` and `free` cost 22.07 either way at 16 bytes.
+- **The slow path's routines:** `slab_cas` 4.00 a call when it succeeds and 5.00 when it fails,
+  `slab_stack_pop` and `slab_stack_push` together 9.07, `current_cpu` 3.00 out of line and 1.00
   inlined with the offset held.
 
 ## What turned out not to matter
@@ -456,7 +602,8 @@ and suits Neoverse V2.
 
 The default form of a pop, with the word's address in `x3` and the mask in `w2`. The push and the C
 routines have the same prologue and tail. The descriptor is followed by a word holding the address
-of `__rseq_offset`, so a routine needs one `adrp`:
+of `__rseq_offset`, so a routine needs one `adrp` for it. A C or slab routine forms its tables first,
+in the registers its body reads, none of which the sequence writes:
 
 ```asm
     adrp  x11, 3f                ; descriptor, then __rseq_offset's address
@@ -464,8 +611,8 @@ of `__rseq_offset`, so a routine needs one `adrp`:
     ldr   x9, [x11, #32]
     ldr   x9, [x9]
     mrs   x10, tpidr_el0
-    add   x10, x10, x9           ; the thread's rseq area
-5:  str   x11, [x10, #8]         ; arm; the abort handler returns here
+    add   x10, x10, x9           ; the thread's rseq area; nothing in the sequence writes it
+5:  str   x11, [x10, #8]         ; arm, one store; the abort handler returns here
 6:  mov   x0, #0                 ; a miss returns zero
     ldr   w8, [x10, #4]
     cmp   w8, #8192
@@ -479,6 +626,20 @@ of `__rseq_offset`, so a routine needs one `adrp`:
     str   x1, [x3, x8]           ; commit
 7:
 ```
+
+**Why nothing is formed in the sequence.** rustc passes `--fix-cortex-a53-843419` on every aarch64
+link. When an `adrp` lands at a page offset of 0xff8 or 0xffc and is followed by a load or store, and
+then an unsigned-offset load or store through its register, the linker (lld's
+`is843419ErratumSequence`) replaces the last with a branch to a stub. A stub is outside the sequence's
+range, so a preemption there does not abort: a signal at the stub lost another thread's update, at
+one placement in 64 of a `free` with an `adrp` in its sequence. No `adrp` in a routine is directly
+followed by a load or store, so the pattern occurs nowhere in it, setup included, and
+`bench/roofline/aarch64/reach/bodies.py` checks a linked binary for an `adrp` in a sequence or a `b`
+out of one. An abort restarts at the arming store with the registers as they stand, so a retry needs
+nothing formed again.
+
+Nothing comes after a commit but moves and a return or a tail call: `calloc`'s zeroing is in
+`calloc_zero_tail`, since a store past the commit is out of the sequence.
 
 ## Raw events
 
@@ -506,14 +667,11 @@ safe.
 
 - **Neoverse V2's numbers.** The harness runs there: `bench/roofline/README.md`, "aarch64". Whether
   it renames, what `mrs` costs, what a failed CAS costs.
-- **Whether a kept slab address pays in a job,** given stable Rust's limit: lone-call latency on the
-  C routines and run-time sites, against the mispredictions the probe suggests. A cargo feature
-  could answer this once the port runs.
 - **What in the core makes the K + 5.7 hop's fraction,** and why a chain of 3 `mov`s runs out.
 - **Whether a load wider than a store really forwards,** as 6.74 suggests, or waits by another road
   that happens to cost the same.
 - **What limits the taken-branch span:** why about 4,600 bytes, and what a call costs with the
   routine and its callers more than 4 KiB apart in the same loop, which the site sweep only
   approaches.
-- **What real programs do to the hop.** The caller-work table is of nops and adds; `pw_` should be
-  rerun under the allocator as a job once the port runs.
+- **Why mimalloc's `free` is cheaper in JSON's drop,** 1.59 cycles a byte against 2.30, the whole of
+  its lead on that job. The hop is a small part of it ("Whether real jobs feel the hop").
