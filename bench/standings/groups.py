@@ -5,8 +5,8 @@ groups.py [--base NAME] [--allocators a,b,...] FILE...
 Each job's cost is the median over its valid runs (time, or the inverse of a rate). A cell is the
 geometric mean over the group's jobs of the allocator's cost over the base's, with the geometric
 standard deviation across those jobs (population form). xmalloc-test is left out: its medians
-compare modes. Then the same for memory, the median cgroup peak, over the jobs where the base's or the
-other's peak reaches 30 MiB. After the tables, each job the base loses to its best incumbent, worst
+compare modes. Then the same for memory, the median cgroup peak, over the jobs where the base's peak
+reaches 30 MiB, since mimalloc's huge pages put its own over that on every job. After the tables, each job the base loses to its best incumbent, worst
 first, in time and then in memory."""
 import argparse
 import collections
@@ -72,10 +72,10 @@ def main():
             continue
         base = statistics.median(per[a.base])
         for other in others:
-            if other in per and max(base, statistics.median(per[other])) >= 30 << 20:
+            if other in per and base >= 30 << 20:
                 mem[other].append(statistics.median(per[other]) / base)
         incumbents = {o: statistics.median(v) for o, v in per.items() if o != a.base and "ctl" not in o}
-        if incumbents and max(base, min(incumbents.values())) >= 30 << 20:
+        if incumbents and base >= 30 << 20:
             best = min(incumbents, key=incumbents.get)
             if incumbents[best] < base:
                 heavier.append((base / incumbents[best], job, best, base / 2**20, incumbents[best] / 2**20))
