@@ -124,16 +124,16 @@ pub(crate) const TABLE_OFF: usize = 2048;
 /// From the specification (`Api.rustConsts`).
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// Of the rseq area for `x86_64` (`OwnArea.consts`).
+/// Of the rseq area (`OwnArea.consts`).
 pub(crate) const RSEQ_AREA_LEN: usize = 32;
 
-/// Of the rseq area for `x86_64` (`OwnArea.consts`).
+/// Of the rseq area (`OwnArea.consts`).
 pub(crate) const RSEQ_AREA_ALIGN: usize = 4096;
 
-/// Of the rseq area for `x86_64` (`OwnArea.consts`).
+/// Of the rseq area (`OwnArea.consts`).
 pub(crate) const RSEQ_AREA_PAGE_OFFSET: usize = 768;
 
-/// Of the rseq area for `x86_64` (`OwnArea.consts`).
+/// Of the rseq area (`OwnArea.consts`).
 pub(crate) const RSEQ_CPU_ID_UNREGISTERED: u32 = 4294967295;
 
 /// Of its target's assembly (`Target.consts`).

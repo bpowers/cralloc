@@ -628,7 +628,7 @@ pages; a class of 4 KiB had the same and now has none. The rule's own threshold 
 pages, since what it bounds is a share of the class.
 
 **A split of 32 MiB is the background thread's or `collect`'s.** A heap with 416 MiB under huge
-pages, one live block of 1 KiB left in each 48 pages' worth, then 10 s of requests:
+pages, one live block of 1 KiB left in each 3 pages' worth, then 10 s of requests:
 
 | | `MADV_COLD` by a request | By the background thread | By `collect` | Resident after the requests, MiB |
 |---|---:|---:|---:|---:|

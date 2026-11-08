@@ -214,7 +214,7 @@ commit or the drain, and a magazine handle is only made for an address the commi
 **The proofs in Lean say nothing about memory order.** Their model is sequential and has no barrier
 instruction: a proof says what a routine's instructions do to memory taken in program order, one
 thread at a time and interrupted anywhere. It does not say what another CPU sees of them, or when.
-The routines hold plain `ldr`, `ldrb` and `str` and no barrier (`front/provisional/` and
+The routines hold plain `ldr`, `ldrb` and `str` and no barrier (`front/generated/aarch64/` and
 `front/generated/aarch64_inline/`, read line by line against this section; `generated/x86_64` is the
 same in `mov`s), and these stand in for a proof:
 
@@ -367,8 +367,7 @@ leave out each barrier the fence's and parking's rows rest on. A transcription i
 - **The routines and Miri.** Miri sees the twins, whose order is the simulator's, and relaxing the
   simulator's barrier went unseen, so some other atomic of the simulator may order what the barrier
   should. So Miri does not show that the route through a routine holds. The real routines have only
-  the tests on real threads and the reading above, and those are provisional, by hand, until Lean
-  emits them.
+  the tests on real threads and the reading above.
 - **The kernel's barriers are read, not proved.** The no-interrupt paths have a litmus test in Arm's
   model and no test on the kernel that isolates them.
 - **The fork's cut** rests on Arm's rule for `tlbi` and `dsb`, as we read it.

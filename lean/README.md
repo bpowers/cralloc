@@ -4,8 +4,7 @@ cralloc's assembly is written here as Lean terms over a model of the
 architecture, x86-64 or AArch64, proved correct against that model, and printed
 as Rust source. Nothing in the allocator is assembly written by hand: the
 generated files are the only assembly it contains, and a check fails if they
-differ from what Lean generates now. (The AArch64 routines are moving here from
-`front/provisional/`, written by hand; all but the C entry points are generated so far.)
+differ from what Lean generates now.
 
 This directory is a fork of the Lean framework of
 [verified-garbage](https://github.com/pyca/verified-garbage), which does the
@@ -134,7 +133,11 @@ slow path's routines name, followed by the masks' table),
 and the word itself, from data the emitter writes into `x86_64/area.rs`
 (`Target.ownArea`, `VG.X86_64.ownRseqArea`; data, not code, so not proved),
 and the routines' direct forms, which a musl build always selects
-(`Artifact.cfg`), read that word.
+(`Artifact.cfg`), read that word. On AArch64, where no assembler can write the
+area's offset as data, the area alone is data (`aarch64/area.rs`,
+`VG.AArch64.ownRseqArea`), and the musl forms hold the offset in two instructions
+the linker writes (`Impl.Slab.AArch64.muslSetup`); the contracts' word is then one
+only the model has, which only those two read (`TCB/AArch64/Isa.lean`).
 
 The out-of-line pop's and push's steps after the CPU number's are
 definitions of their own (`Impl.Slab.X86_64.popSteps`, `pushSteps`), taking
