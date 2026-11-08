@@ -2,7 +2,10 @@
 //!
 //! The area and the word holding its offset from the thread pointer are generated data
 //! (`generated/x86_64/area.rs`, from `VG.X86_64.ownRseqArea` in Lean), and the routines read
-//! that word as glibc's `__rseq_offset` (`super::__rseq_offset`). Every thread's copy of the
+//! that word as glibc's `__rseq_offset` (`super::__rseq_offset`). No assembler for aarch64 can
+//! write that offset as data, so there the area alone is data (`generated/aarch64/area.rs`), and
+//! the routines hold the offset in their instructions, as `area_offset` does for Rust. Every
+//! thread's copy of the
 //! area starts with `cpu_id` -1, which the routines read as "no slab", so a new thread takes the
 //! slow path, whose first question, `Real::cpu`, calls [`register`] when it reads -1. From then
 //! on `cpu_id` is the thread's CPU and the fast path runs.
@@ -115,8 +118,9 @@ fn area() -> Option<NonNull<u8>> {
     let tp = rseq::thread_pointer()?;
     #[cfg(target_arch = "x86_64")]
     let offset = super::__rseq_offset;
+    // SAFETY: AREA-06.
     #[cfg(target_arch = "aarch64")]
-    let offset = super::outlined::area::offset();
+    let offset = unsafe { super::inlined::slab::area_offset() }.cast_signed();
     NonNull::new(tp.as_ptr().wrapping_byte_offset(offset))
 }
 

@@ -1,7 +1,6 @@
 # Safety ledger: `crates/cralloc/src/front/real.rs`
 
-`Real` wraps the routines generated from Lean (`front/generated/`), and on aarch64 the hand-written
-ones that wait for Lean (`front/provisional/`, PROVISIONAL-01), which have the same contracts. Each
+`Real` wraps the routines generated from Lean (`front/generated/`). Each
 generated function states, in its `# Safety` section, what the Rust side must guarantee; the Lean proof covers the
 rest (the instructions do what the contract says, under any interruption). The obligations
 below are those sections, discharged once here for every call in the file.
@@ -17,6 +16,7 @@ below are those sections, discharged once here for every call in the file.
 - (L) `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` do not
   overlap each other (where one is written), the stack the routine uses, or the end of the
   address space.
+- (P) On aarch64, `SLABS` starts on a boundary of 4096 bytes.
 - (S) In every slab, the class's hot word is zero, a marker, or a slot `s >= 1` of a magazine of
   the class that nothing else names, with non-null pointers in slots below; every spare head is
   zero, a marker or a stack of magazines linked through slot 0. Every thread and the drainer
@@ -51,10 +51,13 @@ below are those sections, discharged once here for every call in the file.
   the magazine's mask for every class, and a test checks each size's mask against the one the
   routines were proved for (`crate::spec`, which the Lean emitter writes).
 - (L): on glibc, `__rseq_offset` is glibc's and the rseq area is in glibc's static TLS for the
-  thread; on musl, the word is the crate's own in `.rodata` and the area the crate's own in the
-  thread's static TLS (FRONT-01, `front/area-safety.md`), neither inside `SLABS`, a static of its
-  own. The stack is the thread's own. None of them is at the top of the address space (user
-  space ends far below it on x86-64).
+  thread; on musl, the word is the crate's own in `.rodata`, or on aarch64 no word at all, only a
+  name in the routines' contracts for what their instructions hold (`front/area-safety.md`), and
+  the area the crate's own in the thread's static TLS (FRONT-01, `front/area-safety.md`), neither
+  inside `SLABS`, a static of its own. The stack is the thread's own. None of them is at the top
+  of the address space (user space ends far below it).
+- (P): `Front` is aligned to 4096 bytes (`repr(align)`, with a compile-time assertion in
+  `front/mod.rs`), and its slabs are at offset 0.
 - (S): the slab invariant (below), which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
