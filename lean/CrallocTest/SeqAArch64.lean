@@ -2,6 +2,7 @@ import Cralloc.TCB.Rust
 import Cralloc.TCB.Axioms
 import Cralloc.Proof.Examples.AArch64.Seq
 import Cralloc.Proof.Framework.Registration
+import Cralloc.Artifacts.Selftest.AArch64
 
 /-!
 # A sequence with a setup, through the emitter
@@ -60,5 +61,25 @@ pub(crate) unsafe extern \"C\" fn vg_seq(p: usize, v: u64) {
     )
 }
 "
+
+/-! ## A result that says only whether the function did anything
+
+The inline function returns `bool`: that its result register is not zero. A naked
+function may not. -/
+
+/-- The inline self-test, returning that its result is not zero. -/
+def nonzero : Option Artifact :=
+  (Artifacts.Selftest.AArch64.artifacts.find? (·.target.inline)).map
+    fun a => { a with retNonzero := true }
+
+/-- The lines of an inline function that say what it returns. -/
+def returns (a : Artifact) : List String :=
+  ((Rust.inlineFunction a (Rust.inlineLines a)).splitOn "\n").filter fun l =>
+    (l.splitOn " -> ").length > 1 || l == "    ret" || l == "    ret != 0"
+
+#guard (nonzero.map returns) ==
+  some ["pub(crate) unsafe fn vg_selftest_add(a: u64, b: u64) -> bool {", "    ret != 0"]
+#guard match nonzero.map Rust.checkInline with | some (.ok _) => true | _ => false
+#guard match Rust.checkInline { art with retNonzero := true } with | .error _ => true | .ok _ => false
 
 end VG.Test.SeqAArch64
