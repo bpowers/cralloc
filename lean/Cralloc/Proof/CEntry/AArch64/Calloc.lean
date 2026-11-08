@@ -426,8 +426,9 @@ theorem rseqOk (hs : attempt.pre s) : RseqOk target cCalloc attempt s := by
 
 /-! ### The setup -/
 
-theorem setupOk : SetupOk target contract attempt callocSig [] callocSetup :=
-  setupOk_of hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (tbl := callocTables)
+theorem setupOk {l : List Instr} {g : State → State} (hl : AreaSetup l g) :
+    SetupOk target contract attempt callocSig [] (callocTables ++ l) :=
+  setupOk_of hl hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (tbl := callocTables)
     (f := fun s => baseS (tabS .x12 CALLOC_SIZES s)) (rs := [.x12, .x13, .x14, .x15])
     (fun s h => by
       rw [callocTables, exec_tab, ← List.append_nil (slabsAddr :: masksAddr)]

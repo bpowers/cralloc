@@ -176,7 +176,7 @@ def art : Artifact := popInlineApi.artifact VG.AArch64.inlineTarget {
   attempt := attempt
   verified := verifiedT
   restartsOk := restartsOkT
-  setupOk := PopInline.setupOk
+  setupOk := PopInline.setupOk setupArea
   clobbers := clobbers
   clobbersOk := fun _ _ hs => clobbersOkT hs
   witnesses := witnesses

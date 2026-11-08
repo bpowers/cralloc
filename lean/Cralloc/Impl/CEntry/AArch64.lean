@@ -57,6 +57,12 @@ def callocSetup : List Instr := callocTables ++ setup
 def freeSetup : List Instr := freeTables ++ setup
 def freeSizedSetup : List Instr := freeSizedTables ++ setup
 
+/-- Each on musl (`muslSetup`). -/
+def mallocMuslSetup : List Instr := mallocTables ++ muslSetup
+def callocMuslSetup : List Instr := callocTables ++ muslSetup
+def freeMuslSetup : List Instr := freeTables ++ muslSetup
+def freeSizedMuslSetup : List Instr := freeSizedTables ++ muslSetup
+
 /-! ## The steps -/
 
 /-- The CPU number into `x8`, and to the slow path if it has no slab. -/

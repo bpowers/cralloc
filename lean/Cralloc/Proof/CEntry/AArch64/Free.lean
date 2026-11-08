@@ -438,8 +438,9 @@ theorem rseqOk (hs : attempt.pre s) : RseqOk target cFree attempt s := by
 
 /-! ### The setup -/
 
-theorem setupOk : SetupOk target contract attempt freeSig [] freeSetup :=
-  setupOk_of hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (tbl := freeTables)
+theorem setupOk {l : List Instr} {g : State → State} (hl : AreaSetup l g) :
+    SetupOk target contract attempt freeSig [] (freeTables ++ l) :=
+  setupOk_of hl hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (tbl := freeTables)
     (f := freeS) (rs := [.x12, .x13, .x14, .x15])
     (fun s h => by
       rw [← List.append_nil freeTables]

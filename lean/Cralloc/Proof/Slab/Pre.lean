@@ -538,4 +538,30 @@ theorem cpu_pre_iff {M : ISA} (A : Abi M) {s : M.State} {vals : M.State → List
       false_implies, implies_true, and_true, true_and]
     exact ⟨⟨hwf, hnw, hp, hres⟩, hpre⟩
 
+/-! ## `area_offset`'s precondition, unfolded -/
+
+theorem areaOffset_pre_iff {M : ISA} (A : Abi M) {s : M.State} {vals : M.State → List (BitVec 64)}
+    (hv : A.args ((areaOffsetSig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals)
+    (hb : Sig.bufs areaOffsetSig.params (vals s) = [])
+    (ha : A.argArea ((areaOffsetSig.words A.ptrBits).map (·.bits A.ptrBits)) s = []) :
+    (areaOffsetContract A).pre s ↔
+      A.wf ((areaOffsetSig.words A.ptrBits).map (·.bits A.ptrBits)) 0 s ∧
+      A.rd s = ((areaOffsetRegions A s).filter (!·.2)).map (·.1) ∧
+      A.wr s = ((areaOffsetRegions A s).filter (·.2)).map (·.1) ∧
+      (∀ x ∈ areaOffsetRegions A s, x.1.base.toNat + x.1.len ≤ 2 ^ A.ptrBits) ∧
+      (∀ x ∈ areaOffsetRegions A s, ∀ r ∈ A.reserved 0 s, x.1.Disjoint r) ∧
+      A.sym.isSome := by
+  simp only [areaOffsetContract, Sig.contract, Abi.withExtra, hv, hb, ha, List.map_nil, List.append_nil,
+    List.filter_nil, List.Pairwise.nil, List.not_mem_nil, false_implies, implies_true, true_and,
+    Curry.apply_const]
+  constructor
+  · rintro ⟨⟨hwf, hd1, hd2, hnw, -, hres, -, -⟩, hrd, hwr, hpre⟩
+    exact ⟨hwf, take_drop_eq hrd hd1, take_drop_eq hwr hd2, hnw, hres, hpre⟩
+  · rintro ⟨hwf, hrd, hwr, hnw, hres, hpre⟩
+    have hp : (areaOffsetRegions A s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) := by
+      simp [areaOffsetRegions]
+    simp only [hrd, hwr, Nat.sub_self, List.take_zero, List.drop_zero, List.not_mem_nil,
+      false_implies, implies_true, and_true, true_and]
+    exact ⟨⟨hwf, hnw, hp, hres⟩, hpre⟩
+
 end VG.Proof.Slab

@@ -692,11 +692,12 @@ theorem clobbersOk (hs : attempt.pre s) :
 
 /-! ### The setup -/
 
-theorem setupOk : SetupOk inlineTargetX4 contract attempt pushInlineRetSig clobbers setup := by
+theorem setupOk {l : List Instr} {g : State → State} (hl : AreaSetup l g) :
+    SetupOk inlineTargetX4 contract attempt pushInlineRetSig clobbers l := by
   refine .inr ⟨⟨ready, rfl⟩, fun s hp => ?_⟩
-  obtain ⟨he, hpre⟩ := setup_ok hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
-  exact ⟨s6 s, he, hpre, rfl, rfl, argsKept_regs hX (by decide) fun r hr => s6_keeps (by
-    revert r; decide), fun _ => s6_preserved (by decide)⟩
+  obtain ⟨he, hpre⟩ := setup_ok hl hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
+  exact ⟨g s, he, hpre, hl.mem, hl.sp, argsKept_regs hX (by decide) fun r hr => hl.keeps (by
+    revert r; decide), fun _ => hl.preserved (by decide)⟩
 
 end Contract
 

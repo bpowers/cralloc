@@ -229,7 +229,7 @@ theorem keeps_list : ∀ r ∈ [Reg.x5, .x6, .x7, .x8, .x9, .x10, .x11], r.x ∈
 
 theorem setupOkS : SetupOk inlineTarget contract attempt popInlineSig clobbersS setupS := by
   refine .inr ⟨⟨ready, rfl⟩, fun s hp => ?_⟩
-  obtain ⟨he, hpre⟩ := setup_ok hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
+  obtain ⟨he, hpre⟩ := setup_ok setupArea hX hv (fun _ => rfl) (fun _ => rfl) (by decide) (by decide) hp
   have hf := facts_of_pre hpre
   have hexec : execBlock isa setupS s = some (after s) := by
     rw [setupS, execBlock_append, he]

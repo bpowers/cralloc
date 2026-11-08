@@ -269,7 +269,8 @@ theorem mid_refl {rs : List Reg} (s : State) : Mid rs s s.mem s :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun _ _ => rfl⟩
 
 /-- A C routine's setup: its tables, run to `f s`, then what every routine runs. -/
-theorem setupOk_of {c : Spec.CEntry.Ctx isa} (hA : A64 c.A argRegs) {post : State → State → Prop}
+theorem setupOk_of {l : List Instr} {g : State → State} (hl : AreaSetup l g)
+    {c : Spec.CEntry.Ctx isa} (hA : A64 c.A argRegs) {post : State → State → Prop}
     {exit : String → State → State → Prop} {abort : State → State → Prop}
     {trace : State → List Event → Prop} {vals : State → List (BitVec 64)}
     (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
@@ -287,39 +288,37 @@ theorem setupOk_of {c : Spec.CEntry.Ctx isa} (hA : A64 c.A argRegs) {post : Stat
     (hcs : ∀ r ∈ calleeSaved, r ∉ rs ∧ ¬ r ∈ [Reg.x9, .x10, .x11])
     (hargs : ∀ r ∈ argRegs.take (c.sig.words 64).length, r ∉ rs ∧ ¬ r ∈ [Reg.x9, .x10, .x11]) :
     SetupOk target (contract c post exit abort trace)
-      (withReadyC extra (contract c post exit abort trace)) c.sig [] (tbl ++ setup) := by
+      (withReadyC extra (contract c post exit abort trace)) c.sig [] (tbl ++ l) := by
   refine .inr ⟨⟨readyC extra, rfl⟩, fun s hp => ?_⟩
   obtain ⟨-, hw, hpre⟩ := (pre_iff c hv (hb s) (ha s)).mp hp
   have hpage : (s.syms SLABS).toNat % 4096 = 0 := by
     have := hpre.2.2.1.page hA.slabsPage
     rwa [Spec.CEntry.Ctx.slabs, sym_c hA] at this
   have hm := hmid s
-  have hk : ∀ r, ¬ r ∈ [Reg.x9, .x10, .x11] → (s6 (f s)).gpr r = (f s).gpr r := fun r hr => s6_keeps hr
-  have hsy : (s6 (f s)).syms = s.syms := hm.syms
+  have hk : ∀ r, ¬ r ∈ [Reg.x9, .x10, .x11] → (g (f s)).gpr r = (f s).gpr r := fun r hr => hl.keeps hr
+  have hsy : (g (f s)).syms = s.syms := hl.syms.trans hm.syms
   have hA' : A64 c.slab.A argRegs := hA
-  have hsame : Same c s (s6 (f s)) := same_of hA' hlen hsy hm.tpidr
+  have hmm : (g (f s)).mem = s.mem := hl.mem.trans hm.mem
+  have hsame : Same c s (g (f s)) := same_of hA' hlen hsy (hl.tpidr.trans hm.tpidr)
     (fun r hr => by
       rw [hk r (hargs r hr).2]; exact hm.gpr r (hargs r hr).1)
-    fun x _ => by rw [show (s6 (f s)).mem = (f s).mem from rfl, hm.mem]
-  have hmem : c.mem (s6 (f s)) = c.mem s := by
-    rw [mem_c hA, mem_c hA, show (s6 (f s)).mem = (f s).mem from rfl, hm.mem]
-  refine ⟨s6 (f s), ?_, ⟨?_, ?_⟩, ?_, ?_, ?_, fun h => absurd h (by decide)⟩
+    fun x _ => by rw [hmm]
+  have hmem : c.mem (g (f s)) = c.mem s := by
+    rw [mem_c hA, mem_c hA, hmm]
+  refine ⟨g (f s), ?_, ⟨?_, ?_⟩, ?_, ?_, ?_, fun h => absurd h (by decide)⟩
   · rw [execBlock_append, hrun s hpage, Option.bind_some]
-    exact execBlock_setup (by rw [hm.rd, hm.syms]; exact rs_rd hA hw)
+    exact hl.run (by rw [hm.rd, hm.syms]; exact rs_rd hA hw)
   · exact pre_of_same hv hb ha (by rw [hA.wf]; trivial) hp hsame hmem
-      (by rw [hA.rd, hA.rd, show (s6 (f s)).rd = (f s).rd from rfl, hm.rd])
-      (by rw [hA.wr, hA.wr, show (s6 (f s)).wr = (f s).wr from rfl, hm.wr])
-  · refine ⟨s6_ready, ?_, ?_, ?_, fun x hx' => ?_⟩
+      (by rw [hA.rd, hA.rd, hl.rd, hm.rd])
+      (by rw [hA.wr, hA.wr, hl.wr, hm.wr])
+  · refine ⟨hl.ready, ?_, ?_, ?_, fun x hx' => ?_⟩
     · rw [hk _ (by decide), h13, hsy]
     · rw [hk _ (by decide), h14, hsy]
     · rw [hk _ (by decide), h15, hsy]
     · rw [hk _ (hkx x hx'), hx s x hx', hsy]
-  · show (s6 (f s)).mem = s.mem
-    rw [show (s6 (f s)).mem = (f s).mem from rfl, hm.mem]
-  · refine ⟨fun r hr => ?_, ?_⟩
-    · rw [hk r (hcs r hr).2]; exact hm.gpr r (hcs r hr).1
-    · show (s6 (f s)).sp = s.sp
-      rw [show (s6 (f s)).sp = (f s).sp from rfl, hm.sp]
+  · exact hmm
+  · refine ⟨fun r hr => ?_, hl.sp.trans hm.sp⟩
+    rw [hk r (hcs r hr).2]; exact hm.gpr r (hcs r hr).1
   · exact argsKept_regs a64_abi hlen fun r hr => by
       rw [hk r (hargs r hr).2]; exact hm.gpr r (hargs r hr).1
 
