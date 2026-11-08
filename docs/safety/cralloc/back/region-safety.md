@@ -24,16 +24,18 @@ below was written for; a longer run is a union of such units. What supports that
 far each piece of evidence reaches:
 
 - Kani's `purge_steps_move_down_within_one_part` (in `verify_slow.rs`, so on demand, not in
-  the gate) proves it for classes whose size is a power of two, which it assumes.
+  the gate) proves it for classes whose size is a power of two, which it assumes, in the
+  geometries `any_used_plan` gives: x86-64's and the simulator's shapes.
 - Kani's `units_touch_exactly_their_slots_on_the_tiny_heap` (also on demand) asserts
   `last < carved` for every class that fits the tiny heap's regions, power of two or not.
   No large class fits there.
 - The unit test `purge_passes_tile_the_carved_pages` checks the units against direct
-  arithmetic for every class that fits a region, large ones included, in the standard and native
-  geometries.
-- For the design's geometry and sizes that are not powers of two the argument is on paper:
-  `unit_below` clamps `end` to `carved_pages(carved)`, which is `floor(carved * size / page)`,
-  and only ever moves `end` down from there.
+  arithmetic for every class that fits a region, large ones included, in the standard, native
+  and tiny geometries, and `scripts/sim-pages` runs it on pages of 16 and 64 KiB too.
+- For the real kernels' geometries and sizes that are not powers of two the argument is on
+  paper: `unit_below` clamps `end` to `carved_pages(carved)`, which is
+  `floor(carved * size / page)`, and only ever moves `end` down from there. It is arithmetic on
+  the page's shift, the region's and the class, whatever they are.
 
 The walk's other ranges are parts of such units, so they lie below the watermark too, and
 `touching` is defined for any range of pages:
@@ -48,9 +50,12 @@ The walk's other ranges are parts of such units, so they lie below the watermark
 No range starts below the class's origin page (`unit_below` and `tail_step` both floor there),
 and the origin is a whole number of pages (`Plan::slot_origin`).
 
-The watermark only grows: a carve's compare-and-swap replaces `carved` with a larger value,
-and nothing else writes it. `region::top_up`, which the walk calls to bring the watermark to
-the end of its huge page, moves it only by calling `carve`, and owns the slots it gets like
+The watermark only grows. Once a region is named, only a carve's compare-and-swap writes its
+`Grow` word, which raises `carved` or, publishing a commit, keeps it. Before the naming the
+thread that holds the tag writes the word of a large class's region (`Back::assign`,
+`Back::unprepare`), with nothing carved, and no walk has the region: the walks find regions by
+their published tags (`host-safety.md`). `region::top_up`, which the walk calls to bring the
+watermark to the end of its huge page, moves it only by calling `carve`, and owns the slots it gets like
 any other caller until it releases them. So pages below the watermark stay below it, and no
 carve can hand out a slot that touches them. The scenario `a_carve_racing_a_purge` explores
 this under interleaving.
@@ -70,8 +75,9 @@ this under interleaving.
    (free) and clears them. If any claim failed it released what it
    had and returned before the call. A cleared bit is held by exactly the thread whose
    compare-and-swap cleared it, until that thread sets it again: every other path that clears
-   bits (`tree::claim`, `claim_exact`) is a compare-and-swap against a value with the bit set,
-   and every path that sets one (`tree::release`) aborts if the bit was already set.
+   bits (`tree::claim`, `tree::claim_next`, `claim_exact`) is a compare-and-swap against a value
+   with the bit set, and every path that sets one (`tree::release`, `tree::release_one`, the ORs
+   of a `tree::Release`) aborts if the bit was already set.
 
    That last check does not make the claim exclusive by itself. If the program frees a slot,
    a purge claims it, and the program frees it again, the second `release` finds the bit clear
@@ -90,43 +96,67 @@ this under interleaving.
    and the range lies below the origin plus `carved * size`.
 3. *Nothing in it is needed.* Free slots have no contents anyone reads. After the purge, the
    zero bits are set for slots wholly inside the range, which now read as zero. A slot that
-   straddles an edge (the first or the last, both claimed) has its zero bit set only if it is
-   whole pages and every one of them is marked clean. Such a slot reads as zero: a clean bit
-   is set only over a page just returned (a purge, `mark_purged`, `mark_clean` after
-   `purge_part` reported the whole range gone) or never written (`mark_fresh`), each by the
-   holder of the slot, and a holder clears the bits under everything its block may write
-   before it may write it (`settle_slot` at the claim, `cover` at a resize or a grown move;
-   `class-safety.md`, BACK-CLASS-01 and BACK-CLASS-08). Huge-page advice can make a clean
-   page resident again, but with zeros. The bit is written before the release, under the
-   claim. Without a split (`split` false) or with one, and whatever `trust` is, the bits are
+   straddles an edge (the first or the last, both claimed, as is a large slot of which the range
+   is a piece) has its zero bit set only if it is whole pages and every one of them is marked
+   clean, and a clean page reads as zero (below). The bit is written before the release, under
+   the claim. Without a split (`split` false) or with one, and whatever `trust` is, the bits are
    written only after `host.purge` returned true; `Purge::Clean` and `Purge::Unsplit` write
    none.
+
+**A clean page reads as zero.** The zero bit of a slot returned in pieces rests on this, and the
+next tenant of such a slot skips clearing it.
+
+- *Where a bit is set.* Over pages just returned whole, by the holder of every slot that touches
+  them (this purge, `mark_purged`, `mark_clean` after `purge_part` said the whole range went
+  back), and over the pages of a slot just carved that lie outside its block (`mark_fresh`), which
+  nothing has written. A refused or partial call sets none.
+- *What a tenant writes.* A block of `size` bytes starts `into` bytes into its slot, at the slot's
+  start or at its stagger, and its tenant may write to the end of the page its size ends in
+  (`usable`). That is the pages from `first_page(slot, unit, into)` to below
+  `extent_of(layout, slot, unit, size, _)`. The extent counts from the stagger whichever start the
+  block has, so it is at or past the block's own end.
+- *Where a bit is cleared.* Under those pages, by the holder, before the tenant has them:
+  `settle_slot` at a claim and `cover` after a size is recorded (`resize_in_place`, `resize`) or
+  advice given or kept (`grown_into`, a claim of a slot that kept it), each with the block's real
+  `into`. A carve clears nothing, since the pages `mark_fresh` leaves alone are clear. Every
+  in-place grow, from Rust or from C, goes through `resize_in_place`, so a tenant's pages widen
+  only there.
+- *Pages below the block.* A block at its stagger writes none of them, and they stay as they were,
+  clean only if that is true. A block at its slot's start has its first page at the slot's: it
+  clears them at its claim, a shrink may set them over pages it returned, and a grow back over them
+  clears them again.
+- *The allocator's own writes.* A move writes `to` only within the size `to` was claimed for
+  (`copy_window`, BACK-CLASS-03). `unspill` writes inside the new size, in the call that then runs
+  `cover`, with the slot held throughout, so nothing acts on the bits in between.
+- *Huge faults.* A clean page under huge-page advice can become resident, with zeros, so it still
+  reads as zero. `cover` clears from the slot's start in an advised slot for the count's sake.
+
+`charge` and the walk's look (`all_clean`) read the same bits, and there a wrong one would cost
+only a count or a purge. The random runs of `large_charge` check all this after every step, on the
+native shape, which staggers by lines alone. Page staggers have the tests of
+`back::tests::kernels` and `heap::tests::kernels`, each for one history.
 
 The interleaving explorer checks the claim directly: `TWord` records which thread holds each
 cleared leaf bit, and `TestHost::purge` fails the schedule unless the purging thread holds every
 slot touching the range (`back::models::purge_*`, following `tla/Purge.tla`'s `PurgeSafe`). A
-version of `purge_unit` that claims only the slots wholly inside fails three of those
-scenarios, as `Purge_claim_inside.cfg` predicts. The scenarios include the huge-page part
+version of `purge_unit` that claims only the slots wholly inside fails those whose slots straddle
+a unit, as `Purge_claim_inside.cfg` predicts. The scenarios include the huge-page part
 (`purge_in_huge_pages`) and two purgers on the same units (`two_purgers_on_the_same_units`).
 
-**Changed 2026-10-17.** `purge_unit` is unchanged. The walk now calls `region::top_up` before
-its first unit in a region, and "The range" says what that does to the watermark and how far
-each proof of the range reaches. A first version of the large-class cap gave `purge_unit` a
-second caller that claimed a freed slot back; the reviewer found that it widened the window
-in which a double free is silent, and it is gone: a large free now purges while it still
-holds the slot, under BACK-REGION-02 and `class-safety.md`.
-
-**A second caller: the hold's walk by slot ages** (`hold::walk_aged`, added for the
-per-slot ageing of free large slots). It calls `purge_unit` on the pages of one free slot,
-`Layout::slot_unit(slot)`, or on a piece of them: `purge::piece` of
+**The other caller: the hold's walk by slot ages** (`hold::walk_aged`). It calls `purge_unit` on
+the pages of one free slot, `Layout::slot_unit(slot)`, or on a piece of them: `purge::piece` of
 `Unit { end: top, ..unit }`, where `top` is the unit's clean top (`region::clean_top`, a page
 of the unit), which gives pages of that unit and no others. The slot is below the watermark:
 the walk visits slots below `upper`, which is the watermark read when the walk began
 (`Grow::carved`, capped at the slot count) or a position an earlier look of the same walk
 stored, itself below that, and the watermark only grows. The pages are whole pages of the
-slot (Kani, `a_large_slot_is_whole_pages`), so `touching` gives the slot alone and
-`purge_unit` claims it before the call. Steps 1 to 3 hold as written: they rest on the claim
-`purge_unit` makes, not on how the unit was chosen. What the walk reads before (the leaf
+slot, so `touching` gives the slot alone and `purge_unit` claims it before the call. A slot a
+heap hosts is whole pages because `heap::large::place` chooses only such classes: on a kernel with
+large pages the large classes that are not go unused
+(`a_large_block_gets_a_slot_of_whole_pages_on_every_kernel`). Kani's
+`a_large_slot_is_whole_pages` does not reach those kernels. It covers x86-64's geometry and the
+simulator's shapes, where every large class is whole pages. Steps 1 to 3 hold as written: they
+rest on the claim `purge_unit` makes, not on how the unit was chosen. What the walk reads before (the leaf
 word, the slot's size word and stamp, its clean bits) it reads with no claim, and it only
 decides whether to try. The exploration `an_age_walk_races_large_tenants` runs the walk against
 tenants that claim, trim, write, stamp and free the slots, and `TestHost::purge` fails any
@@ -148,7 +178,7 @@ the block left unwritten), and why the free holds the slot are BACK-CLASS-01 in
 `class-safety.md`, which also says what a double free can do.
 
 `purge_held` declines a slot in a huge-page part (a purge there must be whole huge pages);
-that is policy, not safety. Accepted by the reviewer, 2026-10-17.
+that is policy, not safety.
 
 ## BACK-REGION-04: `host.resident(...)` in `purge_unit_as`
 
@@ -192,9 +222,4 @@ BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes
 copied aside and copied back after) and BACK-CLASS-08 (`trim_slack`: the pages of a slot just
 claimed that lie past both its new block and its last tenant) in `class-safety.md`.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
-found in the argument: exclusivity under a double free, the huge-page part not covered by the
-cited proof, and no explored test of a carve or a second purger racing a purge. All three are
-addressed above; the same reviewer checked the fixes and accepted them.
-
-Reviewed: 1d73192
+Reviewed: 5a8ade1
