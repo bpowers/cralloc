@@ -222,6 +222,16 @@ def Instr.accessesMemory (i : Instr) : Bool :=
   | .movSym .. | .push _ | .pop .. => true
   | _ => !i.memOps.isEmpty
 
+/-- Whether an instruction stores to memory: a register's destination is never memory but in
+these, and a push's is the stack. -/
+def Instr.storesMemory : Instr → Bool
+  | .store .. | .store32 .. | .store8 .. | .push _ => true
+  | .mov .. | .alu .. | .inc _ | .dec _ | .mov32 .. | .alu32 .. | .shift32 .. | .bswap32 _
+  | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .movzx8 .. | .movzx16 .. | .cmp8 .. | .bswap _
+  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .movSym ..
+  | .leaRseqCs _ | .lea .. | .mul _ | .imul .. | .mulx .. | .adcx .. | .adox .. | .cmov .. | .pop ..
+  | .alloc _ | .free _ => false
+
 /-- Why an instruction may not be a step of a sequence's body, or `none`: a store whose
 displacement is not a multiple of its size, which may cross a cache line and not be one access
 (Intel SDM Vol. 3, "Guaranteed Atomic Operations"). A linker writes an x86-64 instruction's
@@ -265,6 +275,7 @@ def printer : Printer isa where
   plainStore | .store .. => true | _ => false
   bodyRefuses := Instr.notInBody
   accessesMemory := Instr.accessesMemory
+  storesMemory := Instr.storesMemory
   namesDesc | .leaRseqCs _ => true | _ => false
   /- A compare or a test and the conditional branch after it decode as one
   macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch

@@ -19,30 +19,6 @@ namespace VG.Proof.CEntry.X86_64
 
 open VG.X86_64 VG.Spec.Slab VG.Spec.CEntry VG.Proof.Slab.X86_64 VG.Proof.CEntry
 
-/-- The tables a routine reads beyond the masks' (`Ctx.fixed` after its
-first four). -/
-def tables {M : ISA} (c : Spec.CEntry.Ctx M) (s : M.State) : List (Region × Bool) :=
-  match c.kind with
-  | .malloc => [(c.mallocTable s, false)]
-  | .free => [(c.published s, false), (c.regionTable s, false)]
-  | .freeSized => [(c.sizedTable s, false), (c.published s, false), (c.regionTable s, false)]
-  | .calloc => [(c.callocTable s, false)]
-
-theorem fixed_tables {M : ISA} (c : Spec.CEntry.Ctx M) (s : M.State) :
-    c.fixed s = (c.rsVar s, false) :: (c.cpuField s, false) :: (c.csField s, true) ::
-      (c.maskTable s, false) :: tables c s := by
-  obtain ⟨A, k, sig⟩ := c
-  cases k <;> rfl
-
-theorem tables_ro {M : ISA} {c : Spec.CEntry.Ctx M} {s : M.State} {x : Region × Bool}
-    (h : x ∈ tables c s) : x.2 = false := by
-  obtain ⟨A, k, sig⟩ := c
-  cases k <;> simp only [tables, List.mem_cons, List.not_mem_nil, or_false] at h
-  · rw [h]
-  · rcases h with h | h <;> rw [h]
-  · rcases h with h | h | h <;> rw [h]
-  · rw [h]
-
 section
 
 variable {c : Spec.CEntry.Ctx isa} (hA : X86 c.A) {s : State} (hw : c.World s)
@@ -63,19 +39,6 @@ theorem nowrap_of {x : Region × Bool} (hx : x ∈ c.regions s) : x.1.base.toNat
   have := hw.nowrap x hx; rwa [hA.ptrBits] at this
 
 end
-
-theorem disj_fixed_more {c : Spec.CEntry.Ctx isa} {s : State} (hw : c.World s)
-    {a b : Region × Bool} (ha : a ∈ c.fixed s) (hb : b ∈ c.more s)
-    (h : (a.2 || b.2) = true) : a.1.Disjoint b.1 :=
-  (List.pairwise_append.mp hw.disj).2.2 a ha b hb h
-
-theorem mem_fixed {c : Spec.CEntry.Ctx isa} {s : State} {x : Region × Bool} (h : x ∈ c.fixed s) :
-    x ∈ c.regions s :=
-  List.mem_append_left _ h
-
-theorem mem_more {c : Spec.CEntry.Ctx isa} {s : State} {x : Region × Bool} (h : x ∈ c.more s) :
-    x ∈ c.regions s :=
-  List.mem_append_right _ h
 
 /-! ## The view on x86-64 -/
 
@@ -112,17 +75,5 @@ theorem armOk {c : Spec.CEntry.Ctx isa} (hA : X86 c.A) {s : State} (hw : c.World
   · have := mem_rd hA hw (mem_fixed hcpu) rfl; rwa [cpuField_c hA] at this
   · have := mem_wr hA hw (mem_fixed hcs) rfl; rwa [csField_c hA] at this
   · rw [← csField_c hA, ← rsVar_c hA]; exact e.symm
-
-/-- `rseq_cs` and a table, or the masks' table, are apart. -/
-theorem cs_table {c : Spec.CEntry.Ctx isa} {s : State} (hl : c.Layout s) {x : Region × Bool}
-    (hx : x ∈ (c.maskTable s, false) :: tables c s) : (c.csField s).Disjoint x.1 := by
-  have hd := hl.disj
-  rw [fixed_tables] at hd
-  exact (List.pairwise_cons.mp (List.pairwise_cons.mp (List.pairwise_cons.mp hd).2).2).1 x hx
-    (Bool.true_or _)
-
-theorem table_mem_fixed {c : Spec.CEntry.Ctx isa} {s : State} {x : Region × Bool}
-    (hx : x ∈ tables c s) : x ∈ c.fixed s := by
-  rw [fixed_tables]; simp [hx]
 
 end VG.Proof.CEntry.X86_64

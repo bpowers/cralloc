@@ -200,7 +200,10 @@ def check_hardware(lines: list[str]) -> list[str]:
     with tempfile.TemporaryDirectory() as d:
         tmp = pathlib.Path(d)
         asm = ['.section .vgsym,"aw",%progbits', ".skip 0x1238", ".globl vg_sym", "vg_sym:",
-               ".skip 0x2460 - 0x1238"]
+               ".skip 0x2460 - 0x1238",
+               # The symbol `addAreaHi` and `addAreaLo` name, as `AREA_TPREL` says it lies.
+               '.section .tdata,"awT",%progbits', ".balign 4096", ".skip 768",
+               ".globl cralloc_rseq_area", "cralloc_rseq_area:", ".long 0"]
         for tid, kind, text in tests:
             asm.append(stub(tid, kind, text))
         asm += ['.section .vgsym,"aw",%progbits', ".skip 32", ".quad vg_sym",

@@ -111,7 +111,7 @@ def api : Api where
   sig := sig
   contracts := some fun A _ => seqContract A
   summary := "A forgery."
-  safety := ["The thread's rseq area must be registered."]
+  safety := fun _ => ["The thread's rseq area must be registered."]
   operands := [("__rseq_offset", .sym "crate::front::__rseq_offset")]
 
 def art : Artifact := api.artifact VG.AArch64.target {
