@@ -47,6 +47,24 @@ fn page() -> u64 {
     unsafe { sysconf(SC_PAGESIZE) as u64 }
 }
 
+/// The C library's default stack size, guard page included.
+fn default_stack_size() -> u64 {
+    unsafe extern "C" {
+        fn pthread_getattr_default_np(attr: *mut u64) -> i32;
+        fn pthread_attr_getstacksize(attr: *const u64, size: *mut usize) -> i32;
+    }
+    // Room for a `pthread_attr_t` on every target.
+    let mut attr = [0u64; 16];
+    let mut size = 0;
+    // SAFETY: `attr` has room for what the first call writes, which the second reads; `size` is
+    // written. The attribute holds nothing that needs destroying when it is the default.
+    unsafe {
+        assert_eq!(pthread_getattr_default_np(attr.as_mut_ptr()), 0);
+        assert_eq!(pthread_attr_getstacksize(attr.as_ptr(), &mut size), 0);
+    }
+    size as u64
+}
+
 std::thread_local! {
     static BIG: std::cell::Cell<[u8; TLS]> = const { std::cell::Cell::new([0; TLS]) };
 }
@@ -136,7 +154,14 @@ fn stack(task: &Path) -> Stack {
     let guard = |i: usize| entry(i) >> 58 & 1 != 0;
     let at = ((sp - lo) / page()) as usize;
     let first = (0..=at).rev().find(|&i| guard(i)).map_or(0, |g| g + 1);
-    let end = (at..pages).find(|&i| guard(i)).unwrap_or(pages);
+    // Before Linux 6.14 no entry says guard, and a mapping with the same flags right above the stack,
+    // such as the main thread's thread-local block, reads as part of it: that block was once measured
+    // as 260 KiB of stack. So the stack ends where its size says, less its guard page.
+    let whole = (default_stack_size() / page()) as usize - 1;
+    let end = (at..pages)
+        .find(|&i| guard(i))
+        .unwrap_or(pages)
+        .min(first + whole);
     // Only present pages are read: a read through `/proc/self/mem` maps the zero page into
     // an absent page, which would then count as present. An absent page was never written.
     let mem = File::open("/proc/self/mem").unwrap();
@@ -217,8 +242,10 @@ fn run(who: &str) {
         "{who}: the thread went {} bytes below the top of its stack",
         last.written
     );
+    // A kernel without transparent huge pages has nothing to keep off the stack, and no such flag.
     assert!(
-        last.flags.split_whitespace().any(|flag| flag == "nh"),
+        !Path::new("/sys/kernel/mm/transparent_hugepage").exists()
+            || last.flags.split_whitespace().any(|flag| flag == "nh"),
         "{who}: the stack may take huge pages: {}",
         last.flags
     );
