@@ -61,10 +61,10 @@ fn layouts_come_back_from_the_memo() {
     let plan = any_used_plan();
     let class = any_class();
     let memo = Memo::new();
-    let Some(layout) = memo.layout(plan, class) else {
+    let Some(layout) = memo.layout(|| plan, class) else {
         return;
     };
-    assert!(memo.layout(plan, class) == Some(layout));
+    assert!(memo.layout(|| plan, class) == Some(layout));
 }
 
 /// The slot count without a divide is the quotient.

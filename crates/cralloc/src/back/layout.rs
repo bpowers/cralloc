@@ -118,13 +118,15 @@ impl Memo {
         }
     }
 
-    /// The layout of `class` in `plan`, from the memo if it holds one, else worked out and
-    /// kept. `plan` must be the same for every call on one memo.
+    /// The layout of `class` in the plan `plan` gives, from the memo if it holds one, else
+    /// worked out and kept. The plan must be the same for every call on one memo. Asked for only
+    /// when it is needed: on a kernel whose page size is found at run time a plan's fields are
+    /// real work to fill in, and only the first call of a class reads them.
     #[inline]
-    pub(crate) fn layout(&self, plan: Plan, class: Class) -> Option<Layout> {
+    pub(crate) fn layout(&self, plan: impl FnOnce() -> Plan, class: Class) -> Option<Layout> {
         let mut last = self.words[PACKED_WORDS - 1].load(Ordering::Acquire);
         if last & PACKED == 0 {
-            last = self.work_out(plan, class)?;
+            last = self.work_out(plan(), class)?;
         }
         let mut words = [0; PACKED_WORDS];
         for (word, kept) in words.iter_mut().zip(&self.words) {
@@ -776,6 +778,12 @@ impl Layout {
         1 << (self.huge_shift - self.page_shift)
     }
 
+    /// Bytes per huge page, as the plan's geometry says (`Geometry::huge_page_size`).
+    #[inline(always)]
+    pub(crate) const fn huge_page_size(&self) -> usize {
+        1 << self.huge_shift
+    }
+
     /// How a region's frontier word packs (`FrontierFormat`).
     #[inline(always)]
     pub(crate) const fn frontier_format(&self) -> FrontierFormat {
@@ -1083,6 +1091,19 @@ mod tests {
         ]
     }
 
+    /// A large free compares its slot with the huge page its layout holds, not its plan's: they
+    /// agree in every plan, one that uses no huge pages too.
+    #[test]
+    fn a_layouts_huge_page_is_its_plans() {
+        for plan in plans() {
+            for class in Class::all() {
+                if let Some(layout) = Layout::new(plan, class) {
+                    assert_eq!(layout.huge_page_size(), plan.geometry().huge_page_size());
+                }
+            }
+        }
+    }
+
     /// Every stagger lies in its slot, multiples of 64 bytes, and a block is found again from where
     /// it starts: at the slot's start or at its stagger, and nowhere else. The room covers it.
     #[test]
@@ -1246,8 +1267,8 @@ mod tests {
                 };
                 assert_eq!(Layout::unpack(layout.pack(), class), layout, "{class:?}");
                 let memo = Memo::new();
-                assert_eq!(memo.layout(plan, class), Some(layout));
-                assert_eq!(memo.layout(plan, class), Some(layout), "kept");
+                assert_eq!(memo.layout(|| plan, class), Some(layout));
+                assert_eq!(memo.layout(|| plan, class), Some(layout), "kept");
             }
         }
     }

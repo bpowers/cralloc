@@ -114,6 +114,7 @@ pub(crate) const fn shrink_moves_below_for(len: usize, plan: Plan) -> usize {
 /// and the lines' room, or where that class's slots stagger by pages and the block with their room
 /// does not fit, the next one that does. That is the next class up, and never more: a class is at
 /// least 8/7 of the one below, and its pages' room at most an eighth of it (`policy::stagger_pages`).
+#[inline(always)]
 fn roomy_class(size: usize, mask: usize, plan: Plan) -> Option<Class> {
     let with_room = |room: usize| size.saturating_add(room).saturating_add(mask) & !mask;
     let class = Class::of_size(with_room(STAGGER_LINES))?;
@@ -169,6 +170,10 @@ enum Place {
 /// pages that changes nothing, every large class being a multiple of them; with larger pages the
 /// classes that are not (56 KiB on 16 KiB pages, 160 KiB on 64 KiB) are not used, which costs no
 /// memory, since a block's last page is resident whole either way.
+///
+/// Inlined into its one caller on the allocation path: out of line, its plan was written to memory
+/// a byte at a time on every large allocation.
+#[inline(always)]
 fn place(layout: Layout, plan: Plan) -> Place {
     let slot = |class: Option<Class>| class.filter(|&c| plan.fits_region(c));
     let align = layout.align().max(plan.geometry().page_size());
