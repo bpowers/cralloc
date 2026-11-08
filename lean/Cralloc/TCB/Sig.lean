@@ -177,6 +177,10 @@ structure Abi (M : ISA) where
   /-- Whether the code may form the address of the slabs from their page alone
   (AArch64's `adrp` with no `:lo12:`), so that the slabs must start on a page. -/
   slabsOnPage : Bool := false
+  /-- How many bytes of a class's 8-byte mask entry a C routine reads (`Spec.CEntry`), of
+  which it tests the low 32 bits: where a load scaled by 8 reads all of it (AArch64's
+  `ldr x, [b, i, lsl #3]`; a 32-bit load scales by 4), all of them. -/
+  maskBytes : Nat := 4
 
 /-! ## Tables of constants
 

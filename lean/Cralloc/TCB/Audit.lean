@@ -5,25 +5,25 @@ public meta import Lean
 /-!
 # Environment audit
 
-**Trusted.** Two checks the emitter runs (`Emit.driver`) on everything it
-imports, besides the axiom audit (`TCB/Axioms.lean`):
+**Trusted.** The checks the emitter runs (`Emit.driver`) on everything it
+imports, besides the axiom audit (`TCB/Axioms.lean`). They exempt Lean's own modules
+(`isLeanModule`), and audit everything else, whatever it is called:
 
-* `#assert_no_compiler_overrides all run` fails if the compiler may run
-  something other than what the kernel checked in the code the emitter runs.
-  The emitter is compiled code: it evaluates the artifacts `all` (their code,
-  signatures and documentation) and runs `run`, which prints and checks them
-  (`Rust.files`), by running what the compiler made of their definitions.
-  So nothing of this project they depend on, transitively, may carry
+* `#assert_no_compiler_overrides all run` fails if an override remains on the
+  code the emitter runs. The emitter is compiled code: it evaluates the artifacts
+  `all` (their code, signatures and documentation) and runs `run`, which prints
+  and checks them (`Rust.files`), by running what the compiler made of their
+  definitions. So nothing they depend on, transitively, but Lean's own, may carry
   `implemented_by`, `extern` or `export`, which substitute other code for a
   definition (or give one to a constant the kernel knows nothing of); what
-  Lean implements so is trusted, as Lean is. And no module of this
-  project (`Cralloc` or a module under it) may declare a `csimp`
-  theorem (or axiom), which the compiler rewrites by in whatever it compiles
+  Lean implements so is trusted, as Lean is. And no module but Lean's may declare
+  a `csimp` theorem (or axiom), which the compiler rewrites by in whatever it compiles
   later, or an `init`/`builtin_init` (`initialize`), which runs when the
   emitter imports its module. Any of these could make the emitter write code
   other than the code that was proven, with every proof intact. Code the
   emitter does not run may use them: e.g. a tactic's `unsafe` term, whose
-  results the kernel checks.
+  results the kernel checks. This is of what the build left, not of how it compiled
+  what it compiled (`lean/README.md`, "What the audits defend against").
 * `#assert_spec_origin` fails unless every constant named `VG.Spec.…` that
   is not a theorem is declared in a module under `Cralloc.Spec`. A
   reviewer reads a registration file's `Spec.<Alg>.fooContract` or
@@ -40,10 +40,15 @@ imports, besides the axiom audit (`TCB/Axioms.lean`):
   emitted artifact holds was made in `TCB/`, whatever the registration's text says. That
   covers structure updates (`{ t with … }` is the constructor), and any definition, not
   only the emitted lists. Theorems carry no data and are exempt.
+* `foreignModules` lists the modules loaded that are neither Lean's nor under `Cralloc`, which
+  the emitter refuses: `scripts/check.sh` replays `Cralloc` through the kernel, so that every
+  module the emitter loads has been.
 
-All three refuse to run in a module, which sees what it imports from other
+The commands refuse to run in a module, which sees what it imports from other
 modules without their proofs, and without the values of definitions they
-do not expose: the emitter's driver is not a module.
+do not expose: the emitter's driver is not a module. Each reads a module's declarations and
+the entries of its attributes as the module holds them, so each works on an import that has
+loaded no extension (`importModules (loadExts := false)`) and so has run none of its code.
 -/
 
 public meta section
@@ -52,23 +57,30 @@ namespace VG
 
 open Lean Elab Command
 
-/-- The modules of this project, `Cralloc` and those under it, with
-their indices in `env`. -/
+/-- Lean's own modules, which the audits trust as they trust Lean, and whose constants never
+depend on this project's. Every other module is audited, whatever it is called. -/
+def isLeanModule (m : Name) : Bool :=
+  (`Init).isPrefixOf m || (`Std).isPrefixOf m || (`Lean).isPrefixOf m
+
+/-- The modules the audits look in, with their indices in `env`. -/
 def projectModules (env : Environment) : List (ModuleIdx × Name) :=
   -- `moduleNames` builds a new array of every module on each call: read it once.
   let names := env.header.moduleNames
   (List.range names.size).filterMap fun i =>
     let m := names[i]!
-    if (`Cralloc).isPrefixOf m then some (i, m) else none
+    if isLeanModule m then none else some (i, m)
 
 /-- Whether `env`, whose modules are `names` (`env.header.moduleNames`, which
 callers read once), declares `n` in the module being elaborated or in a
-module of this project, rather than in Lean or a dependency (whose constants
-never depend on this project's). -/
+module the audits look in. -/
 def isProjectConst (env : Environment) (names : Array Name) (n : Name) : Bool :=
   match env.getModuleIdxFor? n with
   | none => true
-  | some i => (`Cralloc).isPrefixOf names[i.toNat]!
+  | some i => !isLeanModule names[i.toNat]!
+
+/-- The modules `env` has loaded that are neither Lean's nor under `Cralloc`. -/
+def foreignModules (env : Environment) : List Name :=
+  env.header.moduleNames.toList.filter fun m => !isLeanModule m && !(`Cralloc).isPrefixOf m
 
 /-- The constants of this project (`isProjectConst`) that the compiled code
 of the constants `roots` may run in `env`: those their values use,
@@ -91,8 +103,8 @@ def dependencies (env : Environment) (roots : List Name) : NameSet := Id.run do
           todo := v.getUsedConstants.toList ++ todo
   return seen
 
-/-- What makes the compiled code of the constants `roots` depend on in `env`
-differ from what the kernel checked (see the module docs): one line each. -/
+/-- The overrides that remain on what the compiled code of the constants `roots` runs in `env`
+(see the module docs): one line each. -/
 def compilerOverrides (env : Environment) (roots : List Name) : List String :=
   let deps := (dependencies env roots).toList.mergeSort (·.toString ≤ ·.toString)
   deps.flatMap (fun n =>
@@ -114,9 +126,9 @@ elab "#assert_no_compiler_overrides " ids:ident* : command => do
   let roots ← ids.toList.mapM fun id => liftCoreM <| realizeGlobalConstNoOverloadWithInfo id.raw
   let bad := compilerOverrides (← getEnv) roots
   unless bad.isEmpty do
-    throwError m!"the compiled code of {roots} is not what the kernel checked:\n\
+    throwError m!"overrides remain on what {roots} run:\n\
       {"\n".intercalate bad}"
-  logInfo m!"the compiled code of {roots} is what the kernel checked"
+  logInfo m!"no override remains on what {roots} run"
 
 /-- The constants named `VG.Spec.…` in `env` that are not theorems and are
 declared outside the modules under `Cralloc.Spec` (in another
@@ -149,7 +161,7 @@ def guardedConstructors : List (Name × List Name) :=
     (`VG.Abi.mk, [`Cralloc.TCB]), (`VG.Artifact.mk, [`Cralloc.TCB]),
     (`VG.Api.mk, [`Cralloc.Spec, `Cralloc.TCB.Artifact])]
 
-/-- The definitions of this project in `env` that use a guarded constructor outside the modules
+/-- The definitions in `env`, but Lean's, that use a guarded constructor outside the modules
 that may, each with the constructor and its module. -/
 def builtOutside (env : Environment) : List (Name × Name × Name) :=
   let names := env.header.moduleNames
@@ -158,7 +170,7 @@ def builtOutside (env : Environment) : List (Name × Name × Name) :=
       let m := match env.getModuleIdxFor? n with
         | none => env.mainModule
         | some i => names[i.toNat]!
-      if !(`Cralloc).isPrefixOf m && (env.getModuleIdxFor? n).isSome then acc else
+      if isLeanModule m then acc else
         let used := c.type.getUsedConstants ++
           (c.value? (allowOpaque := true)).elim #[] (·.getUsedConstants)
         guardedConstructors.foldl (init := acc) fun acc (g : Name × List Name) =>

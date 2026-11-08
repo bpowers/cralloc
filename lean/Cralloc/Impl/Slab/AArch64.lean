@@ -39,6 +39,15 @@ def setup : List Instr := [
   .mrsTp .x10,
   .add .x .x10 .x10 (.reg .x9)]
 
+/-- `setup` on musl, where the area is the crate's own and the linker writes its distance from the
+thread pointer into two instructions (`Instr.addAreaHi`). -/
+def muslSetup : List Instr := [
+  .adrp .x11 .desc,
+  .addLo12 .x11 .x11 .desc,
+  .mrsTp .x10,
+  .addAreaHi .x10 .x10,
+  .addAreaLo .x10 .x10]
+
 /-- Arming: `rseq_cs` holds the descriptor's address. -/
 def arm : List Instr := [.str .x .x11 { base := .x10, off := .imm 8 }]
 
@@ -86,7 +95,10 @@ leaves for `x0` only after the sequence, since a restart reads the offset in `x0
 /-- A slow path's routine's setup: also the slabs' address, into `x13`. `adrp` alone makes
 it, as `SLABS` starts on a page (`Spec.Slab.Ctx.Layout`), and in the setup, as a linker may
 move a load after an `adrp` out of a sequence (`TCB/AArch64/Print.lean`). -/
-def slowSetup : List Instr := .adrp .x13 (.sym "SLABS") :: setup
+def slowOf (l : List Instr) : List Instr := .adrp .x13 (.sym "SLABS") :: l
+
+def slowSetup : List Instr := slowOf setup
+def slowMuslSetup : List Instr := slowOf muslSetup
 
 /-- `[x13, x8]`: the slow path's routines' slab word. -/
 def slabWord : MemOp := { base := .x13, off := .reg .x8 }
@@ -139,5 +151,18 @@ def currentCpu : Prog isa := .block [
   .mrsTp .x10,
   .add .x .x10 .x10 (.reg .x9),
   .ldr .w .x0 { base := .x10, off := .imm 4 }]
+
+/-- `current_cpu()` on musl (`muslSetup`). -/
+def currentCpuMusl : Prog isa := .block [
+  .mrsTp .x10,
+  .addAreaHi .x10 .x10,
+  .addAreaLo .x10 .x10,
+  .ldr .w .x0 { base := .x10, off := .imm 4 }]
+
+/-- `area_offset()`, on musl: what the crate needs to find the area it registers. -/
+def areaOffset : Prog isa := .block [
+  .mov .x .x0 (.imm 0),
+  .addAreaHi .x0 .x0,
+  .addAreaLo .x0 .x0]
 
 end VG.Impl.Slab.AArch64
