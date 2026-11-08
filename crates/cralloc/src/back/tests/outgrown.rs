@@ -395,7 +395,7 @@ fn a_keep_that_reaches_the_bound_exactly_is_kept() {
 fn a_block_of_several_pieces_is_kept_whole_within_the_bound_and_returned_piece_by_piece_past_it() {
     let piece = super::super::policy::move_piece(Native::GEOMETRY);
     let bound = kept_outgrown(Native::GEOMETRY);
-    let (from, to) = (large(8 * piece), large(12 * piece));
+    let (from, to) = (large_of(8 * piece), large_of(12 * piece));
     assert!(from.size() <= bound, "a slot the bound can hold");
     for past in [false, true] {
         let state = state::<Native>();
@@ -438,7 +438,7 @@ fn another_move_of_several_pieces_charges_only_what_stays_resident() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let piece = super::super::policy::move_piece(Native::GEOMETRY);
-    let (from, to) = (large(8 * piece), large(12 * piece));
+    let (from, to) = (large_of(8 * piece), large_of(12 * piece));
     let old = back.alloc(from, from.size()).unwrap().ptr;
     pattern(old.as_ptr(), from.size());
     let len = 5 * piece;

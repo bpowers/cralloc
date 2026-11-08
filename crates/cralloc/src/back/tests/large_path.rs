@@ -356,10 +356,10 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let word = || state.decay.word.load(Relaxed);
-    let class = small(1024);
+    let class = small(1024 * PAGE_SCALE);
     let slots = fill(&back, class, 256);
     for &p in &slots {
-        paint(p, 1024, 9);
+        paint(p, class.size(), 9);
     }
     // Five intervals of the clock with no heartbeat are the first counted interval
     // (`crate::clock`), so the decay word holds the counted time, one interval.
@@ -371,7 +371,7 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     assert_eq!(word(), DECAY_TICKS, "nothing is due inside the interval");
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class, &slots) };
-    assert_eq!(back.retained(), 256 * 1024);
+    assert_eq!(back.retained(), 256 * class.size());
     let purges = os.calls(Call::Purge);
     beat(&back);
     os.advance_clock(DECAY_TICKS / 2 - 1);
@@ -382,7 +382,7 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     beat(&back);
     assert!(os.calls(Call::Purge) > purges, "the pass an interval later");
     assert!(!pass_under_way(&state));
-    assert!(back.retained() <= 256 * 1024 - 256 * 1024 / 4);
+    assert!(back.retained() <= 256 * class.size() - 256 * class.size() / 4);
     // With nothing left, every interval is one empty pass and no walk.
     for _ in 0..40 {
         os.advance_clock(DECAY_TICKS);

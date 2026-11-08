@@ -313,8 +313,9 @@ fn a_class_with_an_origin_keeps_everything_above_it() {
     let os = state.os();
     let (class, origin) = class_with_an_origin(back.space().plan(), 64);
     let size = class.size();
-    let slots = fill(&back, class, 5000);
-    assert_eq!(slots.len(), 5000);
+    const COUNT: usize = 5000 * PAGE_SCALE;
+    let slots = fill(&back, class, COUNT);
+    assert_eq!(slots.len(), COUNT);
     let region = back.space().locate(slots[0]).unwrap().region;
     let base = back.space().region(region);
     nothing_below(os, base, origin, "after carving");
@@ -338,23 +339,23 @@ fn a_class_with_an_origin_keeps_everything_above_it() {
         // SAFETY: the test holds these slots and gives them up.
         unsafe { back.launder(class, &batch) };
     }
-    assert_eq!(back.retained(), 5000 * size);
+    assert_eq!(back.retained(), COUNT * size);
     nothing_below(os, base, origin, "after laundering");
     back.trim();
     assert_eq!(back.retained(), 0);
     nothing_below(os, base, origin, "after a trim");
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
-        assert!(os.is_purged(NonNull::new(slots[0]).unwrap(), 5000 * size));
+        assert!(os.is_purged(NonNull::new(slots[0]).unwrap(), COUNT * size));
     }
-    let again = fill(&back, class, 5000);
+    let again = fill(&back, class, COUNT);
     assert_eq!(again, slots);
     assert!(again.iter().all(|&p| painted(p, size, 0)));
     // The count is still exact: a purge that had counted pages below the origin would have
     // taken more out of it than was ever put in. What is retained now is the rest of the last
     // purged page the slots touch, which their reuse made resident again.
     let page = Native::GEOMETRY.page_size();
-    let revived = (5000 * size).next_multiple_of(page) - 5000 * size;
+    let revived = (COUNT * size).next_multiple_of(page) - COUNT * size;
     assert_eq!(back.retained(), revived);
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class, &again[..100]) };
@@ -373,7 +374,7 @@ fn a_class_with_an_origin_keeps_everything_above_it() {
     assert_eq!(back.retained(), 0);
     // SAFETY: as above.
     unsafe {
-        assert!(os.is_purged(NonNull::new(slots[0]).unwrap(), 5000 * size));
+        assert!(os.is_purged(NonNull::new(slots[0]).unwrap(), COUNT * size));
     }
     nothing_below(os, base, origin, "after the second trim");
 }
@@ -604,7 +605,7 @@ fn freeing_the_region_base_in_a_batch_aborts() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let (class, origin) = class_with_an_origin(back.space().plan(), 64);
-    let slots = fill(&back, class, 4096);
+    let slots = fill(&back, class, 4096 * PAGE_SCALE);
     assert!(origin / 64 < slots.len());
     let region = back.space().locate(slots[0]).unwrap().region;
     let base = back.space().region(region).as_ptr();

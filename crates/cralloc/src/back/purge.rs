@@ -524,7 +524,7 @@ impl<O: Os> Back<'_, O> {
         let step = growth_step(self.space.plan().geometry());
         // Sequentially consistent: a grower that leaves the debt to the thread then reads the
         // thread's word, and the thread sets its mark before it reads the debt
-        // (`crate::thread_word`, "Sleeping"). On x86-64 the add is the same locked instruction.
+        // (`crate::thread_word`, "Sleeping").
         let old = self.state.growth.fetch_add(bytes, SeqCst);
         if old.wrapping_add(bytes) >= step {
             self.growth_due(old, bytes, step);
@@ -1093,10 +1093,14 @@ impl<O: Os> Back<'_, O> {
         // path is asked to look at the background thread's word again, so that a start refused
         // for a passing reason is tried again (`crate::thread_word`).
         state.thread.raise_level();
+        // Sequentially consistent, as the store of the pass word below: the thread's last look
+        // before it sleeps reads this word first (`Back::pass_published`), and a sequentially
+        // consistent load need not see a weaker write, even one that comes before a store it is
+        // ordered after.
         if state
             .decay
             .word
-            .compare_exchange(seen, word, Release, Relaxed)
+            .compare_exchange(seen, word, SeqCst, Relaxed)
             .is_err()
         {
             return false;
@@ -1121,7 +1125,7 @@ impl<O: Os> Back<'_, O> {
         // until then no stepper finds its tag and none acts. Sequentially consistent, as a
         // starter that leaves the pass to the background thread then reads the thread's word,
         // and the thread marks its word before it reads this one (`crate::thread_word`,
-        // "Sleeping"): on x86-64 one exchange an interval.
+        // "Sleeping"). Once an interval.
         let from = state.walk.purge_at.load(Relaxed);
         state.walk.pass_from.store(from, Relaxed);
         let pass = Pass {

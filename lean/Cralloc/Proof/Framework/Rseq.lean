@@ -92,4 +92,26 @@ theorem Verified.restarts_keep {T : Target} {c : Prog T.isa} {k : Contract T.isa
     have hp' : k.pre p' := h.restart_pre hs (.abort hp hrely henv (.refl _))
     exact hstep s p p' s'' hs hp hrely henv hp' (ih hp')
 
+/-! ## A routine with a setup
+
+`Verified` is about attempts of the code that follows the setup. What a run of
+the whole function does, from an entry state satisfying the function's
+precondition: the setup runs without changing memory or the arguments, the first
+attempt starts in a state satisfying the attempt's precondition, and so does
+every later one; the last attempt then completes or exits, meeting the
+postcondition relative to the state it started in. -/
+
+/-- The whole of a routine's run, from entry. -/
+theorem Verified.setup_restarts {T : Target} {c : Prog T.isa} {k k' : Contract T.isa} {sig : Sig}
+    {cl : List String} {setup : List T.isa.Instr} (h : Verified T c k')
+    (hs : SetupOk T k k' sig cl setup) {s : T.isa.State} (hp : k.pre s) :
+    ∃ a, execBlock T.isa setup s = some a ∧ k'.pre a ∧ T.abi.mem a = T.abi.mem s ∧
+      ∀ s', Restarts T c k' a s' → k'.pre s' ∧
+        ((∃ s'', Exec T.isa c s' s'' ∧ T.abiPreserved s' s'' ∧ k'.post s' s'') ∨
+          (∃ t s'', ExecExit T.isa c s' t s'' ∧ T.abiPreserved s' s'' ∧ k'.exit t s' s'')) := by
+  rcases hs with ⟨rfl, rfl⟩ | ⟨-, hs⟩
+  · exact ⟨s, rfl, hp, rfl, fun s' hr => h.restarts hp hr⟩
+  · obtain ⟨a, ha, hka, hm, -, -, -⟩ := hs s hp
+    exact ⟨a, ha, hka, hm, fun s' hr => h.restarts hka hr⟩
+
 end VG

@@ -7,6 +7,7 @@ use super::super::policy::{
 };
 use super::super::tree::Host as _;
 use super::super::word::Word as _;
+use super::large_of as large;
 use super::*;
 use crate::back::Move;
 use crate::os::sim::{Kernel4k, Kernel16k, Kernel64k, room_for};

@@ -176,6 +176,17 @@ theorem Region.end_le_of_ble {x m n b : Nat} (hmn : Nat.ble m n = true) (h : x +
 theorem Region.contains_self (a : Addr) (n : Nat) : (⟨a, n⟩ : Region).Contains a n := by
   simp [Region.Contains]
 
+theorem InRegions.of_mem {rs : List Region} {r : Region} {a : Addr} {n : Nat} (hr : r ∈ rs)
+    (hc : r.Contains a n) : InRegions rs a n := ⟨r, hr, hc⟩
+
+theorem InRegions.append_left {rs ws : List Region} {a : Addr} {n : Nat} (h : InRegions rs a n) :
+    InRegions (rs ++ ws) a n :=
+  let ⟨r, hr, hc⟩ := h; ⟨r, List.mem_append_left _ hr, hc⟩
+
+theorem InRegions.append_right {rs ws : List Region} {a : Addr} {n : Nat} (h : InRegions ws a n) :
+    InRegions (rs ++ ws) a n :=
+  let ⟨r, hr, hc⟩ := h; ⟨r, List.mem_append_right _ hr, hc⟩
+
 /-- An access within regions with `f` inserted (as a frame's push inserts
 it at the head of the writable regions) is within `f` or the others. -/
 theorem InRegions_append_cons {xs ys : List Region} {f : Region} {a : Addr} {n : Nat} :

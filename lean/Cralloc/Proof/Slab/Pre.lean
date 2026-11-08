@@ -79,8 +79,8 @@ end Parts
 
 theorem trace_eq {M : ISA} (c : Spec.Slab.Ctx M) {post : M.State → M.State → Prop}
     {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
-    {trace : M.State → List Event → Prop} :
-    (contract c post exit abort trace).trace = trace := rfl
+    {trace : M.State → List Event → Prop} (s : M.State) (evs : List Event) :
+    (contract c post exit abort trace).trace s evs = trace s (c.attemptEvents s evs) := rfl
 
 theorem env_eq {M : ISA} (c : Spec.Slab.Ctx M) {post : M.State → M.State → Prop}
     {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
@@ -276,6 +276,7 @@ theorem layout_of {s p : M.State} (h1 : c.slabs p = c.slabs s) (h2 : c.fixed p =
   disj := by rw [h2]; exact hl.disj
   slabs := by rw [h2, h1]; exact hl.slabs
   res := by rw [h2, h3]; exact hl.res
+  page := by rw [h1]; exact hl.page
 
 theorem layout (h : Same c s p) : c.Layout p ↔ c.Layout s :=
   ⟨layout_of h.symm.slabs h.symm.fixed h.symm.res, layout_of h.slabs h.fixed h.res⟩
@@ -343,6 +344,49 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
       (fun w hw => (hW w hw).2.2 (by simp) _ hx) (by decide)
 
 end Inv
+
+/-! ## A state with the same addresses and memory -/
+
+section Kept
+
+variable {M : ISA} {c : Spec.Slab.Ctx M} {s p : M.State}
+
+/-- A state with the addresses and the memory of `s` has its regions. -/
+theorem Same.regions (h : Same c s p) (hm : c.mem p = c.mem s) : c.regions p = c.regions s := by
+  have hcpu : c.cpu p = c.cpu s := by simp only [Spec.Slab.Ctx.cpu, h.cpuField, hm]
+  have hword : c.word p = c.word s := by simp only [Spec.Slab.Ctx.word, h.sym, hcpu, h.cls]
+  have hw : c.w p = c.w s := by simp only [Spec.Slab.Ctx.w, hm, hword]
+  have hslots := slots_eq h
+  have hmore : c.more p = c.more s := by
+    obtain ⟨A, f, sig⟩ := c
+    cases f <;> simp only [Spec.Slab.Ctx.more, Spec.Slab.Ctx.magRegion, hw, hslots]
+  simp only [Spec.Slab.Ctx.regions, h.fixed, Spec.Slab.Ctx.InRange, hcpu, hword, hmore]
+
+/-- The precondition holds in a state with the addresses, the memory and the
+permissions of one where it holds, if the convention's well-formedness does. -/
+theorem pre_of_same {post : M.State → M.State → Prop}
+    {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
+    {trace : M.State → List Event → Prop} {vals : M.State → List (BitVec 64)}
+    (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
+    (hb : ∀ x, Sig.bufs c.sig.params (vals x) = [])
+    (ha : ∀ x, c.A.argArea ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) x = [])
+    (hwf : c.A.wf ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) 0 p)
+    (hs : (contract c post exit abort trace).pre s) (hsame : Same c s p) (hm : c.mem p = c.mem s)
+    (hrd : c.A.rd p = c.A.rd s) (hwr : c.A.wr p = c.A.wr s) :
+    (contract c post exit abort trace).pre p := by
+  obtain ⟨-, hw, htp, hsym, hargs, hl, hinv⟩ := (pre_iff c hv (hb s) (ha s)).mp hs
+  have hreg := hsame.regions hm
+  have hi : c.inv p := inv_frame hsame (W := []) (by rw [hm]; exact Frame.refl _ _) (by simp)
+    (cls_lt hargs) hinv
+  refine (pre_iff c hv (hb p) (ha p)).mpr ⟨hwf, ⟨?_, ?_, ?_, ?_, ?_⟩, htp, hsym, hsame.argsOk.mpr hargs,
+    hsame.layout.mpr hl, hi⟩
+  · simp only [Spec.Slab.Ctx.ro, hreg, hrd]; exact hw.rd
+  · simp only [Spec.Slab.Ctx.rw, hreg, hwr]; exact hw.wr
+  · rw [hreg]; exact hw.nowrap
+  · rw [hreg]; exact hw.disj
+  · rw [hreg, hsame.res]; exact hw.res
+
+end Kept
 
 /-! ## A retry's precondition -/
 
@@ -419,5 +463,79 @@ theorem harmless_mag (hf : c.form = .inline) {r w : Region} (ha : c.Apart s r)
   rw [hf] at h; simp at h
 
 end Harmless
+
+/-! ## Where a slow-path routine's regions are in `regions` -/
+
+section Of
+
+variable {M : ISA} {c : Spec.Slab.Ctx M} {s : M.State}
+
+theorem mem_ro {x : Region} (h : (x, false) ∈ c.regions s) : x ∈ c.ro s :=
+  List.mem_map.mpr ⟨(x, false), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
+
+theorem mem_rw {x : Region} (h : (x, true) ∈ c.regions s) : x ∈ c.rw s :=
+  List.mem_map.mpr ⟨(x, true), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
+
+theorem fixed_mem {x : Region × Bool} (h : x ∈ c.fixed s) : x ∈ c.regions s :=
+  List.mem_append_left _ h
+
+theorem word_mem (hi : c.InRange s) : (⟨c.word s, 8⟩, true) ∈ c.regions s := by
+  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
+  exact List.mem_append_right _ (List.mem_cons_self ..)
+
+theorem more_mem (hi : c.InRange s) {x : Region × Bool} (h : x ∈ c.more s) : x ∈ c.regions s := by
+  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
+  exact List.mem_append_right _ (List.mem_cons_of_mem _ h)
+
+theorem cpu_mem_fixed : (c.cpuField s, false) ∈ c.fixed s :=
+  List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))
+
+/-- A stack push's magazine's link slot is apart from `rseq_cs`. -/
+theorem link_cs_disj (hf : c.form = .stackPush) (hl : c.Layout s) :
+    (c.link s).Disjoint (c.csField s) := by
+  obtain ⟨A, f, sig⟩ := c
+  cases hf
+  exact (fixed_disj (a := (Spec.Slab.Ctx.csField ⟨A, .stackPush, sig⟩ s, true))
+    (l₁ := [(Spec.Slab.Ctx.rsVar ⟨A, .stackPush, sig⟩ s, false),
+      (Spec.Slab.Ctx.cpuField ⟨A, .stackPush, sig⟩ s, false)]) hl rfl (List.mem_singleton_self _)
+    (Bool.true_or _)).symm
+
+end Of
+
+/-! ## A commit's alignment -/
+
+/-- A slab word is aligned, in slabs that start on a page (`Ctx.Layout.page`). The contracts'
+traces say a routine's commit is at such a word, and so is one access
+(`TCB/AArch64/Isa.lean`). -/
+theorem wordAddr_aligned {slabs : Addr} (cpu cls : Nat) (h : slabs.toNat % 4096 = 0) :
+    (wordAddr slabs cpu cls).toNat % 8 = 0 := by
+  simp only [wordAddr, BitVec.toNat_add, BitVec.toNat_ofNat, SLAB_BYTES, SLAB_SHIFT]
+  omega
+
+/-! ## `current_cpu`'s precondition, unfolded -/
+
+theorem cpu_pre_iff {M : ISA} (A : Abi M) {s : M.State} {vals : M.State → List (BitVec 64)}
+    (hv : A.args ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals)
+    (hb : Sig.bufs cpuSig.params (vals s) = [])
+    (ha : A.argArea ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) s = []) :
+    (cpuContract A).pre s ↔
+      A.wf ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) 0 s ∧
+      A.rd s = ((cpuRegions A s).filter (!·.2)).map (·.1) ∧
+      A.wr s = ((cpuRegions A s).filter (·.2)).map (·.1) ∧
+      (∀ x ∈ cpuRegions A s, x.1.base.toNat + x.1.len ≤ 2 ^ A.ptrBits) ∧
+      (∀ x ∈ cpuRegions A s, ∀ r ∈ A.reserved 0 s, x.1.Disjoint r) ∧
+      A.tp.isSome ∧ A.sym.isSome := by
+  simp only [cpuContract, Sig.contract, Abi.withExtra, hv, hb, ha, List.map_nil, List.append_nil,
+    List.filter_nil, List.Pairwise.nil, List.not_mem_nil, false_implies, implies_true, true_and,
+    Curry.apply_const]
+  constructor
+  · rintro ⟨⟨hwf, hd1, hd2, hnw, -, hres, -, -⟩, hrd, hwr, hpre⟩
+    exact ⟨hwf, take_drop_eq hrd hd1, take_drop_eq hwr hd2, hnw, hres, hpre⟩
+  · rintro ⟨hwf, hrd, hwr, hnw, hres, hpre⟩
+    have hp : (cpuRegions A s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) := by
+      simp [cpuRegions]
+    simp only [hrd, hwr, Nat.sub_self, List.take_zero, List.drop_zero, List.not_mem_nil,
+      false_implies, implies_true, and_true, true_and]
+    exact ⟨⟨hwf, hnw, hp, hres⟩, hpre⟩
 
 end VG.Proof.Slab

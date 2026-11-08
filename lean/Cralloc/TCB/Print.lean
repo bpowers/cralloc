@@ -57,12 +57,13 @@ which the emitter allows only once per function (`Rust.checkRseq`):
     .balign 32
 3:  .long 0, 0                the descriptor, struct rseq_cs: version, flags,
     .quad 6b, 7b - 6b, 4f     start_ip, post_commit_offset, abort_ip
+    <the word after it>       if the routine reads one (`Printer.descWord`)
     .popsection
-    .pushsection .text.unlikely, "ax"
+    <coldOpen>                where its out-of-line code goes
     <rseqSig>                 ends with the 4-byte signature before abort_ip
 4:  jmp 5b                    the abort handler
     <exits' code>             out of line (`lowerBody`)
-    .popsection
+    <coldClose>
 ```
 
 An exit straight to an external target, with no code of its own, is a
@@ -75,6 +76,12 @@ So the abort handler lies outside the sequence, after the signature, and
 the arming code (x86-64's `leaRseqCs`, `lea r, [rip + 3f]`) names this
 descriptor. The descriptor holds absolute addresses, which the dynamic
 linker relocates, so its section is writable.
+
+A routine may run instructions once before its sequence (`Artifact.setup`):
+they are printed first, ahead of the label `5`, so that the abort handler does
+not run them again (`Printer.routine`). A word it reads after the descriptor
+(`Printer.descWord`) is placed there by this printer, since the descriptor is
+printed with the sequence, after the instruction that reads it.
 
 Together with each ISA's instruction printer this is part of the trusted
 base; it is small enough to check by inspection and is covered by the golden
@@ -156,6 +163,48 @@ structure Printer (M : ISA) where
   short form, the stub's jump taking the long one off the hot path. Only for
   a function that has a return to put the stubs after. -/
   stubExits : Bool := false
+  /-- The assembler directives around a function's out-of-line code: its
+  abort handler, its exits' code, and inline its cold branches. -/
+  coldOpen : List String := [".pushsection .text.unlikely, \"ax\""]
+  coldClose : List String := [".popsection"]
+  /-- Whether the out-of-line code of an inlined function may be out of reach
+  of a conditional branch in it, since the compiler may make the function any
+  size (AArch64's reaches 1 MiB, and a linker cannot put a veneer on one). The
+  emitter then allows an inlined sequence no exit with code of its own or to
+  an external target (`Rust.checkRseq`). -/
+  coldFar : Bool := false
+  /-- The symbol whose address an instruction reads from the word after the
+  routine's descriptor, if it is such a load (`Rust.checkDescWord`). The printer
+  places the word there (`Printer.rseqLines`). -/
+  descWord : M.Instr → Option String := fun _ => none
+  /-- Why an instruction may not be in a restartable sequence's arm or a step of its
+  body, if so (`Rust.checkRseq`). The model has one state before each step, where an
+  abort may come, and the range of addresses it covers is the sequence's as the assembler
+  laid it out. So a step must be one instruction that stays where it was printed, with at
+  most one store, which a misaligned one may not be. -/
+  bodyRefuses : M.Instr → Option String := fun _ => none
+  /-- Whether an instruction reads or writes memory another thread can change, and so may
+  not run outside a restartable sequence, after its commit or in an exit's code
+  (`Rust.checkRseq`): nothing there stops another thread running first, which `Exec` does
+  not model. A word the dynamic linker fills before any code runs is not such memory. -/
+  accessesMemory : M.Instr → Bool := fun _ => true
+  /-- Whether an instruction names the routine's descriptor by its label, `3f`, which is
+  this routine's only ahead of the descriptor (`Printer.rseqLines`); anywhere else it is
+  the next one the assembler sees (`Rust.checkRseq`). -/
+  namesDesc : M.Instr → Bool := fun _ => false
+  /-- Whether a sequence's arm must be exactly one store (`Rust.checkRseq`): on a target
+  whose abort returns to it alone (`Artifact.setup`), so that nothing is read there,
+  outside the range an abort covers, and then relied on. -/
+  armOneStore : Bool := false
+  /-- Whether, after an instruction, a linker may move a later one out of line, up to
+  `moveReach` instructions on. Such an instruction may not be so near a sequence that
+  what moves is in it (`Rust.checkRseq`). -/
+  movesAfter : M.Instr → Bool := fun _ => false
+  moveReach : Nat := 0
+  /-- Text that, in a line of a function, means it may move the stack pointer
+  or the return address, so that it gets no unwind information
+  (`Rust.unwindLines`). -/
+  stackText : List String := ["rsp", "esp", "push ", "pop ", "call"]
 
 variable {M : ISA} (P : Printer M)
 
@@ -195,49 +244,54 @@ def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List
       [.text (lab ++ ":")] ++ cold.flatMap P.instr ++ [back] ++ k, st, n)
 
 /-- The lines of the restartable sequence `rseq arm body` (see the module
-docs), given its body's lines and its exits' code (`lowerBody`). -/
-def Printer.rseqLines (arm : List M.Instr) (body cold : List Line) : List Line :=
+docs), given its body's lines, its exits' code (`lowerBody`) and the lines of
+the word after its descriptor. -/
+def Printer.rseqLines (arm : List M.Instr) (body cold desc : List Line) : List Line :=
   [.text "5:"] ++ arm.flatMap P.instr ++ [.text "6:"] ++ body ++ [.text "7:"] ++
   ([".pushsection __rseq_cs, \"aw\"", ".balign 32", "3:", ".long 0, 0",
-    ".quad 6b, 7b - 6b, 4f", ".popsection", ".pushsection .text.unlikely, \"ax\""] ++
-    P.rseqSig.getD [] ++ ["4:", P.jump "5b"]).map .text ++
-  cold ++ [.text ".popsection"]
+    ".quad 6b, 7b - 6b, 4f"]).map .text ++ desc ++
+  ([".popsection"] ++ P.coldOpen ++ P.rseqSig.getD [] ++ ["4:", P.jump "5b"]).map .text ++
+  cold ++ P.coldClose.map .text
 
 /-- Lower code to lines of assembly, using labels `labelNum n`: the lines in
 place, the lines of its cold branches (`Code.iteCold`), placed after the
-function's return, and the next unused label number. -/
-def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Nat
+function's return, and the next unused label number. `desc` is the word after
+a restartable sequence's descriptor (`Printer.rseqLines`). -/
+def Printer.lowerWith (desc : List Line) : Code M.Instr M.Cond → Nat → List Line × List Line × Nat
   | .block is, n => (is.flatMap P.instr, [], n)
   | .seq c₁ c₂, n =>
-    let (l₁, k₁, n) := lower c₁ n
-    let (l₂, k₂, n) := lower c₂ n
+    let (l₁, k₁, n) := lowerWith desc c₁ n
+    let (l₂, k₂, n) := lowerWith desc c₂ n
     (l₁ ++ l₂, k₁ ++ k₂, n)
   | .ite c (.seq (.seq (.block []) (.block [])) t) e, n =>
     let lCold := labelNum n
     let lBack := labelNum (n + 1)
-    let (le, ke, n) := lower e (n + 2)
-    let (lt, kt, n) := lower t n
+    let (le, ke, n) := lowerWith desc e (n + 2)
+    let (lt, kt, n) := lowerWith desc t n
     ([.text (P.branch c (lCold ++ "f"))] ++ le ++ [.text (lBack ++ ":")],
       ke ++ [.text (lCold ++ ":")] ++ lt ++ [.text (P.jump (lBack ++ "b"))] ++ kt, n)
   | .ite c t e, n =>
     let lThen := labelNum n
     let lEnd := labelNum (n + 1)
-    let (le, ke, n) := lower e (n + 2)
-    let (lt, kt, n) := lower t n
+    let (le, ke, n) := lowerWith desc e (n + 2)
+    let (lt, kt, n) := lowerWith desc t n
     ([.text (P.branch c (lThen ++ "f"))] ++ le ++ [.text (P.jump (lEnd ++ "f")), .text (lThen ++ ":")] ++
       lt ++ [.text (lEnd ++ ":")], ke ++ kt, n)
   | .loop body c, n =>
     let lTop := labelNum n
-    let (lb, kb, n) := lower body (n + 1)
+    let (lb, kb, n) := lowerWith desc body (n + 1)
     ([.text (lTop ++ ":")] ++ lb ++ [.text (P.branch c (lTop ++ "b"))], kb, n)
   | .call name _, n => ([.call name], [], n)
   | .frame i body j, n =>
-    let (lb, kb, n) := lower body n
+    let (lb, kb, n) := lowerWith desc body n
     (P.instr i ++ lb ++ P.instr j, kb, n)
   | .rseq arm body, n =>
     let (lb, kb, st, n) := P.lowerBody body n
-    (P.rseqLines arm lb kb, st, n)
+    (P.rseqLines arm lb kb desc, st, n)
   | .jump is t, n => (is.flatMap P.instr ++ [.ops [.text (P.jump ""), .ref t]], [], n)
+
+/-- `lowerWith` for code with no word after its descriptor. -/
+abbrev Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Nat := P.lowerWith []
 
 /-- The fused micro-ops of a restartable sequence's body when no exit is
 taken: one per instruction and per exit, but an exit right after an
@@ -260,14 +314,32 @@ def Printer.hotUops (inline : Bool) : Code M.Instr M.Cond → Option Nat
   | .seq (.rseq arm body) (.jump is _) => some (arm.length + P.stepUops body + is.length + 1)
   | _ => none
 
-/-- The complete body of a function: the lowered code, the return, and the
-cold branches' code after it. -/
-def Printer.function (body : Code M.Instr M.Cond) : List Line :=
-  let (l, k, _) := P.lower body 0
+/-- The word after the descriptor of a routine whose setup is `setup`: its
+first `descWord`, of which `Rust.checkDescWord` allows only the one. -/
+def Printer.descLines (setup : List M.Instr) : List Line :=
+  match setup.findSome? P.descWord with
+  | some n => [.ops [.text ".quad ", .ref n]]
+  | none => []
+
+/-- The lines of the instructions a routine runs once on entry, `setup`, and
+of its lowered code `body`, without its return: the lines in place, those of
+its cold branches, and the next unused label number. -/
+def Printer.lowerRoutine (setup : List M.Instr) (body : Code M.Instr M.Cond) :
+    List Line × List Line × Nat :=
+  let (l, k, n) := P.lowerWith (P.descLines setup) body 0
+  (setup.flatMap P.instr ++ l, k, n)
+
+/-- The complete body of a routine: `setup`, the lowered code, the return, and
+the cold branches' code after it. -/
+def Printer.routine (setup : List M.Instr) (body : Code M.Instr M.Cond) : List Line :=
+  let (l, k, _) := P.lowerRoutine setup body
   -- Code that ends in a tail call never reaches a return.
   let ret := match body with
     | .seq _ (.jump ..) => []
     | _ => P.ret.map .text
   l ++ ret ++ k
+
+/-- The complete body of a function with no setup. -/
+abbrev Printer.function (body : Code M.Instr M.Cond) : List Line := P.routine [] body
 
 end VG

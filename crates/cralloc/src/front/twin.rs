@@ -8,13 +8,18 @@
 //! step, move it to another CPU, run a nested call in between, or let the interleaving checker
 //! choose.
 //!
-//! The stores that commit are release stores and the loads of a field acquire loads, which is
-//! what the routines' plain `mov`s are on x86-64. A twin's memory accesses are not switch
-//! points for the interleaving checker (`sync::quiet`): `Machine::step` is the only place a
-//! twin can be interrupted, as the step before an instruction is the only place a sequence can
-//! be, so nothing can slip in between a step's check and its access. On threads that run freely
-//! the machine keeps a fence out of that gap instead, which is why a twin tells it when its
-//! magazine access and its commit are done (`Machine::accessed`, `Machine::committed`).
+//! Every access is relaxed, because that is all a routine's plain load or store gives: on a
+//! weakly ordered CPU a commit releases nothing and a load of a field acquires nothing. What
+//! orders a routine's accesses against another thread's is the kernel: a context switch for the
+//! next thread on the CPU, and the fence for a drainer (`docs/research/memory-ordering.md`). A
+//! machine stands in for those, so a test that needs more order than its machine gives shows a
+//! protocol that leans on an ordering the real routines do not have. A twin's memory accesses
+//! are not switch points for the interleaving checker (`sync::quiet`): `Machine::step` is the
+//! only place a twin can be interrupted, as the step before an instruction is the only place a
+//! sequence can be, so nothing can slip in between a step's check and its access. On threads
+//! that run freely the machine keeps a fence out of that gap instead, which is why a twin tells
+//! it when its magazine access and its commit are done (`Machine::accessed`,
+//! `Machine::committed`).
 //!
 //! The unsafe blocks turn a slab word or a spare head into an atomic view of a magazine slot.
 //! They rest on the slab invariant (S) (`docs/safety/cralloc/front/real-safety.md`): a hot word
@@ -30,7 +35,7 @@ use crate::classes::{SLOT_BYTES, SmallClass, is_marker};
 use crate::os::{Aborted, Machine, Step};
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
-use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::Relaxed;
 
 /// The routines as Rust, on `slabs`, for a thread on `machine`.
 pub struct Twin<'a, M> {
@@ -70,7 +75,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         };
         let field = quiet(self.slabs.slab(cpu).field(Field::hot(class)));
         self.machine.step(Step::Load)?;
-        let word = field.load(Acquire);
+        let word = field.load(Relaxed);
         if class.magazine().alloc_slow(word.addr()) {
             return Ok(None);
         }
@@ -81,7 +86,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let object = unsafe { slot(top) }.load(Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
-        field.store(top, Release);
+        field.store(top, Relaxed);
         self.machine.committed();
         Ok(NonNull::new(object))
     }
@@ -92,7 +97,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         };
         let field = quiet(self.slabs.slab(cpu).field(Field::hot(class)));
         self.machine.step(Step::Load)?;
-        let word = field.load(Acquire);
+        let word = field.load(Relaxed);
         if class.magazine().free_slow(word.addr()) {
             return Ok(false);
         }
@@ -102,7 +107,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         unsafe { slot(word) }.store(object.as_ptr(), Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
-        field.store(word.wrapping_byte_add(SLOT_BYTES), Release);
+        field.store(word.wrapping_byte_add(SLOT_BYTES), Relaxed);
         self.machine.committed();
         Ok(true)
     }
@@ -118,12 +123,12 @@ impl<'a, M: Machine> Twin<'a, M> {
         };
         let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
-        let word = field.load(Acquire);
+        let word = field.load(Relaxed);
         if word.addr() != expected.addr() {
             return Ok(StoreIfEqual::Mismatch(word));
         }
         self.machine.step(Step::Commit)?;
-        field.store(new, Release);
+        field.store(new, Relaxed);
         self.machine.committed();
         Ok(StoreIfEqual::Stored)
     }
@@ -134,7 +139,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         };
         let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
-        let head = field.load(Acquire);
+        let head = field.load(Relaxed);
         if is_marker(head.addr()) {
             return Ok(StackPush::Marker);
         }
@@ -144,7 +149,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         unsafe { slot(magazine.as_ptr()) }.store(head, Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
-        field.store(magazine.as_ptr(), Release);
+        field.store(magazine.as_ptr(), Relaxed);
         self.machine.committed();
         Ok(StackPush::Pushed)
     }
@@ -155,7 +160,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         };
         let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
-        let head = field.load(Acquire);
+        let head = field.load(Relaxed);
         let Some(magazine) = NonNull::new(head).filter(|h| !is_marker(h.addr().get())) else {
             return Ok(StackPop::Empty);
         };
@@ -165,7 +170,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let next = unsafe { slot(head) }.load(Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
-        field.store(next, Release);
+        field.store(next, Relaxed);
         self.machine.committed();
         Ok(StackPop::Popped(magazine))
     }
@@ -230,6 +235,7 @@ mod tests {
     use core::cell::Cell;
     use core::ptr;
     use core::sync::atomic::AtomicBool;
+    use core::sync::atomic::Ordering::{Acquire, Release};
     use std::boxed::Box;
     use std::vec::Vec;
 

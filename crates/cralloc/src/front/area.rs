@@ -74,12 +74,11 @@ pub(crate) const RETIRED: i32 = -2;
 /// `cpu_id` before the thread has tried: -1, as the generated area starts.
 pub(crate) const UNREGISTERED: u32 = spec::RSEQ_CPU_ID_UNREGISTERED;
 
-/// The signature the kernel requires before each abort handler, as the routines write it: the
-/// specification's on x86-64, and on aarch64 `brk #0x45e0`, as glibc registers there.
+/// The signature the kernel requires before each abort handler, as the routines write it.
 #[cfg(target_arch = "x86_64")]
-const SIGNATURE: u32 = spec::RSEQ_SIGNATURE;
+const SIGNATURE: u32 = spec::RSEQ_SIGNATURE_X86_64;
 #[cfg(target_arch = "aarch64")]
-const SIGNATURE: u32 = 0xd428_bc00;
+const SIGNATURE: u32 = spec::RSEQ_SIGNATURE_AARCH64;
 
 // The area's page offset is pinned, the same in every thread (the thread pointer is aligned to
 // the area's section, a page). It is 32-byte aligned, as every registered area is, so `cpu_id`
