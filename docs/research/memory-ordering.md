@@ -309,7 +309,7 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 | Every bitmap word relaxed | caught, by the summary test only | not run |
 | `LinuxOs::fence` does nothing | caught in 3 of 4 runs of 3 s (`a_drain_leaves_each_thread_its_own_blocks`: "a block two threads hold", or "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
 | A push's release, or all of a pop's acquires | not caught | caught |
-| A pop's first read of the head only | not caught | POP_LOAD |
+| A pop's first read of the head only | not caught | caught only by `a_pop_reads_the_link_its_top_magazines_pusher_wrote`, on seed 7 |
 | A free's OR with no release, or a claim with no acquire | not caught | caught |
 | Summary words, hint or sleep to acquire and release | not caught | caught |
 | A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
