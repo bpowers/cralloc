@@ -46,13 +46,18 @@ def area(rseq):
 
 
 def arming(p, arm):
+    """The descriptor, then the arming store alone, where an abort returns. A sequence holds no
+    relocation: a linker working around Cortex-A53 erratum 843419 can replace a load after an `adrp`
+    with a branch to a stub, and a preemption in the stub would not abort it."""
     if arm == "adrp":
         return f"""  adrp x11, {p}_cs
   add x11, x11, :lo12:{p}_cs
+{p}_restart:
   str x11, [x10, #8]"""
     if arm == "got":
         return f"""  adrp x11, :got:{p}_cs
   ldr x11, [x11, :got_lo12:{p}_cs]
+{p}_restart:
   str x11, [x10, #8]"""
     raise ValueError(arm)
 
@@ -108,7 +113,6 @@ def pop(p, rseq="exe", cpu="cmp", addr="reg", order="load_first", mask="reg", ar
         raise ValueError(order)
     return f"""{inputs}
 {area(rseq)}
-{p}_restart:
 {arming(p, arm)}
 {p}_start:
 {cpu_step(cpu)}
@@ -142,7 +146,6 @@ def push(p, rseq="exe", cpu="cmp", addr="reg", order="add_first", mask="reg", ar
         raise ValueError(order)
     return f"""{inputs}
 {area(rseq)}
-{p}_restart:
 {arming(p, arm)}
 {p}_start:
 {cpu_step(cpu)}
@@ -184,7 +187,6 @@ def stale_pop(p, reg, rseq="exe", arm="adrp", hoist_mask=True):
     """The word's address is compared with what a scratch register still holds from the last call,
     and loaded through that register, which is not written: the core then renames the load."""
     return f"""{area(rseq)}
-{p}_restart:
 {arming(p, arm)}
 {p}_start:
   ldr w8, [x10, #4]
@@ -193,7 +195,6 @@ def stale_pop(p, reg, rseq="exe", arm="adrp", hoist_mask=True):
   add x9, x3, x8, lsl #12
   cmp {reg}, x9
   b.ne {p}_fix
-{p}_back:
   ldr x1, [{reg}]
   tst w1, w2
   b.eq 9f
@@ -205,13 +206,12 @@ def stale_pop(p, reg, rseq="exe", arm="adrp", hoist_mask=True):
   .subsection 1
 {p}_fix:
   mov {reg}, x9
-  b {p}_back
+  b {p}_restart
   .subsection 0"""
 
 
 def stale_push(p, reg, rseq="exe", arm="adrp"):
     return f"""{area(rseq)}
-{p}_restart:
 {arming(p, arm)}
 {p}_start:
   ldr w8, [x10, #4]
@@ -220,7 +220,6 @@ def stale_push(p, reg, rseq="exe", arm="adrp"):
   add x9, x3, x8, lsl #12
   cmp {reg}, x9
   b.ne {p}_fix
-{p}_back:
   ldr x1, [{reg}]
   add x4, x1, #8
   tst w4, w2
@@ -232,18 +231,18 @@ def stale_push(p, reg, rseq="exe", arm="adrp"):
   .subsection 1
 {p}_fix:
   mov {reg}, x9
-  b {p}_back
+  b {p}_restart
   .subsection 0"""
 
 
 def base_cpu(check, reg="x9"):
-    """x9 = the slab of this CPU, from x10 the rseq area. `ubfiz` needs no branch: any number lands
-    on a slab, the top two (which negative numbers reach) never written; `cmp` branches instead."""
+    """x9 = the slab of this CPU, from x10 the rseq area and x13 the slabs, found before the
+    sequence. `ubfiz` needs no branch: any number lands on a slab, the top two (which negative
+    numbers reach) never written; `cmp` branches instead."""
     if check == "ubfiz":
         return f"""  ldr w8, [x10, #4]
-  adrp {reg}, rf_slabs
   ubfiz x8, x8, #12, #13
-  add {reg}, {reg}, x8"""
+  add {reg}, x13, x8"""
     if check == "ubfiz_nosym":
         return f"""  ldr w8, [x10, #4]
   ubfiz x8, x8, #12, #13
@@ -252,8 +251,7 @@ def base_cpu(check, reg="x9"):
         return f"""  ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs 9f
-  adrp {reg}, rf_slabs
-  add {reg}, {reg}, x8, lsl #12"""
+  add {reg}, x13, x8, lsl #12"""
     if check == "cmp_nosym":
         return f"""  ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
@@ -268,14 +266,13 @@ def base_operand(word):
 
 def s2_pop(p, reg="x18", check="ubfiz", rseq="exe", word=152, mask="#0x1f0", arm="adrp"):
     w = base_operand(word)
-    return f"""{area(rseq)}
-{p}_restart:
+    return f"""  adrp x13, rf_slabs
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {base_cpu(check)}
   cmp {reg}, x9
   b.ne {p}_fix
-{p}_back:
   ldr x1, [{reg}, {w}]
   tst w1, {mask}
   b.eq 9f
@@ -287,20 +284,19 @@ def s2_pop(p, reg="x18", check="ubfiz", rseq="exe", word=152, mask="#0x1f0", arm
   .subsection 1
 {p}_fix:
   mov {reg}, x9
-  b {p}_back
+  b {p}_restart
   .subsection 0"""
 
 
 def s2_push(p, reg="x18", check="ubfiz", rseq="exe", word=152, mask="#0x1f0", arm="adrp"):
     w = base_operand(word)
-    return f"""{area(rseq)}
-{p}_restart:
+    return f"""  adrp x13, rf_slabs
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {base_cpu(check)}
   cmp {reg}, x9
   b.ne {p}_fix
-{p}_back:
   ldr x1, [{reg}, {w}]
   add x4, x1, #8
   tst w4, {mask}
@@ -312,7 +308,7 @@ def s2_push(p, reg="x18", check="ubfiz", rseq="exe", word=152, mask="#0x1f0", ar
   .subsection 1
 {p}_fix:
   mov {reg}, x9
-  b {p}_back
+  b {p}_restart
   .subsection 0"""
 
 
@@ -440,11 +436,13 @@ rf_pwn_push:
     k.kernel("lone_none", f"  isb\n  mov x0, x20\n{use}\n  isb", setup=HOIST_INPUTS, kind="Slab", note="isb; a register; 8 adds; isb: the frame")
 
 
-def lean_prologue(p, rseq="word"):
+def lean_prologue(p, rseq="word", setup="", late=False):
     """The rseq area in x10 and the routine armed, the descriptor's address in x11 so that a restart
     is only the arming store. `word`, the default form: one `adrp`, since the routine's own word
     for __rseq_offset's address follows its descriptor, and `adrp` competes with branches. `exe`:
-    a direct load, which needs a copy relocation. `got`: through the GOT."""
+    a direct load, which needs a copy relocation. `got`: through the GOT. `setup` forms what the
+    sequence reads, since the sequence itself holds no relocation: ahead of the area, or after it
+    if `late`."""
     desc = f"""  adrp x11, {p}_cs
   add x11, x11, :lo12:{p}_cs"""
     if rseq == "word":
@@ -459,10 +457,11 @@ def lean_prologue(p, rseq="word"):
   ldr x9, [x9]"""
     else:
         raise ValueError(rseq)
-    return f"""{desc}
+    first, last = ("", f"\n{setup}") if late else (f"{setup}\n" if setup else "", "")
+    return f"""{first}{desc}
 {offset}
   mrs x10, tpidr_el0
-  add x10, x10, x9
+  add x10, x10, x9{last}
 {p}_restart:
   str x11, [x10, #8]
 {p}_start:"""

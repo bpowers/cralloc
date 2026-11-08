@@ -2,33 +2,37 @@
 //! routine and its exported copy. Some are exported only for what `export_c_abi!` expands to in
 //! another crate.
 //!
-//! Labels: `5` the arming sequence, `6` the sequence's first instruction, `7` the end of the
-//! sequence, `3` its descriptor, `4` its abort handler, `8` the word holding the address of
-//! `__rseq_offset`, `20` the miss. Registers: x9 the rseq area, then x10 to x15 and for the larger
-//! routines x2 as scratch, which no routine that reads them after a restart writes before its
-//! commit.
+//! Labels: `5` the arming store, where the abort handler returns; `6` the sequence's first
+//! instruction; `7` the end of the sequence; `3` its descriptor; `4` its abort handler; `8` a word
+//! holding the address of `__rseq_offset`, for a routine with no descriptor; `20` a C routine's
+//! miss. Registers: x10 the rseq area and x11 the descriptor, x8 the CPU number, and the rest as
+//! each routine says.
+//!
+//! A routine forms every address before its arming store, and a sequence holds no relocation. A
+//! linker working around Cortex-A53 erratum 843419 (rustc asks for it on every aarch64 link) can
+//! replace a load after an `adrp` at the end of a page with a branch to a stub, and a preemption in
+//! a stub outside the sequence's range does not abort it. No `adrp` here is followed directly by a
+//! load or store, which the erratum's pattern needs, so none is replaced either. Nothing in a
+//! sequence writes a register formed before it, since a restart begins at the arming store.
 
-/// Finds the rseq area through a word of the routine's own, arms the sequence, reads the CPU
-/// number into x10 and compares it with the slab count, leaving the flags for `b.hs`. The word is
-/// 16-aligned, as x86-64's is, off the page offsets of the hot words.
+/// Finds the rseq area through the word after the routine's descriptor, which saves an `adrp` on
+/// a core where they compete with branches, and arms the sequence. The word is 32-aligned, off the
+/// page offsets of the hot words.
 #[cfg(not(target_env = "musl"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_arm {
     () => {
         concat!(
-            "5:\n",
-            ".pushsection .data.rel.ro.cralloc_got,\"aw\",%progbits\n",
-            ".balign 16\n",
-            "8:\n",
-            ".quad __rseq_offset\n",
-            ".popsection\n",
-            "adrp x9, 8b\n",
-            "ldr x9, [x9, :lo12:8b]\n",
+            "adrp x11, 3f\n",
+            "add x11, x11, :lo12:3f\n",
+            "ldr x9, [x11, #32]\n",
             "ldr x9, [x9]\n",
             "mrs x10, tpidr_el0\n",
-            "add x9, x9, x10\n",
-            $crate::cralloc_a64_arm_area!(),
+            "add x10, x10, x9\n",
+            "5:\n",
+            "str x11, [x10, #8]\n",
+            "6:\n",
         )
     };
 }
@@ -42,36 +46,58 @@ macro_rules! cralloc_a64_arm {
 macro_rules! cralloc_a64_arm {
     () => {
         concat!(
-            "5:\n",
+            "adrp x11, 3f\n",
+            "add x11, x11, :lo12:3f\n",
             "mrs x10, tpidr_el0\n",
-            "add x9, x10, :tprel_hi12:cralloc_rseq_area\n",
-            "add x9, x9, :tprel_lo12_nc:cralloc_rseq_area\n",
-            $crate::cralloc_a64_arm_area!(),
-        )
-    };
-}
-
-/// [`cralloc_a64_arm`] from x9, the rseq area.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! cralloc_a64_arm_area {
-    () => {
-        concat!(
-            "adrp x10, 3f\n",
-            "add x10, x10, :lo12:3f\n",
-            "str x10, [x9, #8]\n",
+            "add x10, x10, :tprel_hi12:cralloc_rseq_area\n",
+            "add x10, x10, :tprel_lo12_nc:cralloc_rseq_area\n",
+            "5:\n",
+            "str x11, [x10, #8]\n",
             "6:\n",
-            "ldr w10, [x9, #4]\n",
-            "cmp w10, #2, lsl #12\n",
         )
     };
 }
 
-/// The sequence's descriptor and, after the function, its abort handler, which starts the sequence
-/// again.
+/// The end of a sequence begun by [`cralloc_a64_arm`]: its descriptor, with the word holding the
+/// address of `__rseq_offset` after it, and the abort handler, which holds only an unconditional
+/// branch and so needs no veneer from `.subsection 1`.
+#[cfg(not(target_env = "musl"))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_end {
+    () => {
+        concat!(
+            "7:\n",
+            ".pushsection __rseq_cs, \"aw\"\n",
+            ".balign 32\n",
+            "3:\n",
+            ".long 0, 0\n",
+            ".quad 6b, 7b - 6b, 4f\n",
+            ".quad __rseq_offset\n",
+            ".popsection\n",
+            ".subsection 1\n",
+            ".inst 0xd428bc00\n",
+            "4:\n",
+            "b 5b\n",
+            ".subsection 0\n",
+        )
+    };
+}
+
+/// [`cralloc_a64_end`] for a sequence with no word to hold.
+#[cfg(target_env = "musl")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_end {
+    () => {
+        $crate::cralloc_a64_end_bare!()
+    };
+}
+
+/// A sequence's end with no word after the descriptor.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_end_bare {
     () => {
         concat!(
             "7:\n",
@@ -90,58 +116,111 @@ macro_rules! cralloc_a64_end {
     };
 }
 
-/// From the word position in x11, with the CPU number in x10: the mask into x12, and the address
-/// of the word in this CPU's slab into x11, its value into x13.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! cralloc_a64_c_word {
+/// [`cralloc_a64_arm`] with `__rseq_offset` read directly, under the configuration
+/// `cralloc_a64_direct`, for comparing it on real jobs with the form that stays. A direct `adrp` to
+/// glibc's variable needs a copy of it in the executable, which GNU ld refuses to make in a PIE and
+/// `rust-lld` makes, so the `executable` feature cannot mean this here.
+#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
+macro_rules! a64_arm_direct {
     () => {
         concat!(
-            "adrp x12, {SLABS}+33556480\n",
-            "add x12, x12, :lo12:{SLABS}+33556480\n",
-            "ldr x12, [x12, x11, lsl #3]\n",
-            "adrp x13, {SLABS}\n",
-            "add x13, x13, :lo12:{SLABS}\n",
-            "add x11, x13, x11, lsl #3\n",
-            "add x11, x11, x10, lsl #12\n",
-            "ldr x13, [x11]\n",
+            "adrp x11, 3f\n",
+            "add x11, x11, :lo12:3f\n",
+            "adrp x9, __rseq_offset\n",
+            "ldr x9, [x9, :lo12:__rseq_offset]\n",
+            "mrs x10, tpidr_el0\n",
+            "add x10, x10, x9\n",
+            "5:\n",
+            "str x11, [x10, #8]\n",
+            "6:\n",
         )
     };
 }
 
-/// The position of the hot word of the class of `ptr` in x0's region into x11, missing if the
-/// region is out of range. Reads the mirror of the heap words.
+#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
+macro_rules! a64_end_direct {
+    () => {
+        $crate::cralloc_a64_end_bare!()
+    };
+}
+
+#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
+macro_rules! a64_arm_direct {
+    () => {
+        $crate::cralloc_a64_arm!()
+    };
+}
+
+#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
+macro_rules! a64_end_direct {
+    () => {
+        $crate::cralloc_a64_end!()
+    };
+}
+
+/// The CPU number into x8, and to the miss if it has no slab.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_cpu {
+    () => {
+        concat!("ldr w8, [x10, #4]\n", "cmp w8, #2, lsl #12\n", "b.hs 20f\n",)
+    };
+}
+
+/// Before the sequence: the slabs into x13.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_slabs {
+    () => {
+        "adrp x13, {SLABS}\n"
+    };
+}
+
+/// Before the sequence: the page holding the published words and the masks into x14, and the masks
+/// into x15.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_masks {
+    () => {
+        concat!("adrp x14, {SLABS}+33554432\n", "add x15, x14, #2048\n",)
+    };
+}
+
+/// Before the sequence: [`cralloc_a64_c_masks`], and the region table into x12, 4096 bytes past the
+/// masks.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_regions {
+    () => {
+        concat!(
+            $crate::cralloc_a64_c_masks!(),
+            "add x12, x15, #1, lsl #12\n",
+        )
+    };
+}
+
+/// This CPU's slab into x3: indexing it by a class's position leaves no ALU instruction between a
+/// table's load and the hot word's, which is what a free's commit waits on.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_slab {
+    () => {
+        concat!("lsl x8, x8, #12\n", "add x3, x13, x8\n",)
+    };
+}
+
+/// The region index of `ptr` in x0 into x4, to the miss if it is out of range.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_region {
     () => {
         concat!(
-            "adrp x11, {SLABS}+33555456\n",
-            "add x11, x11, :lo12:{SLABS}+33555456\n",
-            "ldp x12, x13, [x11]\n",
-            "lsr x11, x0, x12\n",
-            "sub x11, x11, x13\n",
-            "cmp x11, #1, lsl #12\n",
+            "ldr w6, [x14, #1024]\n",
+            "ldr x7, [x14, #1032]\n",
+            "lsr x4, x0, x6\n",
+            "sub x4, x4, x7\n",
+            "cmp x4, #1, lsl #12\n",
             "b.hs 20f\n",
-            "adrp x12, {SLABS}+33560576\n",
-            "add x12, x12, :lo12:{SLABS}+33560576\n",
-            "ldrb w11, [x12, x11]\n",
-        )
-    };
-}
-
-/// A push from the word and mask of [`cralloc_a64_c_word`], of the pointer in x0.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! cralloc_a64_c_push {
-    () => {
-        concat!(
-            $crate::cralloc_a64_c_word!(),
-            "add x14, x13, #8\n",
-            "tst w14, w12\n",
-            "b.eq 20f\n",
-            "str x0, [x13]\n",
-            "str x14, [x11]\n",
         )
     };
 }
@@ -151,70 +230,75 @@ macro_rules! cralloc_a64_c_push {
 #[macro_export]
 macro_rules! cralloc_a64_c_miss {
     () => {
-        concat!(
-            ".subsection 1\n",
-            "20:\n",
-            "b {slow}\n",
-            ".subsection 0\n",
-            ".cfi_endproc\n",
-        )
+        concat!("20:\n", "b {slow}\n", ".cfi_endproc\n", ".p2align 6\n",)
     };
 }
 
-/// `c_malloc`.
+/// `c_malloc`. The block stays in x4 until the commit, since x0 is the size a restart reads.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_malloc {
     () => {
         concat!(
             ".cfi_startproc\n",
-            $crate::cralloc_a64_arm!(),
-            "b.hs 20f\n",
-            "cmp x0, #8, lsl #12\n",
-            "b.hi 20f\n",
-            "add x11, x0, #7\n",
-            "lsr x11, x11, #3\n",
             "adrp x12, {C_SIZES}+2048\n",
             "add x12, x12, :lo12:{C_SIZES}+2048\n",
-            "ldrb w11, [x12, x11]\n",
-            $crate::cralloc_a64_c_word!(),
-            "tst w13, w12\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_masks!(),
+            $crate::cralloc_a64_arm!(),
+            $crate::cralloc_a64_c_cpu!(),
+            "cmp x0, #8, lsl #12\n",
+            "b.hi 20f\n",
+            "add x2, x0, #7\n",
+            "lsr x2, x2, #3\n",
+            "ldrb w5, [x12, x2]\n",
+            $crate::cralloc_a64_c_slab!(),
+            "ldr x1, [x3, x5, lsl #3]\n",
+            "ldr x6, [x15, x5, lsl #3]\n",
+            "tst w1, w6\n",
             "b.eq 20f\n",
-            "sub x13, x13, #8\n",
-            "ldr x10, [x13]\n",
-            "str x13, [x11]\n",
+            "ldr x4, [x1, #-8]\n",
+            "sub x1, x1, #8\n",
+            "str x1, [x3, x5, lsl #3]\n",
             $crate::cralloc_a64_end!(),
-            "mov x0, x10\n",
+            "mov x0, x4\n",
             "ret\n",
             $crate::cralloc_a64_c_miss!(),
         )
     };
 }
 
-/// `c_calloc`.
+/// `c_calloc`. x0 and x1 stay as they came, for a restart, the slow path and the zeroing tail. The
+/// hot word is in x2, and the block goes there for the tail, which does all the zeroing: nothing
+/// after a commit is in the sequence, so no store comes after this one.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_calloc {
     () => {
         concat!(
             ".cfi_startproc\n",
-            $crate::cralloc_a64_arm!(),
-            "b.hs 20f\n",
-            "mul x11, x0, x1\n",
-            "umulh x12, x0, x1\n",
-            "cbnz x12, 20f\n",
-            "cmp x11, #1024\n",
-            "b.hi 20f\n",
             "adrp x12, {C_CALLOC_SIZES}+2048\n",
             "add x12, x12, :lo12:{C_CALLOC_SIZES}+2048\n",
-            "ldrb w11, [x12, x11]\n",
-            $crate::cralloc_a64_c_word!(),
-            "tst w13, w12\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_masks!(),
+            $crate::cralloc_a64_arm!(),
+            $crate::cralloc_a64_c_cpu!(),
+            "umulh x2, x0, x1\n",
+            "cbnz x2, 20f\n",
+            "mul x9, x0, x1\n",
+            "cmp x9, #1024\n",
+            "b.hi 20f\n",
+            "ldrb w5, [x12, x9]\n",
+            $crate::cralloc_a64_c_slab!(),
+            "ldr x2, [x3, x5, lsl #3]\n",
+            "ldr x6, [x15, x5, lsl #3]\n",
+            "tst w2, w6\n",
             "b.eq 20f\n",
-            "sub x13, x13, #8\n",
-            "ldr x2, [x13]\n",
-            "str x13, [x11]\n",
+            "ldr x4, [x2, #-8]\n",
+            "sub x2, x2, #8\n",
+            "str x2, [x3, x5, lsl #3]\n",
             $crate::cralloc_a64_end!(),
+            "mov x2, x4\n",
             "b {zero}\n",
             $crate::cralloc_a64_c_miss!(),
         )
@@ -228,11 +312,21 @@ macro_rules! cralloc_a64_c_free {
     () => {
         concat!(
             ".cfi_startproc\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_regions!(),
             $crate::cralloc_a64_arm!(),
-            "b.hs 20f\n",
+            $crate::cralloc_a64_c_cpu!(),
             "cbz x0, 7f\n",
+            $crate::cralloc_a64_c_slab!(),
             $crate::cralloc_a64_c_region!(),
-            $crate::cralloc_a64_c_push!(),
+            "ldrb w5, [x12, x4]\n",
+            "ldr x1, [x3, x5, lsl #3]\n",
+            "ldr x6, [x15, x5, lsl #3]\n",
+            "add x2, x1, #8\n",
+            "tst w2, w6\n",
+            "b.eq 20f\n",
+            "str x0, [x1]\n",
+            "str x2, [x3, x5, lsl #3]\n",
             $crate::cralloc_a64_end!(),
             "ret\n",
             $crate::cralloc_a64_c_miss!(),
@@ -240,23 +334,34 @@ macro_rules! cralloc_a64_c_free {
     };
 }
 
-/// `c_free_sized`.
+/// `c_free_sized`. x1 is the size a restart and the slow path read, so the hot word is in x9, and
+/// x2 is the size table a restart reads, so the new word is in x4.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_free_sized {
     () => {
         concat!(
             ".cfi_startproc\n",
+            "adrp x2, {C_SIZED_SIZES}+2048\n",
+            "add x2, x2, :lo12:{C_SIZED_SIZES}+2048\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_regions!(),
             $crate::cralloc_a64_arm!(),
-            "b.hs 20f\n",
+            $crate::cralloc_a64_c_cpu!(),
+            $crate::cralloc_a64_c_slab!(),
+            "and x9, x1, #0xffff\n",
+            "ldrb w5, [x2, x9]\n",
             $crate::cralloc_a64_c_region!(),
-            "adrp x12, {C_SIZED_SIZES}+2048\n",
-            "add x12, x12, :lo12:{C_SIZED_SIZES}+2048\n",
-            "and x13, x1, #0xffff\n",
-            "ldrb w12, [x12, x13]\n",
-            "cmp w11, w12\n",
+            "ldrb w7, [x12, x4]\n",
+            "cmp w5, w7\n",
             "b.ne 20f\n",
-            $crate::cralloc_a64_c_push!(),
+            "ldr x9, [x3, x5, lsl #3]\n",
+            "ldr x6, [x15, x5, lsl #3]\n",
+            "add x4, x9, #8\n",
+            "tst w4, w6\n",
+            "b.eq 20f\n",
+            "str x0, [x9]\n",
+            "str x4, [x3, x5, lsl #3]\n",
             $crate::cralloc_a64_end!(),
             "ret\n",
             $crate::cralloc_a64_c_miss!(),
@@ -264,34 +369,27 @@ macro_rules! cralloc_a64_c_free_sized {
     };
 }
 
-/// The field of this CPU's slab at the offset in x0: its address into x12 and its value into x13,
-/// after the compare and its branch to 20.
+/// The field of this CPU's slab at the offset in x0: its operand `[x13, x8]`, with the slabs in x13
+/// from before the sequence, and its value into x3. x3 starts as `NO_CPU` (2), the answer if the
+/// number has no slab.
 macro_rules! a64_slab_field {
     () => {
         concat!(
-            "b.hs 20f\n",
-            "and x11, x0, #0xff8\n",
-            "add x11, x11, x10, lsl #12\n",
-            "adrp x12, {SLABS}\n",
-            "add x12, x12, :lo12:{SLABS}\n",
-            "add x12, x12, x11\n",
-            "ldr x13, [x12]\n",
+            "mov x3, #2\n",
+            "ldr w8, [x10, #4]\n",
+            "cmp w8, #2, lsl #12\n",
+            "b.hs 7f\n",
+            "lsl x8, x8, #12\n",
+            "and x9, x0, #0xff8\n",
+            "add x8, x8, x9\n",
+            "ldr x3, [x13, x8]\n",
         )
     };
 }
 
-/// After a slab routine's commit: returns what it read, with `NO_CPU` (2) for the miss.
+/// After a slab routine's commit: returns what it read.
 macro_rules! a64_slab_return {
     () => {
-        concat!(
-            "mov x0, x13\n",
-            "ret\n",
-            ".subsection 1\n",
-            "20:\n",
-            "mov x13, #2\n",
-            "b 7b\n",
-            ".subsection 0\n",
-            ".cfi_endproc\n",
-        )
+        concat!("mov x0, x3\n", "ret\n", ".cfi_endproc\n", ".p2align 6\n",)
     };
 }
