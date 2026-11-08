@@ -7,11 +7,11 @@ use super::{Pool, Tuning};
 use crate::classes::SmallClass;
 use crate::os::Pinned;
 use crate::os::sim::{SimOs, SimTopology};
-use crate::stress::{FULL, Gate, QUICK, Rounds, jitter, spread};
+use crate::stress::{FULL, Gate, QUICK, Rounds, failed, jitter, spread};
 use crate::thread_word::{AWAKE, Process, ThreadWord};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+use core::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::Duration;
 
 /// The class with the largest magazines: their first and last slots are lines apart.
@@ -93,6 +93,80 @@ fn a_depot_stack_hands_over_what_its_pusher_wrote_quickly() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_depot_stack_hands_over_what_its_pusher_wrote_fully() {
     a_depot_stack_hands_over_what_its_pusher_wrote(FULL);
+}
+
+/// One thread pushes a magazine whose link, round by round, names another magazine and then nothing,
+/// and another pops it. The pop's own read of the head is what makes the link it reads this round's:
+/// it waits by the version, relaxed, with no edge from the pusher.
+fn a_pop_reads_the_link_its_top_magazines_pusher_wrote(time: Duration) {
+    let class = wide_class();
+    let size = class.magazine();
+    let rig: Rig<SimOs<Small>, 2> = Rig::new(&[class], 0, Tuning::DEFAULT);
+    let (m, n) = {
+        let area = rig.cache(Pinned(-1)).area();
+        let (m, n) = (area.create(size).unwrap(), area.create(size).unwrap());
+        (m.base().addr().get(), n.base().addr().get())
+    };
+    let stack = rig.depot.full(Pool::Shared, class);
+    let gate = Gate::new(2);
+    let rounds = Rounds::of(time, 100);
+    let stop = AtomicBool::new(false);
+    spread(2, |me| {
+        let area = rig.cache(Pinned(-1)).area();
+        let mut version = stack.version();
+        let mut round = 0;
+        loop {
+            let under = round % 2 == 0;
+            // One thread decides, so that both leave at the same gate. The other still calls it,
+            // for the tour of the CPUs.
+            let go_on = rounds.go_on(round);
+            if me == 0 {
+                stop.store(!go_on, Relaxed);
+            }
+            gate.pass();
+            if stop.load(Relaxed) {
+                return;
+            }
+            round += 1;
+            if me == 0 {
+                if under {
+                    stack.push(area, area.magazine(n, size).unwrap(), 1);
+                }
+                stack.push(area, area.magazine(m, size).unwrap(), 1);
+            } else {
+                // The popper never meets `n` on top, which it could only push back above `m`.
+                let pushed = version.wrapping_add(if under { 2 } else { 1 });
+                while stack.version() != pushed {
+                    assert!(!failed(), "another thread of this test failed");
+                    core::hint::spin_loop();
+                }
+                let got = stack.pop(area, size).map(|got| got.base().addr().get());
+                assert_eq!(got, Some(m), "the pop took the magazine just pushed");
+            }
+            gate.pass();
+            if me == 0 {
+                let left = stack.pop(area, size).map(|got| got.base().addr().get());
+                assert_eq!(
+                    left,
+                    under.then_some(n),
+                    "a pop read a link other than its pusher's"
+                );
+            }
+            gate.pass();
+            version = version.wrapping_add(if under { 4 } else { 2 });
+        }
+    });
+}
+
+#[test]
+fn a_pop_reads_the_link_its_top_magazines_pusher_wrote_quickly() {
+    a_pop_reads_the_link_its_top_magazines_pusher_wrote(QUICK);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_pop_reads_the_link_its_top_magazines_pusher_wrote_fully() {
+    a_pop_reads_the_link_its_top_magazines_pusher_wrote(FULL);
 }
 
 /// A push onto an empty stack sets the class's bit after its compare-and-swap, and a look that

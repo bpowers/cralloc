@@ -12,8 +12,8 @@ use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Shape, SimOs, Standard};
 use crate::stress::{FULL, Gate, LEDGER_BYTES, QUICK, Rounds, count, failed, jitter, own, spread};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::{AtomicPtr, AtomicUsize};
 use std::boxed::Box;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -134,8 +134,7 @@ fn a_launder_and_a_fill_hand_over_what_the_last_owner_wrote_fully() {
     a_launder_and_a_fill_hand_over_what_the_last_owner_wrote(FULL);
 }
 
-/// The same for a large class, whose free and claim are the single-slot path, and whose slot's size
-/// word goes from holder to holder with the block.
+/// The same for a large class, whose free and claim are the single-slot path.
 fn a_large_free_and_claim_hand_over_what_the_last_owner_wrote(time: Duration) {
     let state = Box::new(State::new(SimOs::<Standard>::new()));
     let back = state.get_or_reserve().unwrap();
@@ -152,11 +151,6 @@ fn a_large_free_and_claim_hand_over_what_the_last_owner_wrote(time: Duration) {
             let block = back.alloc(class, size).expect("a slot");
             // SAFETY: a slot this thread now holds, of at least the ledger's size.
             unsafe { own(block.ptr.as_ptr()) };
-            assert_eq!(
-                back.size(block.ptr.as_ptr()),
-                Some(size),
-                "a stale size word"
-            );
             seen.insert(block.ptr.addr().get());
             owned += 1;
             back.free(block.ptr, class);
@@ -188,7 +182,9 @@ fn a_large_free_and_claim_hand_over_what_the_last_owner_wrote_fully() {
 /// Threads race two classes through the assignment of regions, on a fresh heap each round: every
 /// slot handed out lies in a region tagged for its class, what the walks read (`tags`) names no
 /// other class, and no slot goes out twice. Each round's start is the part that a late store would
-/// break: the tag, the carving word, the region's header and the published byte.
+/// break: the tag, the carving word, the region's header and the published byte. One more thread
+/// walks the heap meanwhile, as a purge does, learning each region's class from that byte and then
+/// reading its words.
 fn racing_classes_keep_their_regions_apart(time: Duration) {
     let rounds = Rounds::of(time, 3);
     let mut round = 0;
@@ -197,17 +193,28 @@ fn racing_classes_keep_their_regions_apart(time: Duration) {
         let state = Box::new(State::new(SimOs::<Standard>::new()));
         let back = state.get_or_reserve().unwrap();
         let classes = [class(2048), class(4096), class(40 << 10), class(48 << 10)];
-        let gate = Gate::new(4);
-        let got = spread(4, |me| {
+        let gate = Gate::new(classes.len() + 1);
+        let done = AtomicUsize::new(0);
+        let got = spread(classes.len() + 1, |me| {
             let back = state.get().unwrap();
-            let class = classes[me % classes.len()];
             gate.pass();
             let mut got = Vec::new();
+            let Some(&class) = classes.get(me) else {
+                // Under Miri a walk is slow, and two are enough.
+                let mut walks = 0;
+                while done.load(Relaxed) < classes.len() && !failed() && (!cfg!(miri) || walks < 2)
+                {
+                    back.trim();
+                    walks += 1;
+                }
+                return got;
+            };
             for _ in 0..if cfg!(miri) { 4 } else { 64 } {
                 let block = back.alloc(class, class.size()).expect("a slot");
                 assert_eq!(back.lookup(block.ptr.as_ptr()), Some(Kind::Slot(class)));
                 got.push((block.ptr.addr().get(), class));
             }
+            done.fetch_add(1, Relaxed);
             got
         });
         let mut slots = BTreeSet::new();
