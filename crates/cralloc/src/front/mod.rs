@@ -204,8 +204,6 @@ const _: () = {
     assert!(SHIFT_DISP == spec::SHIFT_DISP && BASE_DISP == spec::BASE_DISP);
     // On aarch64 a routine forms `SLABS` from its page alone.
     assert!(align_of::<Front>() >= 4096);
-    // On aarch64 a routine forms `SLABS` from its page alone.
-    assert!(align_of::<Front>() >= 4096);
     // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
     assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
     assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
