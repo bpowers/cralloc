@@ -407,6 +407,44 @@ on_every_kernel!(
     the_pages_a_stagger_passes_over_stay_clean
 );
 
+/// A block at its slot's start may write the pages its slot's stagger would pass over, so growing
+/// back over them clears their clean bits, though a shrink set them after its claim cleared them.
+/// Left set, its free would not charge pages that hold data, and a purge in pieces could take the
+/// slot for zero with them still there.
+fn a_block_at_its_slots_start_grows_back_over_clean_pages<S: Shape>() {
+    if !room_for::<S>() {
+        return;
+    }
+    let state = state::<S>();
+    let back = state.get_or_reserve().unwrap();
+    let page = S::GEOMETRY.page_size();
+    let class = large(256 * page);
+    // Slots 0 to 30 stay held, so that slot 31, 31 pages of stagger, is the one used.
+    let held: Vec<_> = (0..31)
+        .map(|_| back.alloc_staggered(class, KIB).unwrap().ptr)
+        .collect();
+    // Aligned past a line, so at the slot's start.
+    let block = back.alloc(class, 225 * page).unwrap().ptr;
+    assert_eq!(place_of(&back, class, block), (31, 0));
+    // SAFETY: the test holds the block and uses none of it during the calls.
+    unsafe {
+        back.resize_in_place(block, 8 * page);
+        back.resize_in_place(block, 16 * page);
+    }
+    paint(block.as_ptr(), 16 * page, 7);
+    let base = back.retained_large();
+    back.free_by_address(block);
+    // From the slot's start to the extent, which counts from the stagger, and what the shrink's
+    // tail never reached.
+    assert_eq!(back.retained_large() - base, (48 + 31) * page);
+    drop(held);
+}
+
+on_every_kernel!(
+    a_block_growing_back,
+    a_block_at_its_slots_start_grows_back_over_clean_pages
+);
+
 /// A block that outgrows a staggered slot and is not kept returns the whole slot, from its start,
 /// so that the slot can say it reads as zero: an earlier tenant at the slot's start may have
 /// written the pages the block's stagger passed over.
