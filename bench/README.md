@@ -135,7 +135,7 @@ cannot be rebuilt under a session.
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
 | `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
 | `standings/` | What a standings session runs and reports with: session and queue scripts, placement-pad builds, summarizers. See `standings/README.md`. |
-| `tools/` | Small standalone helpers, each explained in its header: `acct.py` (every resident page by structure), `thp-off.py`, `largesum.py` and `doublesum.py` (tables of `servers-large` and `servers-doubling` runs), and `cc-lld`, the linker every benchmark uses on aarch64 (`.cargo/config.toml` here says why). |
+| `tools/` | Small standalone helpers, each explained in its header: `acct.py` (every resident page by structure), `thp-off.py`, `largesum.py` and `doublesum.py` (tables of `servers-large` and `servers-doubling` runs), `stepcount.c` and `stepsum.py` (exact instruction counts by single-stepping a thread, on aarch64), and `cc-lld`, the linker every benchmark uses on aarch64 (`.cargo/config.toml` here says why). |
 | `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |
 
 ## Adding an allocator

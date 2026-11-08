@@ -440,10 +440,10 @@ where stated. `largepair` with `sizes=`.*
 | Chores of the one call in sixteen that beats | 67 | 71 |
 | The job's own loop | 35 | 35 |
 
-*Single-stepped with ptrace, the thread's `rseq_cs` cleared at each stop so that no sequence aborts. A
-stepped thread meets the clock's chores far more often, so that row is what the hardware counter's total
-leaves. Sampling on instructions misattributes by up to three times at a function's level on this core:
-`slot_in` read 6.3% for 2.1%.*
+*Single-stepped with ptrace, the thread's `rseq_cs` cleared at each stop so that no sequence aborts
+([measuring.md](measuring.md), "Exact instruction counts on aarch64"). A stepped thread meets the clock's
+chores far more often, so that row is what the hardware counter's total leaves. Sampling on instructions
+misattributes by up to three times at a function's level on this core: `slot_in` read 6.3% for 2.1%.*
 
 Of what is left the clean words take 279 and the walk up the summary levels 120. The floor for this
 design is about 300.
