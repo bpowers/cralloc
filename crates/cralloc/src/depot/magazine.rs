@@ -26,7 +26,8 @@ use crate::space::Space;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use core::sync::atomic::fence;
 
 /// Bytes of the magazine area committed at a time, beyond what a new magazine needs, so that
 /// most magazines are made without a system call.
@@ -142,12 +143,9 @@ impl Magazine<'_> {
         self.slot(0)
     }
 
-    /// The level and depth recorded in the last slot. Relaxed, here and in [`Magazine::set_record`]:
-    /// whoever reads a record of a magazine it holds came to it by the stack's release and acquire,
-    /// the drain's fence or the CPU's context switch, which order the record with the rest of the
-    /// magazine. A read of a spare stack's top that it does not hold is only for a hint of depth.
+    /// The level and depth recorded in the last slot.
     pub(crate) fn record(&self) -> Record {
-        let word = self.slot(self.size().slots() - 1).load(Relaxed).addr() as u64;
+        let word = self.slot(self.size().slots() - 1).load(Acquire).addr() as u64;
         Record {
             level: ((word as u32) as usize).min(self.size().capacity()),
             depth: (word >> 32) as u32,
@@ -160,7 +158,7 @@ impl Magazine<'_> {
         let level = record.level.min(self.size().capacity());
         let word = (record.depth as u64) << 32 | level as u64;
         self.slot(self.size().slots() - 1)
-            .store(ptr::without_provenance_mut(word as usize), Relaxed);
+            .store(ptr::without_provenance_mut(word as usize), Release);
     }
 
     /// The level recorded in the last slot.
@@ -282,17 +280,29 @@ impl<'a, O: Os> Area<'a, O> {
     /// thread: a thread that has moved reads another CPU's word, which a routine wrote with a
     /// plain store. Whoever installed that magazine read a mark that admits it, with acquire, before
     /// its store, so a reader that loads the word with acquire and then this mark finds one at
-    /// least as high and does not abort. Rust's model does not cover a routine's store; Arm's rules
-    /// and x86-64's total store order both give this (`docs/research/memory-ordering.md`).
+    /// least as high. Rust's model does not cover a routine's store; Arm's rules and x86-64's total
+    /// store order both give this (`docs/research/memory-ordering.md`). A refusal, which most
+    /// callers turn into an abort, comes only after a second look behind a full fence, which needs
+    /// no order on the read of the word at all.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.growth.committed.load(Acquire);
-        let fits = admits(offset, size, Self::start(), committed);
+        let fits = admits(offset, size, Self::start(), committed)
+            || self.admitted_on_a_second_look(offset, size);
         // A number must fit the depot's 32 bits (`Area::end` keeps the area within them).
         MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
         fits.then(|| Magazine {
             word: self.at(offset).map_addr(|base| base | size.ordinal()),
             area: PhantomData,
         })
+    }
+
+    /// Whether the committed mark admits this after all, read behind a full fence, as it does not
+    /// on any path that runs but for a slab word or link that really names nothing.
+    #[cold]
+    fn admitted_on_a_second_look(&self, offset: usize, size: MagazineSize) -> bool {
+        fence(SeqCst);
+        let committed = self.depot.growth.committed.load(Acquire);
+        admits(offset, size, Self::start(), committed)
     }
 
     /// The number of a magazine of this area: its offset in units, which `magazine_at` checked
@@ -346,7 +356,8 @@ impl<'a, O: Os> Area<'a, O> {
             }
             // Racing committers may cover the same pages; making them writable twice is
             // harmless, and the mark only moves up, after the memory under it is writable.
-            self.depot.growth.committed.fetch_max(target, AcqRel);
+            // Sequentially consistent, for the fence of a second look (`Area::magazine_at`).
+            self.depot.growth.committed.fetch_max(target, SeqCst);
         }
     }
 

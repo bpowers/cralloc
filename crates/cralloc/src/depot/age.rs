@@ -74,7 +74,7 @@ use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
 use core::ptr;
-use core::sync::atomic::Ordering::{Acquire, Relaxed};
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// Which magazine a slab had loaded for a class, and since when: the magazine's number in the
 /// low 32 bits and the clock, in units of 2^[`TICK_SHIFT`] ticks, in the high 32. Zero is no
@@ -396,12 +396,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 self.os()
                     .abort("a spare stack names something that is not a magazine");
             };
-            // The link must be read before the depot or the list overwrites it. This thread holds
-            // the chain now, and has what wrote it by the CPU's context switches.
-            next = magazine.link().load(Relaxed).addr();
+            // The link must be read before the depot or the list overwrites it.
+            next = magazine.link().load(Acquire).addr();
             if seen < keep {
                 seen += 1;
-                magazine.link().store(kept, Relaxed);
+                magazine.link().store(kept, Release);
                 kept = magazine.base().as_ptr();
                 continue;
             }
@@ -421,7 +420,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 self.os()
                     .abort("a spare stack names something that is not a magazine");
             };
-            back = magazine.link().load(Relaxed).addr();
+            back = magazine.link().load(Acquire).addr();
             magazine.set_level(magazine.level());
             if let Err(magazine) = self.spare_push(class, Spare::Full, magazine, &mut stale) {
                 self.to_depot(class, magazine);

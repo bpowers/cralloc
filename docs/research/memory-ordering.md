@@ -2,11 +2,12 @@
 
 No route a block takes from a free to the next allocation leaned on total store order. Every one
 carries a release and an acquire, or, where a routine's plain store is one end, a barrier the kernel
-promises. The words several threads race on are sequentially consistent on both sides, so the TLA+
-models and the schedule explorers, which know only sequential consistency, say something true of
-them. What x86-64 hid was smaller: one published pair a routine reads in any order, one word of a
-store-then-load pattern left out of the sequentially consistent order, a kernel path with no barrier
-in it, and above all that our own tests could not have shown a mistake.
+gives, which we trust and its manual does not promise. The TLA+ models know only sequential
+consistency, and "What the models rest on" says for each why it is still true of the code: for some
+because the words are sequentially consistent, for others only by an argument here. What x86-64 hid
+was smaller: one published pair a routine reads in any order, one word of a store-then-load pattern
+left out of the sequentially consistent order, a kernel path with no barrier in it, and above all
+that our own tests could not have shown a mistake.
 
 Arguments here rest on Rust's memory model and on the Arm architecture's, not on what one CPU does:
 a CPU that never reorders some pair says nothing about another. Two rules rest on Arm's model and
@@ -69,6 +70,17 @@ the kernel's read of that count (no instruction on x86-64).
 
 The form without a CPU, which the background thread uses, is the same for every CPU.
 
+**A barrier the manual does not promise.** Of this command `membarrier(2)` promises only that running
+sequences have restarted, where the plain `PRIVATE_EXPEDITED` command promises "a memory barrier on
+each running thread". The barrier is what the source does at v7.2, and the comment on the one in
+`ipi_rseq` says it could "probably" be optimized away on most architectures. The rest would still
+order what we use: `guard(mb)` on the caller, the handler's `csd_unlock`, a release that keeps the
+thread's earlier stores behind it, and the fully ordered `llist_del_all` that takes the call
+(`kernel/smp.c:529`), before anything the thread does next. The drain cannot use the plain command,
+since `MEMBARRIER_CMD_FLAG_CPU` belongs to the rseq form, and hardening parking alone would leave the
+dependence where it is. So it is a trusted fact, and the `kernel_fence` tests watch it on each kernel
+they run on.
+
 ## From a free to the next allocation
 
 Each route keeps the block's bytes and the magazine's contents in one happens-before chain.
@@ -127,8 +139,10 @@ acquire before its store, and that read's source is an atomic of some thread: `a
 write before a later acquire that reads it, and `obs` a store before a read of it on another CPU. So
 mark's write, installer's read, installer's store, reader's acquire load of the word, reader's
 acquire load of the mark are in order, and the reader's mark is at least the one the installer read.
-On x86-64 total store order gives the same. The acquire on those slab-word reads is what this needs
-(checked below; without it the outcome is allowed).
+On x86-64 total store order gives the same. Before a refusal can become an abort the reader looks at
+the mark again behind a full fence, on the failure path only, and that fence orders the word's read
+before the second look with no help from the read's own order (checked below). In Rust's model, which
+does not know the routine's store, no order proves this; it is an argument from the hardware.
 
 **A block passed with no order.** C asks a `free` to be ordered after the block's last use, not after
 its allocation, so a program may pass a block it never touched with a relaxed store. Everything the
@@ -152,7 +166,7 @@ compare-and-swap has only its failure ordering, and it is only the read of what 
 |---|---|---|
 | Summary bits | A free's OR of the word and read of the bit; a clear's AND of the bit and re-read of the word | `Word`: every operation `SeqCst` |
 | A kept bit, a batched clear, a look before an OR | As above | `Word` |
-| Hint of which stacks hold magazines | The compare-and-swap of a push onto an empty stack and its read of the bit; a look's AND and re-read of the head | `SeqCst`. Other pushes and pops are not: a re-read that misses a pop sees a stack holding one too long, the safe way, and one that finds an empty stack misses first a push onto that empty stack, which sets the bit |
+| Hint of which stacks hold magazines | A push's compare-and-swap and read of the bit; a look's AND and re-read of the head | `SeqCst`. A pop's write is `AcqRel`, which can only make a look see a stack as holding one too long, the safe way |
 | Debts' bits (`shed.rs`), tail marks | A debt or mark and read of the bit; a clear and re-read | `SeqCst` |
 | Background thread's sleep | The thread's mark and its reads of the work; a waker's write of the work and read of the word | `SeqCst`, the pass's start now included. A lost wake costs half a second |
 | Background thread's parking | A slow path's plain store into a slab and its load of the word; the thread's store of `PARKED`, the fence and its second look | The fence of every CPU. The barrier falls somewhere in the slow path's instructions, and everything of it stays on its side, so the thread sees the store or the slow path sees `PARKED` |
@@ -161,10 +175,18 @@ compare-and-swap has only its failure ordering, and it is only the read of what 
 The last two are why no store of a routine needs to be atomic with its load, and why a slow path
 needs no fence of its own.
 
-Every operation in `back::word::Atomic` being `SeqCst` is also why the TLA+ models and the explorers
-apply to those words as they stand: an execution of only sequentially consistent operations on
-them is an interleaving. The exceptions are `Word::store` (a holder's size word; a loser's header) and
-the tag bytes, which have no such pattern.
+## What the models rest on
+
+A model's step is atomic and sequentially consistent, and so is what the schedule explorers try. That
+is true of the code only as this table says. Only the first row is true of the steps as they stand.
+
+| Models | Why their steps hold of the code |
+|---|---|
+| `Summary`, `SummaryLookUp`, `Purge`, `Tail`, `TailStale` | Bitmap, debt and tail words are `back::word::Atomic`, every operation sequentially consistent, and an execution of only those is an interleaving. The exceptions are `Word::store` (a holder's size word; a loser's header), which no protocol races on |
+| `Depot` | The head is one word, changed only by read-modify-write, so its changes have one order. A read of it with acquire that is out of date is that read made earlier. A link read after it is its pusher's or, if the magazine has been popped since, a later one, which the model has as a stale link and the version turns away. Pushes are sequentially consistent for the hint |
+| `Rseq`, `Exchange`, `Drain` | A routine's commit is a plain store, which no thread on another CPU has any order against. The steps hold because of the kernel's barriers, a context switch and the fence, above |
+| `Assign`, `Startup` | The table's and the cell's compare-and-swaps release and acquire, and the published byte and carving word as under "Publication": the chains there, argued, not the model's order |
+| `Fork` | A child's cut is a prefix of each lost thread's program order: Arm's rule for `tlbi` and `dsb`, under "The fork" |
 
 ## Hints
 
@@ -249,19 +271,23 @@ a pass on them is still no proof.
   looking for.
 - **The explorers' atomics.** They all behave as `SeqCst` in one interleaving whatever they say, so
   an explorer cannot tell a right ordering from a wrong one.
+- **A cheaper order that was not.** We relaxed the depot stacks by this argument: a relaxed link and
+  record, a pop that only acquires, and a push that only releases unless the stack was empty. It was
+  correct. Measured it saved 0.66 ns a magazine (pop and push 13.91 ns against 14.57), and a magazine
+  is many objects. A compare-and-swap with release and an acquire failure compiles to `casal` anyway,
+  so the `casl` it was reasoned from never ran. And the head stopped being sequentially consistent,
+  so `Depot.tla` needed an argument to apply. We put the stronger orders back: the prices in
+  [firestorm.md](firestorm.md) are for choosing among orders that keep the argument simple.
 
 ## What the orders cost
 
 On Firestorm the orderings have different prices, where on x86-64 they are one
-([firestorm.md](firestorm.md), "Atomics and barriers"), so a slow path asks for no more than its
-argument needs. The depot's stacks use `casa` to pop and `casl` to push, 26 cycles against 42, and a
-relaxed link and record, since a reload through `stlr` or `ldapr` of a word just stored is 19 cycles
-against 6. A push onto an empty stack keeps `casal`, for the hint. `Word` stays sequentially
-consistent everywhere: `ldsetal` costs what `ldsetl` does, `casal` a cycle more than the `casa` a
-claim would need, and `ldar` what `ldapr` does, and in return the models apply to those words as they
-stand. The acquire on a read of a slab word with no protection can pay the 19 cycles, once a slow
-path; a relaxed read, with a second look at the mark behind a fence before an abort, would be
-correct and would save it, and is not worth the code until a measurement says so.
+([firestorm.md](firestorm.md), "Atomics and barriers"). On a slow path that has not been worth an
+argument that is harder to check (see "A cheaper order that was not"). `Word` stays sequentially
+consistent everywhere: `ldsetal` costs what `ldsetl` does, `casal` a cycle more than the `casa` a claim
+would need, and `ldar` what `ldapr` does, and in return the models apply to those words as they stand.
+The acquire on a read of a slab word with no protection can pay 19 cycles against 6 when the word was
+just stored, once a slow path.
 
 ## How it was tested
 
@@ -281,8 +307,9 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 |---|---|---|
 | Summary words, hint or sleep to release writes and relaxed reads | caught, each | not run |
 | Every bitmap word relaxed | caught, by the summary test only | not run |
-| `LinuxOs::fence` does nothing | caught in 3 s, twice of twice (`a_drain_leaves_each_thread_its_own_blocks`, "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
-| A push's release, or a pop's acquire | not caught | caught |
+| `LinuxOs::fence` does nothing | caught in 3 of 4 runs of 3 s (`a_drain_leaves_each_thread_its_own_blocks`: "a block two threads hold", or "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
+| A push's release, or all of a pop's acquires | not caught | caught |
+| A pop's first read of the head only | not caught | caught only by `a_pop_reads_the_link_its_top_magazines_pusher_wrote`, on seed 7 |
 | A free's OR with no release, or a claim with no acquire | not caught | caught |
 | Summary words, hint or sleep to acquire and release | not caught | caught |
 | A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
@@ -302,7 +329,8 @@ call left out. Both are evidence for one kernel on one CPU. The argument is abov
 **Arm's model, for the claims that rest on it**: `python3 tla/armcheck.py`, a small enumerator
 transcribed from Arm's `aarch64hwreqs.cat`, because herd7 could not be installed here. It lists every
 candidate execution. 14 published litmus tests get the catalogue's answers, which is the check on the
-transcription, and each "allowed" row shows it can see the outcome. A transcription is not herd.
+transcription, and each "allowed" row shows it can see the outcome, as do controls in the tool that
+leave out each barrier the fence's and parking's rows rest on. A transcription is not herd.
 
 | Test | Bad outcome |
 |---|---|
@@ -315,6 +343,11 @@ transcription, and each "allowed" row shows it can see the outcome. A transcript
 | Slab word: `ldumaxal`, `ldapr` of the mark, `str` of the word, against `ldapr`, `ldapr` | forbidden |
 | The same with the mark from another thread | forbidden |
 | The same with a plain `ldr` of the word | allowed |
+| A plain `ldr` of the word, `dmb`, then the mark (the second look) | forbidden |
+| Stack: `casal` push, a pop, a third thread acquires the head and reads the slot | forbidden |
+| Stack: a push with no release | allowed |
+| Stack: a pop's first read of the head with acquire, then the link | forbidden |
+| The same read relaxed: a stale link, and a compare-and-swap that succeeds | allowed |
 | Drain: plain slot and commit, `dmb`, handshake, against `swpal`, wait, read | forbidden |
 | Drain with no barrier | allowed |
 | Fence with the thread gone: stores, `dmb`, store of `rq->curr`, against `swpal`, `dmb`, its read, `dmb`, read | forbidden |
