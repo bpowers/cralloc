@@ -585,8 +585,10 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
     // After the gate and the warm-up, which want the siblings idle; it stops when the run ends.
     let spinners = (job.load.is_some() && cx.o.hold_idle).then(|| crate::serve::Spinners::start(&job.cpus));
     let idle_states = match &spinners {
-        Some(s) => format!("held out of deep idle by spinners on {}", bench_harness::Cpus(s.cpus.clone()).to_list()),
-        None => "free".to_string(),
+        Some(s) if !s.cpus.is_empty() => {
+            format!("held out of deep idle by spinners on {}", bench_harness::Cpus(s.cpus.clone()).to_list())
+        }
+        _ => "free".to_string(),
     };
     // Whether the server's CPUs may enter deep idle states, as the run starts: its tails at a
     // fixed rate depend on it (`cpuidle.rs`).
@@ -949,7 +951,7 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: 
         "thp_defrag": sys::read_trim("/sys/kernel/mm/transparent_hugepage/defrag"),
         "perf_event_paranoid": sys::read_trim("/proc/sys/kernel/perf_event_paranoid"),
         "nmi_watchdog": sys::read_trim("/proc/sys/kernel/nmi_watchdog"),
-        "l3_domains": [sys::l3_domain(crate::suite::L3A[0]), sys::l3_domain(crate::suite::L3B[0])],
+        "l3_domains": [sys::cache_domain(crate::suite::a()[0]), sys::cache_domain(crate::suite::b()[0])],
         "runner_cpus": o.runner_cpus,
         "sample_ms": o.sample_ms,
         "rollup_ms": o.rollup_ms,

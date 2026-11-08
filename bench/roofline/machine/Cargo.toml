@@ -1,0 +1,14 @@
+[package]
+name = "roofline-machine"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Stands alone: not a member of any workspace above it.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3

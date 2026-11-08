@@ -33,10 +33,15 @@ impl Cpus {
 
     /// The current thread's affinity mask.
     pub fn allowed() -> Cpus {
+        Cpus::allowed_by(0)
+    }
+
+    /// A thread's affinity mask (`pid` 0: the current thread).
+    pub fn allowed_by(pid: i32) -> Cpus {
         // SAFETY: cpu_set_t is plain data, and sched_getaffinity writes at most its size.
         unsafe {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
+            libc::sched_getaffinity(pid, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
             Cpus((0..libc::CPU_SETSIZE as usize).filter(|&c| libc::CPU_ISSET(c, &set)).collect())
         }
     }

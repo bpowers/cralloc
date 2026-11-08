@@ -1,0 +1,19 @@
+# What `tests/big_binary.rs` builds: programs too large for a branch to reach across. Outside the
+# workspace, since each has its own profile and the first is 400 MB.
+[package]
+name = "big-binary"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cralloc = { path = "../.." }
+
+# As the crate recommends, so that the routines are inlined where the program calls them.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[workspace]

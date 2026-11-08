@@ -110,20 +110,6 @@ theorem abiPreserved_of_mid {xs : List Region} (hm : Frame xs s.mem m)
   exact hm.readW (r := ⟨s.gpr .rsp, 8⟩) (Region.contains_self _ _)
     (fun x hx' => (hx x hx').symm) (by decide)
 
-/-- Two words written, in two regions. -/
-theorem frame_two (m : Mem) (a b : Addr) (v w : BitVec 64) :
-    Frame [⟨a, 8⟩, ⟨b, 8⟩] m ((m.writeW a v).writeW b w) :=
-  ((Frame.refl _ _).writeW (r := ⟨a, 8⟩) (List.mem_cons_self ..) _ (Region.contains_self _ _)).writeW
-    (r := ⟨b, 8⟩) (List.mem_cons_of_mem _ (List.mem_singleton_self _)) _ (Region.contains_self _ _)
-
-/-- Three words written, in three regions. -/
-theorem frame_three (m : Mem) (a b c : Addr) (u v w : BitVec 64) :
-    Frame [⟨a, 8⟩, ⟨b, 8⟩, ⟨c, 8⟩] m (((m.writeW a u).writeW b v).writeW c w) :=
-  (((Frame.refl _ _).writeW (r := ⟨a, 8⟩) (List.mem_cons_self ..) _ (Region.contains_self _ _)).writeW
-    (r := ⟨b, 8⟩) (List.mem_cons_of_mem _ (List.mem_cons_self ..)) _ (Region.contains_self _ _)).writeW
-    (r := ⟨c, 8⟩) (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_singleton_self _))) _
-    (Region.contains_self _ _)
-
 /-- `asm!`'s obligation on the stack pointer. -/
 theorem inline_abi (hp : Mid scratchI s m p) : inlineTarget.abiPreserved s p :=
   hp.gpr .rsp (by decide)
@@ -134,20 +120,6 @@ theorem preservedExcept_of_mid {names : List String} (hn : ∀ r ∈ rs, r.name 
   hp.gpr r fun h => hr (hn r h)
 
 end
-
-/-- The magazine a word the invariant allows names is the same in memory
-changed only in regions apart from the magazine. -/
-theorem ofWord_frame {n : Nat} {m m' : Mem} {w : BitVec 64} {W : List Region} (hn : 0 < n)
-    (hfr : Frame W m m') (hw : WordOk n w)
-    (hd : IsSlot n w → ∀ r ∈ W, Region.Disjoint ⟨magBase n w, 8 * n⟩ r) :
-    Mag.ofWord n m' w = Mag.ofWord n m w := by
-  rcases hw with h0 | hm | hs
-  · rw [ofWord_zero h0, ofWord_zero h0]
-  · rw [ofWord_marker hm, ofWord_marker hm]
-  · refine ofWord_congr fun i hi => hfr.readW (r := ⟨magBase n w + BitVec.ofNat 64 (8 * (i + 1)), 8⟩)
-      (Region.contains_self _ _) (fun r hr => (hd hs r hr).sub_left (sub_item ?_)) (by decide)
-    have := slot_lt n w hn
-    omega
 
 /-! ## A retry's precondition
 

@@ -13,12 +13,13 @@ and heavy testing.
 
 | Tool | What it establishes | What it cannot see |
 |---|---|---|
-| Lean, on the routines | every input, every interruption point, memory safety, clobbers, against the instruction and rseq models | the Rust slow paths, the kernel, the assembler |
+| Lean, on the routines | every input, every interruption point, memory safety, clobbers, against the instruction and rseq models | the Rust slow paths, the kernel, the assembler, and memory order: the model is sequential ([memory-ordering.md](memory-ordering.md), "The routines") |
 | Kani | arithmetic and packed words for every input; twins on every state of one small slab | concurrency, assembly, nested retry loops |
 | TLA+ with TLC | every interleaving of a protocol's model, a few threads and objects | the code, weak memory, flaws needing four or more views of a word |
 | Schedule explorers | the production Rust under every schedule within a bound, with forks, in scenarios that follow the models, on small heaps | weak memory, anything past the preemption bound |
 | Model tester and fuzzers | what a program can see, through all three interfaces | interleavings it does not happen to hit |
 | Miri | undefined behaviour and data races on a simulated heap, under weak-memory emulation, one seed a test | the real routines and kernel; tests over its time limit; a weak-memory flaw its one seed misses |
+| Ordering tests on real threads (`stress.rs`) | that the memory orders the protocols use hold on this CPU, and weakening them shows | a reordering this CPU never makes, which says nothing of another ([memory-ordering.md](memory-ordering.md)) |
 | Soak (a stress harness that checks every block), breakpoint sweep, real programs | the shipped library on the real kernel, aborted at every instruction | how much of the state space they reached |
 | Safety ledger | a written proof of each `unsafe` block, adversarially reviewed | anything a reviewer misses; a review lags the code |
 
@@ -90,9 +91,9 @@ We forked the Lean framework of verified-garbage, a project proving assembly cry
 - **A call and return cost 4 cycles whatever the body,** so naked functions alone would have cost
   8.0 cycles a pair against about 5 inlined. Inline `asm!` needed a proof obligation about declared
   clobbers in place of a calling convention.
-- **Keep cross-thread atomics out of the proved routines.** A model of x86-TSO with store buffers is
-  a research project. The routines hold no locked instruction. Cross-thread paths are Rust atomics,
-  checked by interleaving.
+- **Keep cross-thread atomics out of the proved routines.** A model of a CPU's memory order with
+  store buffers is a research project. The routines hold no atomic read-modify-write. Cross-thread
+  paths are Rust atomics, checked by interleaving and argued for weak memory.
 - **State the shared invariant once.** The layout constants the proofs assume are emitted with the
   routines, and a test holds the Rust to them.
 - **Never set a resource limit to make a proof pass.** A proof that hits one is too slow, so make it
@@ -155,9 +156,11 @@ not even for tests, so we wrote two small checkers in the style of CHESS (`back/
   preemption lower than `--all` does.
 - Scenarios follow the TLA+ models and check the same invariants, with a census of every magazine
   and object after each execution (`depot/interleave.rs`, `back/models.rs`).
-- They explore sequentially consistent interleavings only. Weaker orders are argued from the
-  orderings the code uses and from x86-64 being TSO. Miri's weak-memory emulation checks them only
-  on the one seed each test gets, and the one such flaw it found showed on 5 of 11 seeds.
+- They explore sequentially consistent interleavings only, whatever order an atomic names, so they
+  cannot tell a right ordering from a wrong one. The words with store-then-load patterns are
+  sequentially consistent, which makes those interleavings real for them. The rest is argued in
+  [memory-ordering.md](memory-ordering.md). Miri's weak-memory emulation checks it on the one seed
+  each test gets, and the one such flaw it found showed on 5 of 11 seeds.
 
 ## Twins
 
@@ -251,8 +254,8 @@ memory, where native needs holes, partial failure and concurrent callers.
 - **A run with `rseq_debug=1` has not been done.** The kernel's stricter validation would check
   every descriptor. It needs a boot parameter or root.
 - **Weak memory is argued, and checked thinly.** `scripts/miri` runs each test once, on one seed,
-  and many-seeds mode was part of the first plan. No tool here explores x86-TSO over the production
-  code.
+  unless `MIRIFLAGS` asks for more, and no tool here explores any weak order over the production
+  code ([memory-ordering.md](memory-ordering.md), "What is still unproved").
 - **Reach is unknown.** Coverage is not measured or gated; `cargo-llvm-cov` is installed and unused.
 - **Whether `LD_PRELOAD` reaches rustc's bundled jemalloc** was never settled, so the cargo build
   among the real programs may test less than it seems to.

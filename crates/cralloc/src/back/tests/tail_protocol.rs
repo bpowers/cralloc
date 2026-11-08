@@ -85,6 +85,9 @@ impl Host for Rec {
     fn layout(&self) -> &Layout {
         self.host.layout()
     }
+    fn geometry(&self) -> crate::space::Geometry {
+        self.host.geometry()
+    }
     fn region(&self, index: usize) -> Option<RegionId> {
         self.host.region(index)
     }

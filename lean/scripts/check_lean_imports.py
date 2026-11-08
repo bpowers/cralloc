@@ -9,8 +9,9 @@ base small and separate from proofs. Exits non-zero on violations.
   * Spec/  imports only TCB/ and Spec/.
   * Impl/  imports only TCB/, Spec/ and Impl/: never proofs.
   * No file under Cralloc/ declares an initializer (`initialize`,
-    `builtin_initialize`, `@[init]`): the emitter imports the registration
-    files and must not run code of theirs at import (Emit.lean).
+    `builtin_initialize`, `@[init]`, `attribute [init]`): the emitter imports
+    the registration files to run them, and must not run code of theirs then
+    (Emit.lean, whose audit finds what this scan of the text does not).
   * A module of a target (one with a directory of TCB/, e.g. `X86_64`, as a
     component of its path) imports no module of another target. What more
     than one target uses goes in a target-independent module.
@@ -28,7 +29,8 @@ LIB = LEAN / "Cralloc"
 IMPORT = r"\s*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?"
 
 # The syntax of an initializer, outside a comment's first word.
-INIT = re.compile(r"(^|[^\w.`])(builtin_initialize|initialize)\b|@\[(builtin_)?init\b")
+INIT = re.compile(r"(^|[^\w.`])(builtin_initialize|initialize)\b|@\[(builtin_)?init\b"
+                  r"|attribute\s*\[(builtin_)?init\b")
 
 ALLOWED_IMPORTS = {
     "TCB": ("Lean", "Init", "Cralloc.TCB."),

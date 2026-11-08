@@ -2,6 +2,7 @@ module
 
 public import Cralloc.Impl.Slab.X86_64
 public import Cralloc.Proof.Slab.X86_64.Facts
+public import Cralloc.Proof.Slab.Words
 public import Cralloc.Proof.Framework.Body
 public import Cralloc.Proof.Framework.X86_64.Access
 public import Cralloc.Proof.Framework.X86_64.RegUpd
@@ -86,40 +87,9 @@ theorem exec_mov32_imm (d : Reg) (v : BitVec 32) : exec (.mov32 d (.imm v)) σ =
 
 end Steps
 
-/-! ## Words in memory -/
-
-theorem toNat_read8 (m : Mem) (a : Addr) : (m.read a 8).toNat = (m.readW a 64).toNat := by
-  simp only [Mem.readW, BitVec.toNat_setWidth]
-  exact (Nat.mod_eq_of_lt (m.read a 8).isLt).symm
-
-theorem toNat_read4 (m : Mem) (a : Addr) : (m.read a 4).toNat = (m.readW a 32).toNat := by
-  simp only [Mem.readW, BitVec.toNat_setWidth]
-  exact (Nat.mod_eq_of_lt (m.read a 4).isLt).symm
-
-/-- A word read after a write to a region it is apart from. -/
-theorem readW_writeW_disj {m : Mem} {a b : Addr} {w : Nat} {v : BitVec 64}
-    (h : Region.Disjoint ⟨a, w / 8⟩ ⟨b, 8⟩) (hw : w / 8 < 2 ^ 64) :
-    (m.writeW b v).readW a w = m.readW a w :=
-  Mem.readW_writeW_sep (h.sep (Region.contains_self _ _) (Region.contains_self _ _)) hw
-
-theorem readW64_writeW_disj {m : Mem} {a b : Addr} {v : BitVec 64}
-    (h : Region.Disjoint ⟨a, 8⟩ ⟨b, 8⟩) : (m.writeW b v).readW a 64 = m.readW a 64 :=
-  readW_writeW_disj h (by decide)
-
-theorem readW32_writeW_disj {m : Mem} {a b : Addr} {v : BitVec 64}
-    (h : Region.Disjoint ⟨a, 4⟩ ⟨b, 8⟩) : (m.writeW b v).readW a 32 = m.readW a 32 :=
-  readW_writeW_disj h (by decide)
-
-/-- The bytes of an access within a region are in it. -/
-theorem sub_of_contains {r : Region} {a : Addr} {n : Nat} (h : r.Contains a n) :
-    Region.Sub ⟨a, n⟩ r := fun x hx => h.byte (by simp only [Region.Contains] at hx; omega)
-
-theorem read_writeW_self64 (m : Mem) (a : Addr) (v : BitVec 64) :
-    ((m.writeW a v).read a 8).toNat = v.toNat := by
-  rw [toNat_read8, Mem.readW_writeW_self64]
-
-/-- The 8-byte region at `a` holds `a`'s word. -/
-theorem contains8 (a : Addr) : (⟨a, 8⟩ : Region).Contains a 8 := Region.contains_self a 8
+export VG.Proof.Slab (toNat_read8 toNat_read4 readW_writeW_disj readW64_writeW_disj
+  readW32_writeW_disj sub_of_contains read_writeW_self64 contains8 frame_two frame_three
+  ofWord_frame)
 
 /-! ## The arm -/
 

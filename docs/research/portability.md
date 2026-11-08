@@ -167,6 +167,27 @@ with `pthread_setattr_default_np`, gives the thread the same few KiB the program
   child forked while a parent thread was inside it, as during a backtrace, waited for ever in the
   allocator's start (`crates/cralloc/tests/fork_loader_lock.rs`).
 
+## aarch64
+
+The crate runs here dynamically linked and as a static musl executable, and four things differ from
+x86-64.
+
+- **Static glibc has not run.** The host has no `libc.a`.
+- **The `executable` feature changes nothing.** A routine that reaches `__rseq_offset` with `adrp`
+  needs the linker to copy the variable into the executable, and GNU ld refuses that in a
+  position-independent one (`R_AARCH64_ADR_PREL_PG_HI21 ... may bind externally`). So every routine
+  reads through its word.
+- **On musl the area's offset is in the instructions.** No assembler for this architecture writes a
+  thread-pointer offset as data (LLVM's refuses `.xword sym@tprel`), so there is no word. The routines
+  use `:tprel_hi12:` and `:tprel_lo12_nc:`, which also saves them a load.
+- **A build for the generic CPU refers to more.** Its atomics are outlined, so without default
+  features it refers to `__aarch64_cas8_acq_rel` and its kin as well as `__errno_location`, `memcpy`,
+  `memset` and `__rseq_offset`. They come from the compiler's own runtime, not the C library. With
+  `-Ctarget-cpu=native` the list is the four alone.
+
+Large programs: a 400 MB binary links and runs, the linker reaching its slow paths through veneers
+(`crates/cralloc/tests/big_binary.rs`). All on 2026-11-07, commit 9849f76.
+
 ## Miri
 
 Miri runs neither assembly nor system calls. Our tests run on a simulated heap with the twins, under

@@ -44,7 +44,7 @@ pub(crate) const SIBLINGS: usize = 64;
 /// objects, which packs whole objects into lines, so `LINE / size` slots apart are on
 /// different lines. Any other size has objects that straddle a boundary, and two of them are
 /// sure to share no line, wherever they start, only with a line's bytes between them:
-/// `(stride - 1) * size >= LINE`. 24 bytes: 4; 40, 48 and 56: 3.
+/// `(stride - 1) * size >= LINE`. On lines of 64 bytes, 24 bytes: 4; 40, 48 and 56: 3.
 pub(crate) const fn stride(size: usize) -> Option<usize> {
     if size == 0 || size >= LINE {
         None
@@ -103,7 +103,7 @@ impl Strided {
 /// strides cannot be kept apart, and are left alone.
 ///
 /// In place, one cycle of the permutation at a time, each object moved once: the slow path runs
-/// on whatever stack the program called it from. A bit per position, 64 bytes, says which
+/// on whatever stack the program called it from. A bit per position, a line's worth, says which
 /// already hold their own object.
 #[cold]
 #[inline(never)]
@@ -154,8 +154,7 @@ mod tests {
     fn the_stride_is_the_fewest_slots_that_never_share_a_line() {
         let strides: Vec<(usize, Option<usize>)> =
             (1..=8).map(|n| (8 * n, stride(8 * n))).collect();
-        assert_eq!(
-            strides,
+        let expected = if LINE == 64 {
             [
                 (8, Some(8)),
                 (16, Some(4)),
@@ -164,9 +163,21 @@ mod tests {
                 (40, Some(3)),
                 (48, Some(3)),
                 (56, Some(3)),
-                (64, None)
+                (64, None),
             ]
-        );
+        } else {
+            [
+                (8, Some(16)),
+                (16, Some(8)),
+                (24, Some(7)),
+                (32, Some(4)),
+                (40, Some(5)),
+                (48, Some(4)),
+                (56, Some(4)),
+                (64, Some(2)),
+            ]
+        };
+        assert_eq!(strides, expected);
         // Objects `apart` slots apart share a line for some object, the first starting at any
         // multiple of `align` within a line.
         let shares = |size: usize, apart: usize, align: usize| {
@@ -195,9 +206,15 @@ mod tests {
                 assert!(shares(size, s - 1, 1), "{size}: {s} is not the fewest");
             }
             assert!(SIBLINGS * s <= MOST, "{size}: {s}");
+            // On long lines the smallest class's siblings may be more than a magazine holds, and
+            // `spread` then reorders the whole of it. Enough of them still fit to keep apart.
             assert!(
-                class.magazine().capacity() > SIBLINGS * s,
+                class.magazine().capacity() > SIBLINGS * s.min(8) || LINE > 64,
                 "{size}: a full magazine holds the siblings and more"
+            );
+            assert!(
+                class.magazine().capacity() >= 2 * s,
+                "{size}: a full magazine holds two strides, the fewest kept apart"
             );
         }
     }
@@ -232,7 +249,7 @@ mod tests {
         } else {
             (0..=most).collect()
         };
-        for s in 2..=8 {
+        for s in 2..=LINE / 8 {
             for &len in &lens {
                 let objects = magazine(len);
                 spread(&objects, s);
@@ -257,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_stride_too_small_to_separate_or_too_large_to_hold_is_left_alone() {
-        for (len, s) in [(40, 1), (40, 0), (2000, 9)] {
+        for (len, s) in [(40, 1), (40, 0), (2000, LINE / 8 + 1)] {
             let objects = magazine(len);
             spread(&objects, s);
             assert_eq!(handed_out(&objects), (0..len).collect::<Vec<_>>());

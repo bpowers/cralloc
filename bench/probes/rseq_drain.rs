@@ -33,14 +33,18 @@ extern "C" {
     fn syscall(n: i64, ...) -> i64;
 }
 
+#[cfg(target_arch = "x86_64")]
 const SYS_MEMBARRIER: i64 = 324;
+#[cfg(target_arch = "aarch64")]
+const SYS_MEMBARRIER: i64 = 283;
 const MEMBARRIER_CMD_QUERY: i64 = 0;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: i64 = 1 << 7;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: i64 = 1 << 8;
 const MAX_CID: usize = 8192;
 const MARKER: u64 = 1;
 
-#[repr(C, align(64))]
+// A line on either architecture.
+#[repr(C, align(128))]
 struct Slot(AtomicU64);
 static SLOTS: [Slot; MAX_CID] = [const { Slot(AtomicU64::new(0)) }; MAX_CID];
 static COMMITS: AtomicU64 = AtomicU64::new(0);
@@ -50,7 +54,14 @@ static MAX_CID_SEEN: AtomicU64 = AtomicU64::new(0);
 
 fn rseq_area() -> *mut u8 {
     let tp: usize;
-    unsafe { asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly)) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly))
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags))
+    };
     (tp as isize + unsafe { __rseq_offset }) as *mut u8
 }
 
@@ -60,6 +71,62 @@ fn membarrier(cmd: i64) -> i64 {
 
 /// Add 2 to the word of the current cid unless it holds the marker.
 /// Returns (0 committed | 1 marker | 2 aborted | 4 cid out of range, cid).
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+unsafe fn cs_add(rseq: *mut u8, delay: u64) -> (u64, u64) {
+    let (res, cid): (u64, u64);
+    asm!(
+        "adrp {cnt}, 3f",
+        "add {cnt}, {cnt}, :lo12:3f",
+        "str {cnt}, [{rseq}, #8]",
+        "20:",
+        "ldr {cid:w}, [{rseq}, #24]",
+        "cmp {cid:w}, #2, lsl #12",
+        "b.hs 8f",
+        "add {slot}, {slots}, {cid}, lsl #7",
+        "ldr {cnt}, [{slot}]",
+        "cmp {cnt}, #1",
+        "b.eq 9f",
+        "21:",
+        "cbz {delay}, 22f",
+        "sub {delay}, {delay}, #1",
+        "b 21b",
+        "22:",
+        "add {cnt}, {cnt}, #2",
+        "str {cnt}, [{slot}]",
+        "4:",
+        "mov {res}, #0",
+        "b 6f",
+        "8:",
+        "mov {res}, #4",
+        "b 6f",
+        "9:",
+        "mov {res}, #1",
+        "b 6f",
+        ".inst 0xd428bc00",
+        "7:",
+        "mov {res}, #2",
+        "6:",
+        ".pushsection __rseq_cs, \"aw\"",
+        ".balign 32",
+        "3:",
+        ".long 0, 0",
+        ".quad 20b, 4b - 20b, 7b",
+        ".popsection",
+        rseq = in(reg) rseq,
+        slots = in(reg) SLOTS.as_ptr(),
+        delay = inout(reg) delay => _,
+        cid = out(reg) cid,
+        slot = out(reg) _,
+        cnt = out(reg) _,
+        res = out(reg) res,
+        options(nostack),
+    );
+    (res, cid)
+}
+
+/// The same section on x86-64.
+#[cfg(target_arch = "x86_64")]
 #[inline(never)]
 unsafe fn cs_add(rseq: *mut u8, delay: u64) -> (u64, u64) {
     let (res, cid): (u64, u64);
@@ -71,7 +138,7 @@ unsafe fn cs_add(rseq: *mut u8, delay: u64) -> (u64, u64) {
         "cmp {cid:e}, 8192",
         "jae 8f",
         "mov {slot}, {cid}",
-        "shl {slot}, 6",
+        "shl {slot}, 7",
         "add {slot}, {slots}",
         "mov {cnt}, qword ptr [{slot}]",
         "cmp {cnt}, 1",

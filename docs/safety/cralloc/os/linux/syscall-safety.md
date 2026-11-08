@@ -1,8 +1,9 @@
 # Safety ledger: `crates/cralloc/src/os/linux/syscall.rs`
 
-The one hand-written `asm!` block in the allocator. CLAUDE.md allows it as the single
-exception to "all assembly comes from Lean". Neither Kani nor Miri can execute it; the unit tests
-in the same file and in `kernel.rs` run it on the real kernel.
+The system-call instruction, the lasting exception CLAUDE.md allows to "all assembly comes from
+Lean", once for each architecture, and on aarch64 the reads of two registers Rust has no stable way
+to name. Neither Kani nor Miri can execute them; the unit tests in the same file and in `kernel.rs`
+run them on the real kernel.
 
 ## SYSCALL-01: the `syscall` instruction in `syscall()`
 
@@ -59,7 +60,7 @@ number would make a different call with the same arguments, so each is checked a
 table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10),
 and its tests in `kernel.rs` read real files through them.
 
-**Machine checks.** `os::linux::syscall::tests::a_call_reaches_the_kernel` (getpid agrees with
+**Machine checks** (of this entry and SYSCALL-02). `os::linux::syscall::tests::a_call_reaches_the_kernel` (getpid agrees with
 `std::process::id`) and `results_decode_errors`. Every `LinuxOs` test in `kernel.rs` goes
 through this block.
 
@@ -67,5 +68,47 @@ through this block.
 `preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers). 2026-10-18,
 another: the sixteen call numbers against `asm/unistd_64.h`, and items 5 and 7 as they now
 read for `openat` and `read`.
+
+## SYSCALL-02: the `svc #0` instruction in `syscall()`, on aarch64
+
+**Block.** `asm!("svc #0", in("x8") number, inlateout("x0") a0 => ret, in("x1") a1, in("x2") a2,
+in("x3") a3, in("x4") a4, in("x5") a5, options(nostack, preserves_flags))`.
+
+**Preconditions.** As SYSCALL-01.
+
+**Proof.** Items 5, 6 and 7 of SYSCALL-01 hold as they stand. For the others:
+
+1. *Register convention.* aarch64 Linux takes the number in `x8` and arguments in `x0` to `x5`, and
+   returns the result in `x0` (`syscall(2)`, "Architecture calling conventions";
+   `arch/arm64/kernel/syscall.c`, `el0_svc_common`). The operands name exactly those.
+2. *Clobbers.* The kernel restores every general-purpose register but `x0` from its saved frame
+   on the way back (`kernel_exit` in `arch/arm64/kernel/entry.S`), so none other is declared.
+3. *Flags.* The condition flags are in `SPSR_EL1`, saved at the exception and restored by `eret`, so
+   `preserves_flags` holds.
+4. *Stack.* `svc` neither reads nor writes the user stack; the kernel runs on its own, and a signal
+   frame goes below `sp`, this architecture having no red zone. So `nostack` holds.
+
+**Call numbers.** The constants in the aarch64 `nr` are those of `/usr/include/asm-generic/unistd.h`:
+`openat` 56, `close` 57, `read` 63, `write` 64, `exit_group` 94, `futex` 98, `tgkill` 131,
+`rt_sigaction` 134, `rt_sigprocmask` 135, `prctl` 167, `getpid` 172, `gettid` 178, `munmap` 215,
+`mmap` 222 (`__NR3264_mmap`), `mprotect` 226, `mincore` 232, `madvise` 233, `getrandom` 278,
+`membarrier` 283, `rseq` 293.
+
+Nobody has reviewed this entry.
+
+## SYSCALL-03: `mrs` of the timer's registers and the thread pointer, on aarch64
+
+**Blocks.** `generic_timer`, of `cntvct_el0` and `cntfrq_el0`, and `thread_register`, of
+`tpidr_el0`.
+
+**Proof.** Each writes the one output register the compiler chose and nothing else, touches no memory
+or stack and leaves the flags alone, as `options(nomem, nostack, preserves_flags)` says. The Linux
+kernel lets EL0 read all three on every aarch64 machine: it sets `CNTKCTL_EL1.EL0VCTEN` and `EL0PCTEN`
+(`arch_counter_set_user_access` in `drivers/clocksource/arm_arch_timer.c`), or traps and emulates the
+read where an erratum requires, and `tpidr_el0` is a register of the thread's own. The values are
+integers the callers only compute with: no promise rests on `ticks` (KERNEL-09), and the thread
+pointer is `thread_pointer`'s to return (RSEQ-01).
+
+Nobody has reviewed this entry.
 
 Reviewed: 6439180
