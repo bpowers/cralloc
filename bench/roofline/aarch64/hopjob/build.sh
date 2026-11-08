@@ -43,12 +43,6 @@ EOF
   envs=()
   [ "$variant" = kept ] && envs+=(RUSTC_BOOTSTRAP=1)
   [ -n "$pad" ] && envs+=(BENCH_LAYOUT_PAD="$pad")
-  # Linked by rust-lld, the one linker that copies __rseq_offset into a PIE: the routines as they are
-  # and with that direct read, so that the two differ by nothing else.
-  sysroot=$(rustc --print sysroot)
-  lld="-Ctarget-cpu=native -C link-arg=-fuse-ld=lld -C link-arg=-B$sysroot/lib/rustlib/aarch64-unknown-linux-gnu/bin/gcc-ld"
-  [ "$variant" = lld ] && envs+=(RUSTFLAGS="$lld")
-  [ "$variant" = direct ] && envs+=(RUSTFLAGS="$lld --cfg cralloc_a64_direct")
   (
     cd "$copy/bench"
     "$root/scripts/heavy" env ${envs[@]+"${envs[@]}"} cargo build -q --release -p bench-workloads -p bench-rpc \
