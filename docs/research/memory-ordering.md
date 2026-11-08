@@ -192,7 +192,7 @@ commit or the drain, and a magazine handle is only made for an address the commi
 **The proofs in Lean say nothing about memory order.** Their model is sequential and has no barrier
 instruction: a proof says what a routine's instructions do to memory taken in program order, one
 thread at a time and interrupted anywhere. It does not say what another CPU sees of them, or when.
-The routines hold plain `ldr`, `ldp` and `str` and no barrier (`front/provisional/` and
+The routines hold plain `ldr`, `ldrb` and `str` and no barrier (`front/provisional/` and
 `front/generated/aarch64_inline/`, read line by line against this section; `generated/x86_64` is the
 same in `mov`s), and these stand in for a proof:
 

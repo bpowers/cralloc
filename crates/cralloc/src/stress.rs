@@ -321,35 +321,6 @@ pub(crate) unsafe fn own(block: *mut u8) -> u64 {
     low + 1
 }
 
-/// What marks a word of a ledger written by [`own_shared`], in its high half.
-const SHARED: u64 = 0x5ca1_ab1e << 32;
-
-/// As [`own`], on a heap other tests of the process use too, which leave what they like in a block:
-/// the check is only of two words that both say they are a ledger's. So a block's first ledger, and
-/// one after a purge, are not checked.
-///
-/// # Safety
-///
-/// As for [`own`].
-pub(crate) unsafe fn own_shared(block: *mut u8) {
-    // SAFETY: the caller's promise.
-    let (first, second) = unsafe { ledger(block) };
-    let high = second.load(Relaxed);
-    let low = first.load(Relaxed);
-    let marked = |word: u64| word & !(u32::MAX as u64) == SHARED;
-    let last = if marked(low) && marked(high) {
-        assert_eq!(
-            low, high,
-            "a block's new owner did not see all of what its last owner wrote"
-        );
-        low
-    } else {
-        SHARED
-    };
-    first.store(last + 1, Relaxed);
-    second.store(last + 1, Relaxed);
-}
-
 /// The count in a block's ledger, once nothing else touches it.
 ///
 /// # Safety
