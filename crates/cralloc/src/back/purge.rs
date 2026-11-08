@@ -918,7 +918,8 @@ impl<O: Os> Back<'_, O> {
     /// One bounded step of the clocked pass under way or due, for `maintain`'s steps: whether
     /// the pass has more to do. Smaller than a heartbeat's step, in bitmap read and in pages
     /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
-    /// thread for tens of microseconds.
+    /// thread for tens of microseconds, unless the step finishes a huge page of small slots
+    /// (`policy::PURGE_STEP_WORDS`).
     pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> PassStep {
         self.raise_marked(false);
         let mut returned = 0;
