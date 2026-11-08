@@ -1000,6 +1000,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn fence_all(&self) -> Result<(), OsError> {
         if self.fence_registered() {
+            self.cpus.fence_all();
             self.sleeps.fences.fetch_add(1, Ordering::AcqRel);
             Ok(())
         } else {

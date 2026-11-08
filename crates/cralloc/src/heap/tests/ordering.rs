@@ -1,0 +1,310 @@
+//! Whole routes from a free to the next allocation, on real threads. Every block carries a ledger
+//! (`crate::stress::own`): a thread that allocates it must see all that the thread that freed it
+//! wrote, however the block went between them. The ways through are the ones
+//! `docs/research/memory-ordering.md` traces: the same CPU, a magazine through a depot stack, a
+//! drain, and a launder and a fill.
+
+use super::*;
+use crate::stress::{FULL, LEDGER_BYTES, QUICK, Rounds, count, failed, own, spread, together};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+/// The way from a producer to its consumer: a ring of slots, null when empty. A slot's store is a
+/// release and its load an acquire, so a consumer sees what the producer wrote. The other way a
+/// producer reads a slot only to see that it is empty, with no order, so that nothing outside the
+/// allocator carries a consumer's writes to a producer. A lock here would: its unlock after a
+/// consumer's frees orders them before a producer's next lock.
+struct Ring {
+    slots: std::vec::Vec<AtomicPtr<u8>>,
+    over: AtomicBool,
+}
+
+impl Ring {
+    fn new() -> Ring {
+        let slots = if cfg!(miri) { 16 } else { 1024 };
+        Ring {
+            slots: (0..slots)
+                .map(|_| AtomicPtr::new(ptr::null_mut()))
+                .collect(),
+            over: AtomicBool::new(false),
+        }
+    }
+}
+
+/// A block seen by a consumer, kept for the count at the end.
+struct Seen(*mut u8);
+// SAFETY: an address and its provenance, read only when no thread runs.
+unsafe impl Send for Seen {}
+
+/// The blocks that changed hands, by address, and how many times they did.
+type Owned = (u64, BTreeMap<usize, Seen>);
+
+/// A pipeline: producers allocate blocks and take their ledgers, and consumers take them again and
+/// free them, so that blocks go by magazines from the consumers back to the producers. `place` is
+/// [`spread`] or [`together`], and `take` takes a block's ledger. Returns what the count that catches
+/// a stale ledger needs.
+fn pipeline<H: GlobalAlloc + Sync, R>(
+    heap: &H,
+    place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
+    take: unsafe fn(*mut u8) -> R,
+    pairs: usize,
+    time: Duration,
+    size: usize,
+) -> Owned {
+    assert!(size >= LEDGER_BYTES);
+    let l = layout(size, 8);
+    let rings: std::vec::Vec<Ring> = (0..pairs).map(|_| Ring::new()).collect();
+    let rounds = Rounds::of(time, 200);
+    let body = |me: usize| {
+        let ring = &rings[me / 2];
+        let (mut owned, mut blocks) = (0u64, BTreeMap::new());
+        let (mut at, mut round) = (0, 0);
+        if me.is_multiple_of(2) {
+            while rounds.go_on(round) {
+                round += 1;
+                let slot = &ring.slots[at];
+                if !slot.load(Ordering::Relaxed).is_null() {
+                    std::thread::yield_now();
+                    continue;
+                }
+                // SAFETY: a valid layout.
+                let p = unsafe { heap.alloc(l) };
+                assert!(!p.is_null());
+                // SAFETY: this thread's block, of at least the ledger's size. What the block's last
+                // owner wrote has come only through the allocator.
+                unsafe { take(p) };
+                owned += 1;
+                slot.store(p, Ordering::Release);
+                at = (at + 1) % ring.slots.len();
+            }
+            ring.over.store(true, Ordering::Release);
+        } else {
+            loop {
+                let over = ring.over.load(Ordering::Acquire);
+                let slot = &ring.slots[at];
+                let p = slot.load(Ordering::Acquire);
+                if p.is_null() {
+                    if over || failed() {
+                        break;
+                    }
+                    // For the move to the next CPU, not to stop.
+                    let _ = rounds.go_on(round);
+                    round += 1;
+                    std::thread::yield_now();
+                    continue;
+                }
+                slot.store(ptr::null_mut(), Ordering::Relaxed);
+                at = (at + 1) % ring.slots.len();
+                // SAFETY: the producer gave the block up, through the ring.
+                unsafe { take(p) };
+                owned += 1;
+                blocks.insert(p.addr(), Seen(p));
+                // SAFETY: allocated with this layout, freed once.
+                unsafe { heap.dealloc(p, l) };
+            }
+        }
+        (owned, blocks)
+    };
+    let results = place(2 * pairs, &body);
+    let owned = results.iter().map(|r| r.0).sum();
+    let blocks = results.into_iter().flat_map(|r| r.1).collect();
+    (owned, blocks)
+}
+
+/// Checks the count of every block's ledger against the number of takes.
+fn counted_as_owned((owned, blocks): &Owned) {
+    let counted: u64 = blocks
+        .values()
+        // SAFETY: blocks of the heap, kept resident by the caller's faults, and nothing runs.
+        .map(|block| unsafe { count(block.0) })
+        .sum();
+    assert_eq!(counted, *owned, "a new owner read a stale ledger");
+}
+
+fn blocks_keep_their_last_owners_writes(time: Duration, drains: bool) {
+    let heap = SimHeap::<crate::os::sim::Standard>::new();
+    // A purge reads as zero, and the count would not add up.
+    heap.os().set_faults(Call::Purge, Faults::ALWAYS);
+    let run = || pipeline(&heap, |n, f| spread(n, f), own, 2, time, 512);
+    let owned = if drains {
+        with_drains_running(&heap, run)
+    } else {
+        run()
+    };
+    counted_as_owned(&owned);
+}
+
+#[test]
+fn blocks_keep_their_last_owners_writes_through_magazines_quickly() {
+    blocks_keep_their_last_owners_writes(QUICK, false);
+}
+
+#[test]
+fn blocks_keep_their_last_owners_writes_through_drains_quickly() {
+    blocks_keep_their_last_owners_writes(QUICK, true);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn blocks_keep_their_last_owners_writes_through_magazines_fully() {
+    blocks_keep_their_last_owners_writes(FULL, false);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn blocks_keep_their_last_owners_writes_through_drains_fully() {
+    blocks_keep_their_last_owners_writes(FULL, true);
+}
+
+/// The real routines on the real kernel: plain loads and stores on the fast paths, and
+/// `membarrier` for the drains `collect` makes while the pipeline runs. The process's heap is every
+/// test's, and a purge can zero a free block, so the count at the end does not hold here; the
+/// ledgers' two words do.
+#[cfg(cralloc_real)]
+mod process {
+    use super::*;
+    use crate::Cralloc;
+    use crate::stress::own_shared;
+    use core::sync::atomic::AtomicU64;
+
+    fn on_the_real_routines(
+        place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
+        time: Duration,
+    ) {
+        let stop = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::SeqCst) && !failed() {
+                    Cralloc::collect();
+                    thread::sleep(Duration::from_millis(1));
+                }
+            });
+            let _ = pipeline(&Cralloc, place, own_shared, 2, time, 512);
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+
+    #[test]
+    fn blocks_keep_their_last_owners_writes_on_the_real_routines_quickly() {
+        on_the_real_routines(|n, f| spread(n, f), QUICK);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn blocks_keep_their_last_owners_writes_on_the_real_routines_fully() {
+        on_the_real_routines(|n, f| spread(n, f), FULL);
+    }
+
+    /// The C entry points, as a `GlobalAlloc`: their frees find a block's class by the plain loads
+    /// of the mirror (`c::mirror`), which any mix of old and new must leave safe.
+    struct CEntryPoints;
+
+    // SAFETY: `malloc` and `free` meet its contract for the sizes this test asks for, and 8 is
+    // less than the alignment `malloc` gives.
+    unsafe impl GlobalAlloc for CEntryPoints {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            crate::c::malloc(layout.size()).cast()
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
+            // SAFETY: the caller's promise: a block from `alloc`, given up once.
+            unsafe { crate::c::free(ptr.cast()) };
+        }
+    }
+
+    #[test]
+    fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_quickly() {
+        let _ = pipeline(
+            &CEntryPoints,
+            |n, f| spread(n, f),
+            own_shared,
+            2,
+            QUICK,
+            512,
+        );
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_fully() {
+        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), own_shared, 2, FULL, 512);
+    }
+
+    /// Threads taking turns on one CPU: a block's only way from a free to the next allocation is
+    /// the routines' plain stores and loads, and the context switch between them.
+    #[test]
+    fn blocks_keep_their_last_owners_writes_on_one_cpu_quickly() {
+        on_the_real_routines(|n, f| together(n, f), QUICK);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn blocks_keep_their_last_owners_writes_on_one_cpu_fully() {
+        on_the_real_routines(|n, f| together(n, f), FULL);
+    }
+
+    /// Threads run the fast paths as hard as they can while another drains their CPUs, one fence
+    /// at a time, as fast as it can. A commit that landed after the drainer believed it owned the
+    /// word would leave a running thread and the depot with one magazine, and sooner or later two
+    /// threads with one block: each block carries its holder's stamp, checked as it is freed.
+    /// `collect` above is too slow to hit that: this finds a fence left out in seconds.
+    fn a_drain_leaves_each_thread_its_own_blocks(time: Duration) {
+        const HELD: usize = 16;
+        let l = layout(64, 8);
+        let rounds = Rounds::of(time, 0);
+        let stop = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let process = crate::heap::global::process();
+                while !stop.load(Ordering::Relaxed) && !failed() {
+                    for cpu in 0..16 {
+                        let _ = process.drain(cpu);
+                    }
+                }
+            });
+            spread(4, |me| {
+                let mut held = [ptr::null_mut::<u8>(); HELD];
+                let mut round = 0u64;
+                while rounds.go_on(round) {
+                    let at = round as usize % HELD;
+                    let stamp = |round: u64| (me as u64) << 56 | round;
+                    if !held[at].is_null() {
+                        // SAFETY: a block this thread holds, of at least 8 bytes.
+                        let word = unsafe { AtomicU64::from_ptr(held[at].cast()) };
+                        assert_eq!(
+                            word.load(Ordering::Relaxed),
+                            stamp(round - HELD as u64),
+                            "a block two threads hold"
+                        );
+                        // SAFETY: allocated with this layout, freed once.
+                        unsafe { Cralloc.dealloc(held[at], l) };
+                    }
+                    // SAFETY: a valid layout.
+                    held[at] = unsafe { Cralloc.alloc(l) };
+                    assert!(!held[at].is_null());
+                    // SAFETY: as above.
+                    unsafe { AtomicU64::from_ptr(held[at].cast()) }
+                        .store(stamp(round), Ordering::Relaxed);
+                    round += 1;
+                }
+                for block in held.into_iter().filter(|block| !block.is_null()) {
+                    // SAFETY: as above.
+                    unsafe { Cralloc.dealloc(block, l) };
+                }
+            });
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    #[test]
+    fn a_drain_leaves_each_thread_its_own_blocks_quickly() {
+        a_drain_leaves_each_thread_its_own_blocks(QUICK);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn a_drain_leaves_each_thread_its_own_blocks_fully() {
+        a_drain_leaves_each_thread_its_own_blocks(FULL);
+    }
+}

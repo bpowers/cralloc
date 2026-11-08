@@ -18,6 +18,15 @@
 //! the one its pusher wrote. A push that gives up has written nothing anyone else reads: at most
 //! the link of the magazine it still holds, from a try whose compare-and-swap failed.
 //!
+//! **Memory order.** The head carries everything. A push's release publishes the magazine's link,
+//! record and contents. The head changes only by read-modify-write, so a read of it with acquire
+//! synchronizes with the push of every magazine under it, however many pushes and pops came between
+//! and whatever their orders, and a pop needs no release of its own. A link read after that read is
+//! the one its pusher wrote, unless the magazine has been popped since, and then the version has
+//! moved and the compare-and-swap fails. So the link and the record are relaxed
+//! (`docs/research/firestorm.md`, "Atomics and barriers", has what the stronger orders cost). Only
+//! a push onto an empty stack is sequentially consistent, for the hint in `held.rs`.
+//!
 //! The all-zero head is an empty stack.
 
 use super::magazine::{Area, Magazine, MagazineId};
@@ -25,7 +34,7 @@ use crate::classes::MagazineSize;
 use crate::front::sync::AtomicU64;
 use crate::os::Os;
 use core::ptr;
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 /// What a push did besides taking the magazine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,7 +82,7 @@ impl Stack {
     fn link<O: Os>(area: Area<'_, O>, number: u32, size: MagazineSize) -> Packed {
         let below = MagazineId::new(number).and_then(|id| area.by_id(id, size));
         match below {
-            Some(magazine) => Packed::from_word(magazine.link().load(Acquire).addr() as u64),
+            Some(magazine) => Packed::from_word(magazine.link().load(Relaxed).addr() as u64),
             None => Packed::from_word(0),
         }
     }
@@ -118,19 +127,21 @@ impl Stack {
             };
             magazine.link().store(
                 ptr::without_provenance_mut(link.to_word() as usize),
-                Release,
+                Relaxed,
             );
             let new = Packed {
                 number: area.id(&magazine).get(),
                 high: head.high.wrapping_add(1),
             };
-            // Sequentially consistent so that the hint of which stacks hold magazines, which
-            // a push onto an empty stack sets after this and a look clears before reading the
-            // head, is never left clear on a stack that holds one (`held.rs`). On x86-64 every
-            // compare-and-swap is.
+            // Onto an empty stack, sequentially consistent so that the hint of which stacks hold
+            // magazines, which such a push sets after this and a look clears before reading the
+            // head, is never left clear on a stack that holds one (`held.rs`). The first push
+            // after any empty head is such a push, so the others need not be. A failure reads the
+            // head for the next try's read of the top's link.
+            let success = if head.number == 0 { SeqCst } else { Release };
             match self
                 .head
-                .compare_exchange(head.to_word(), new.to_word(), SeqCst, Acquire)
+                .compare_exchange(head.to_word(), new.to_word(), success, Acquire)
             {
                 Ok(_) => {
                     return Ok(Pushed {
@@ -171,14 +182,14 @@ impl Stack {
                     .os()
                     .abort("a depot stack names something that is not a magazine");
             };
-            let next = Packed::from_word(magazine.link().load(Acquire).addr() as u64);
+            let next = Packed::from_word(magazine.link().load(Relaxed).addr() as u64);
             let new = Packed {
                 number: next.number,
                 high: head.high.wrapping_add(1),
             };
             match self
                 .head
-                .compare_exchange(head.to_word(), new.to_word(), AcqRel, Acquire)
+                .compare_exchange(head.to_word(), new.to_word(), Acquire, Acquire)
             {
                 Ok(_) => return Some((magazine, contended)),
                 Err(now) => {

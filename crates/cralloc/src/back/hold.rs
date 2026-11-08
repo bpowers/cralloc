@@ -198,7 +198,7 @@ impl Fine {
     #[inline(always)]
     pub(crate) fn count(&self) -> u32 {
         // Sequentially consistent, as the thread's look before it sleeps reads it after
-        // marking its word (`crate::thread_word`, "Sleeping"); on x86-64 a plain load.
+        // marking its word (`crate::thread_word`, "Sleeping").
         (self.word.load(SeqCst) >> 32) as u32
     }
 
@@ -208,9 +208,9 @@ impl Fine {
         let seen = self.word.load(Relaxed);
         let next = fine_read(seen, time)?;
         // A failure means another reader stepped or re-stamped, which is the same reading or a
-        // later one: nothing to retry. Sequentially consistent, as the reader that steps the
-        // count then reads the thread's word, and the thread marks its word before it reads
-        // the count (`crate::thread_word`, "Sleeping"); on x86-64 the same locked instruction.
+        // later one: nothing to retry, so it needs no order. Sequentially consistent on success,
+        // as the reader that steps the count then reads the thread's word, and the thread marks
+        // its word before it reads the count (`crate::thread_word`, "Sleeping").
         let stepped = self
             .word
             .compare_exchange(seen, next, SeqCst, Relaxed)
