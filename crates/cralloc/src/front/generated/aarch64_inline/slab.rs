@@ -70,3 +70,29 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     }
     ret != 0
 }
+
+#[cfg(not(target_env = "musl"))]
+/// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
+///
+/// Contract: `VG.Spec.Slab.cpuContract`.
+///
+/// # Safety
+///
+/// * From when the function is called until it returns, the calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be registered with the kernel, or read a negative CPU number and stay unregistered: glibc registers its area before the thread can run code that allocates. On musl the area is the crate's own, which reads -1 until a slow path registers it, so a signal handler that registers the thread during a call (by allocating for the first time between the function's arming store and its read of the CPU number) breaks this, and the function then runs unprotected.
+/// * Neither `__rseq_offset` nor the thread's `cpu_id` may wrap around the end of the address space.
+#[cfg(not(target_env = "musl"))]
+#[inline(always)]
+pub(crate) unsafe fn current_cpu() -> u32 {
+    let ret: u32;
+    unsafe {
+        core::arch::asm!(
+            ".pushsection .data.rel.ro.cralloc_got,\"aw\",%progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nadrp x9, 8b\nldr x9, [x9, :lo12:8b]\nldr x9, [x9]\nmrs x10, tpidr_el0\nadd x10, x10, x9\nldr w0, [x10, #4]",
+            lateout("x0") ret,
+            out("x9") _,
+            out("x10") _,
+            __rseq_offset = sym crate::front::__rseq_offset,
+            options(nostack),
+        );
+    }
+    ret
+}

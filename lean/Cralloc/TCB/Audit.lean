@@ -31,8 +31,17 @@ imports, besides the axiom audit (`TCB/Axioms.lean`):
   not a directory: an implementation's own files could declare such a name.
   Theorems (e.g. the equation lemmas Lean generates for a `Spec/` definition
   in the module that first unfolds it) carry no data and are exempt.
+* `#assert_built_inside` fails if a definition outside `Cralloc.TCB` uses the
+  constructor of a `Target`, `ISA`, `Printer`, `Abi` or `Artifact`, or one outside
+  `Cralloc.Spec` that of an `Api`. A registration names a target and an `Api`, and what
+  is emitted is theirs: a target of a registration's own, with another printer, or
+  another `rely`, would have every proof go through and write other code. A safe
+  definition has no other way to make a value of those types: so every target an
+  emitted artifact holds was made in `TCB/`, whatever the registration's text says. That
+  covers structure updates (`{ t with … }` is the constructor), and any definition, not
+  only the emitted lists. Theorems carry no data and are exempt.
 
-Both refuse to run in a module, which sees what it imports from other
+All three refuse to run in a module, which sees what it imports from other
 modules without their proofs, and without the values of definitions they
 do not expose: the emitter's driver is not a module.
 -/
@@ -131,5 +140,38 @@ elab "#assert_spec_origin" : command => do
     throwError m!"these `VG.Spec` names are not declared in `Spec/`:\n\
       {"\n".intercalate (bad.map fun (n, m) => s!"{n} (in {m})")}"
   logInfo m!"every `VG.Spec` definition is declared in `Spec/`"
+
+/-- The constructors only a part of the project may use: each with the prefixes of the
+modules that may. `Api`'s own module declares what Lean generates for a structure, whose
+types name its constructor. -/
+def guardedConstructors : List (Name × List Name) :=
+  [(`VG.Target.mk, [`Cralloc.TCB]), (`VG.ISA.mk, [`Cralloc.TCB]), (`VG.Printer.mk, [`Cralloc.TCB]),
+    (`VG.Abi.mk, [`Cralloc.TCB]), (`VG.Artifact.mk, [`Cralloc.TCB]),
+    (`VG.Api.mk, [`Cralloc.Spec, `Cralloc.TCB.Artifact])]
+
+/-- The definitions of this project in `env` that use a guarded constructor outside the modules
+that may, each with the constructor and its module. -/
+def builtOutside (env : Environment) : List (Name × Name × Name) :=
+  let names := env.header.moduleNames
+  env.constants.fold (init := []) fun acc n c =>
+    if c matches .thmInfo _ then acc else
+      let m := match env.getModuleIdxFor? n with
+        | none => env.mainModule
+        | some i => names[i.toNat]!
+      if !(`Cralloc).isPrefixOf m && (env.getModuleIdxFor? n).isSome then acc else
+        let used := c.type.getUsedConstants ++
+          (c.value? (allowOpaque := true)).elim #[] (·.getUsedConstants)
+        guardedConstructors.foldl (init := acc) fun acc (g : Name × List Name) =>
+          if !g.2.any (·.isPrefixOf m) && used.contains g.1 then (n, g.1, m) :: acc else acc
+
+elab "#assert_built_inside" : command => do
+  -- In a module, a definition imported from another module may have no value to look in.
+  if (← getEnv).header.isModule then
+    throwError "#assert_built_inside must run in a file that is not a module"
+  let bad := builtOutside (← getEnv)
+  unless bad.isEmpty do
+    throwError m!"these definitions build what only the trusted files may:\n\
+      {"\n".intercalate (bad.map fun (n, c, m) => s!"{n} (in {m}) uses {c}")}"
+  logInfo m!"every target and `Api` is built where it may be"
 
 end VG
