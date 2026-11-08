@@ -32,10 +32,12 @@
 //!   a look that leaves a domain's set empty clears the domain's bit, reads the set again, and
 //!   sets the bit back if a class came.
 //!
-//! Every one of these operations, the push's compare-and-swap included, is sequentially
-//! consistent, so of a push and a clear that race, either the clear's second read sees the push
-//! or the push's read sees the clear; either way the bit ends set. On x86-64 that costs nothing:
-//! every read-modify-write is a full barrier there and every load is already ordered.
+//! Every one of these operations, the compare-and-swap of a push onto an empty stack included, is
+//! sequentially consistent, so of such a push and a clear that race, either the clear's second read
+//! sees the push or the push's read sees the clear; either way the bit ends set. Other pushes and
+//! pops need not be. A second read that misses a pop finds a stack holding a magazine it no longer
+//! holds, which is the bit left set, the harmless way. One that finds an empty stack and misses
+//! later pushes misses first a push onto that empty stack, which then sets the bit.
 //!
 //! A fork can cut a push off between its compare-and-swap and its bits, leaving the child a stack
 //! with no bit; the child's `collect` and that domain's own heartbeats, which look at each class

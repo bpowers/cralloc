@@ -71,9 +71,11 @@
 //! (the next interval's pass, the hold's next look) clears the bit with a compare-and-swap and
 //! wakes it ([`ThreadWord::rouse`], [`ThreadWord::rouse_any`]). Each side writes before it
 //! reads: the thread the bit, then the state of the work; the waker the state of the work (a
-//! debt added, the counted clock stepped), then this word. Every one of those operations is
-//! sequentially consistent, so one of them sees the other's write: either the thread finds the
-//! work and does not wait, or the waker finds the bit and wakes it. The wake is a system call
+//! debt added, the hold's fine count stepped, a pass started), then this word. Every one of those
+//! operations is sequentially consistent, so one of them sees the other's write: either the
+//! thread finds the work and does not wait, or the waker finds the bit and wakes it. A write left
+//! out of that order could be missed by the thread while the waker missed the bit, and the
+//! thread would sleep out its timeout, which is the whole cost. The wake is a system call
 //! made once, by the waker that cleared the bit: under steady churn the bit is clear (the
 //! thread is working, or was woken already) and a slow path writes nothing. The bit is not in
 //! the slow path's mask, so a sleeping thread costs a slow path nothing.
@@ -227,7 +229,7 @@ impl ThreadWord {
     }
 
     /// One load of the word. Sequentially consistent, as the wakers read it after making work
-    /// due (see the module documentation, "Sleeping"); on x86-64 a plain load all the same.
+    /// due (see the module documentation, "Sleeping").
     #[inline(always)]
     pub fn load(&self) -> Snapshot {
         Snapshot(self.word.load(SeqCst))

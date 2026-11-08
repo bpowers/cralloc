@@ -1826,6 +1826,9 @@ mod hold {
     }
 }
 
+/// Whole routes from a free to the next allocation, on real threads.
+mod ordering;
+
 #[cfg(cralloc_real)]
 mod process {
     use super::*;
