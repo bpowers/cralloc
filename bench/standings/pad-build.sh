@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # usage: pad-build.sh PART [ALLOC...]
 #   PART: workloads, or one of the servers' programs (orders, sozu, miniredis, router, qdrant)
-#   ALLOC: cra jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64"
-# Builds this checkout's servers at bench-alloc's layout pads 0, 16, 32, 48 and 64
+#   ALLOC: cra jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64", or
+#   on aarch64, where a line can be 128 bytes, "000 032 064 096 128"
+# Builds this checkout's servers at bench-alloc's layout pads
 # (BENCH_LAYOUT_PAD, as `benchrun layout --layouts pads` does) for each allocator: the workloads
 # and rpc-server into bench/target/ALLOC-pNN, a program into bench/target/ALLOC-pNN/apps/PROGRAM.
 # Local allocators.toml entries `NAME@padNN` with `build = "ALLOC-pNN"` (`pad-entries.sh`
@@ -31,9 +32,13 @@ feature() {
     *) echo "pad-build: unknown allocator $1" >&2; exit 2 ;;
   esac
 }
+case "$(uname -m)" in
+  aarch64) default_pads="000 032 064 096 128" ;;
+  *) default_pads="00 16 32 48 64" ;;
+esac
 for a in "${allocs[@]}"; do
   feat=$(feature "$a")
-  for pad in ${PADS:-00 16 32 48 64}; do
+  for pad in ${PADS:-$default_pads}; do
     out="$W/bench/target/$a-p$pad"
     case "$part" in
       workloads)

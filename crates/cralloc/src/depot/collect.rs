@@ -31,10 +31,16 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             // The magazine area cannot be used, so no magazine exists.
             return;
         }
-        let me = self.routines.cpu();
-        if let Some(cpu) = me {
+        let first = self.routines.cpu();
+        if let Some(cpu) = first {
             self.empty_own(cpu);
         }
+        // Not a slab to pass over if the thread has left it: it may have left some of it too.
+        let me = if self.routines.cpu() == first {
+            first
+        } else {
+            None
+        };
         let count = self
             .depot
             .common

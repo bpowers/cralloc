@@ -123,6 +123,21 @@ fn clock_ns(clock: libc::clockid_t) -> u64 {
     t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
 
+/// The CPU's own timer now: the time-stamp counter, or on aarch64 the generic timer.
+#[cfg(target_arch = "x86_64")]
+fn timer() -> u64 {
+    // SAFETY: rdtsc has no preconditions.
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn timer() -> u64 {
+    let t: u64;
+    // SAFETY: Linux lets user mode read the virtual counter, which touches nothing else.
+    unsafe { core::arch::asm!("mrs {t}, cntvct_el0", t = out(reg) t, options(nomem, nostack)) };
+    t
+}
+
 impl Shard {
     fn insert(&mut self, id: u64, order: Arc<Order>) {
         // A table rehashes only on an insert that finds no room left; only then is it timed.
@@ -130,8 +145,7 @@ impl Shard {
             self.map.insert(id, order);
             return;
         }
-        // SAFETY: rdtsc has no preconditions.
-        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        let tsc = timer();
         let (start_ns, cpu) = (clock_ns(libc::CLOCK_MONOTONIC), clock_ns(libc::CLOCK_THREAD_CPUTIME_ID));
         let (t, (f, v, i)) = (Instant::now(), thread_usage());
         self.map.insert(id, order);

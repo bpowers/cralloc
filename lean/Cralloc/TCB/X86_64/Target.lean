@@ -168,21 +168,6 @@ every thread: away from the slab words the routines store to. A load of
 depend on the store, which costs a pair two cycles
 (docs/research/portability.md, "The area's page offset"). -/
 
-/-- The bytes the crate registers: the original `struct rseq`
-(`ORIG_RSEQ_SIZE`), which every kernel with rseq accepts. -/
-def ownAreaLen : Nat := 32
-
-/-- The alignment of the area's section: a page. -/
-def ownAreaAlign : Nat := 4096
-
-/-- Where the area sits in its page: past every slab word a routine stores
-to (the crate asserts it) and below the words the C routines read at page
-offset 1024. -/
-def ownAreaPageOffset : Nat := 768
-
-/-- `cpu_id` before registration: -1, as 32 bits. -/
-def ownAreaUnregistered : Nat := 0xffffffff
-
 /-- The area and its offset's word, for musl. -/
 def ownRseqArea : OwnArea where
   cfg := [.targetEnv "musl"]
@@ -211,12 +196,7 @@ def ownRseqArea : OwnArea where
     "cralloc_rseq_offset:",
     ".quad cralloc_rseq_area@tpoff",
     ".popsection"]
-  consts := [
-    ("RSEQ_SIGNATURE", .u32, rseqSignature),
-    ("RSEQ_AREA_LEN", .usize, ownAreaLen),
-    ("RSEQ_AREA_ALIGN", .usize, ownAreaAlign),
-    ("RSEQ_AREA_PAGE_OFFSET", .usize, ownAreaPageOffset),
-    ("RSEQ_CPU_ID_UNREGISTERED", .u32, ownAreaUnregistered)]
+  consts := ownAreaConsts
 
 /-! ## Inline functions
 
@@ -266,6 +246,7 @@ abbrev target : Target where
   armed := armed
   rely := rely
   ownArea := some ownRseqArea
+  consts := [("RSEQ_SIGNATURE_X86_64", .u32, rseqSignature)]
 
 /-- The inline target: the same model, printer and argument registers, with
 the obligations of `asm!` in place of a call's and the red zone reserved

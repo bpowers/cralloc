@@ -50,8 +50,10 @@
 //!
 //! Limits worth knowing:
 //!
-//! - x86-64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older versions
-//!   are untested. It needs glibc 2.35 or later, the first that registers restartable sequences
+//! - x86-64 and aarch64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older
+//!   versions are untested. aarch64's routines are hand-written until they are proved. One binary
+//!   runs on kernels with pages of 4, 16 and 64 KiB, which it finds at its first slow path, though
+//!   only 16 KiB and 4 KiB have run on hardware. It needs glibc 2.35 or later, the first that registers restartable sequences
 //!   for its threads, dynamically or statically linked, or musl in an executable: musl registers
 //!   none, so there the allocator registers its own area for each thread at its first slow path
 //!   and unregisters it as the thread exits. Statically linked musl executables are tested;
@@ -129,7 +131,7 @@ mod space;
 // Public for what `export_c_abi!` expands to, which names the C functions, the slow paths and
 // tables the generated C routines jump to and read, and `front::SLABS`. Without `internals`
 // nothing else in them is reachable, and nothing reachable writes allocator state.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 #[doc(hidden)]
 pub mod c;
 #[doc(hidden)]
@@ -142,13 +144,7 @@ pub mod clock;
 #[cfg(not(feature = "internals"))]
 mod clock;
 pub(crate) mod environment;
-#[cfg(all(
-    test,
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(test, cralloc_real))]
 mod fresh;
 mod heap;
 mod lined;
@@ -160,20 +156,16 @@ mod scale;
 #[rustfmt::skip]
 pub(crate) mod spec;
 pub mod stats;
+#[cfg(test)]
+mod stress;
 pub(crate) mod thread_word;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub use heap::Cralloc;
 
 /// The background thread's controls (feature `background`, on by default): what the
 /// environment asks for, and the error of a failed start. See `Cralloc::start_background`.
-#[cfg(all(
-    feature = "background",
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(feature = "background", cralloc_real))]
 pub mod background {
     #[doc(hidden)]
     pub use crate::heap::background::CreateThread;
@@ -186,7 +178,7 @@ pub use heap::{SimCralloc, SimHeap};
 /// Ends the process at once, writing `message` to standard error: for the panic handler of a
 /// `no_std` library that exports the C interface with [`export_c_abi!`], which must not
 /// unwind.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 #[cold]
 pub fn abort(message: &str) -> ! {
     heap::process::abort(message)

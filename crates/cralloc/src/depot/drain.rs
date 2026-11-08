@@ -25,6 +25,15 @@
 //! The drain is the only code that writes one CPU's slab from another, and it never waits: each
 //! step is a bounded number of atomic instructions or one system call.
 //!
+//! **Memory order.** A routine's commit is a plain store, so step 2's exchange can read a commit
+//! without acquiring anything from it, and the commit can be visible before the slots it covers
+//! are: nothing here reads a slot or a link until the fence has returned. The fence is what carries
+//! everything the CPU's threads wrote to the drainer, the objects' bytes among it: it is a barrier
+//! on that CPU, or the scheduler's when no thread of the process runs there, between the drainer's
+//! barrier before it and its barrier after (`Os::fence`). So step 4's read sees any commit that
+//! beat the fence, and a sequence that starts after it sees the marker, whatever orders the loads
+//! and stores have. What the drainer then takes goes on by the depot's release, or a launder's.
+//!
 //! What it takes goes to the depot, where the heartbeat's idle check and `collect` want it: a
 //! slow path may launder only a few magazines, and `collect` launders the depot next. The
 //! background thread's `maintain` launders what it takes instead ([`Disposal::Launder`]),

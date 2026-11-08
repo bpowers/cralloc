@@ -273,20 +273,21 @@ fn a_claim_returns_a_step_of_slack_at_most_from_the_top() {
     let os = state.os();
     let class = large(1 << 20);
     let size = class.size();
+    let page = Native::GEOMETRY.page_size();
     let step = super::super::policy::PURGE_STEP_PAGES as usize * Native::GEOMETRY.page_size();
-    assert!(size > step && size < 2 * step + 4096);
+    assert!(size > step && size < 2 * step + page);
     let a = back.alloc(class, size).unwrap().ptr;
     paint(a.as_ptr(), size, 1);
     back.free(a, class);
-    let b = back.alloc(class, 4096).unwrap().ptr;
+    let b = back.alloc(class, page).unwrap().ptr;
     back.free(b, class);
-    // The slack is past the 4 KiB tenant's extent: all but a page. One step goes, the top one.
-    let c = back.alloc(class, 4096).unwrap().ptr;
+    // The slack is past the tenant's extent of a page: all but that. One step goes, the top one.
+    let c = back.alloc(class, page).unwrap().ptr;
     assert_eq!(c, a);
     assert!(returned(os, a, size - step, size));
     assert!(painted(
-        a.as_ptr().wrapping_add(4096),
-        size - step - 4096,
+        a.as_ptr().wrapping_add(page),
+        size - step - page,
         1
     ));
     back.free(c, class);
@@ -296,8 +297,8 @@ fn a_claim_returns_a_step_of_slack_at_most_from_the_top() {
         "the free charges what is left"
     );
     // The next claim takes the rest, less than a step, down to the tenants' extent.
-    let d = back.alloc(class, 4096).unwrap().ptr;
-    assert!(returned(os, a, 4096, size));
+    let d = back.alloc(class, page).unwrap().ptr;
+    assert!(returned(os, a, page, size));
     back.free(d, class);
-    assert_eq!(back.retained_large(), 4096);
+    assert_eq!(back.retained_large(), page);
 }

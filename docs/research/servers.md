@@ -420,8 +420,7 @@ nothing points at the allocator, and no run was caught.
 **The Connect log service** made `realloc` the largest cost and showed the tail above. A build's
 number stands for any point in a range of 3.1 to 3.7% on cralloc and 5.0 to 6.4% on the median
 allocator, since its protobuf decoder is placement-sensitive
-([program-effects.md](program-effects.md)). snmalloc takes 1.7 to 2 times every other allocator's
-cycles here, in both idle modes, and is mid-field elsewhere.
+([program-effects.md](program-effects.md)).
 
 **The log store** is our largest share and our clearest lead over mimalloc and glibc: 7% over
 jemalloc, 13% over tcmalloc, 21% over mimalloc, 49% over glibc, with the best tail (126 us against
@@ -435,8 +434,8 @@ two classes, one slow path each way a request, twice jemalloc's user instruction
 
 **Sōzu** parses through buffers from its own pool, so the allocator is hardly called: a control on
 time, within run-to-run spread (up to 7%). It is a fixed-cost memory job, five processes each
-paying: over glibc, cralloc 2.5 MiB a process, jemalloc 1.4, tcmalloc 4.8, snmalloc 7.9, mimalloc
-8.1 (44 of its 52 MiB in huge pages).
+paying: over glibc, cralloc 2.5 MiB a process, jemalloc 1.4, tcmalloc 4.8, mimalloc 8.1 (44 of its
+52 MiB in huge pages).
 
 **Meilisearch** is the job where most of the "heap" is not ours: of 3.5 to 4.6 GiB resident, 2.8 is
 its LMDB store, and 560 to 590 MiB of the anonymous rest is glibc arenas filled by C code. Cycles a

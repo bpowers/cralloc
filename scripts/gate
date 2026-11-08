@@ -113,13 +113,14 @@ lints() {
 # Its tests build in a few seconds alongside the others. Skipped, saying so, where the target is
 # not installed.
 musl() {
-  if ! rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-musl; then
-    echo "musl: skipped: the x86_64-unknown-linux-musl target is not installed" \
-      "(rustup target add x86_64-unknown-linux-musl)"
+  local target
+  target="$(uname -m)-unknown-linux-musl"
+  if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+    echo "musl: skipped: the $target target is not installed (rustup target add $target)"
     return 0
   fi
-  cargo clippy -p cralloc --all-targets --target x86_64-unknown-linux-musl --quiet -- -D warnings &&
-    cargo test -p cralloc --lib --target x86_64-unknown-linux-musl --quiet front::
+  cargo clippy -p cralloc --all-targets --target "$target" --quiet -- -D warnings &&
+    cargo test -p cralloc --lib --target "$target" --quiet front::
 }
 
 step format cargo fmt --all --check

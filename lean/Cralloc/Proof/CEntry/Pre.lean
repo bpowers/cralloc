@@ -66,14 +66,58 @@ end Contract
 
 theorem trace_eq {M : ISA} (c : Spec.CEntry.Ctx M) {post : M.State → M.State → Prop}
     {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
-    {trace : M.State → List Event → Prop} :
-    (contract c post exit abort trace).trace = trace := rfl
+    {trace : M.State → List Event → Prop} (s : M.State) (evs : List Event) :
+    (contract c post exit abort trace).trace s evs = trace s (c.slab.attemptEvents s evs) := rfl
 
 /-! ## The regions, from the layout and the invariant -/
 
 section World
 
 variable {M : ISA} {c : Spec.CEntry.Ctx M} {s : M.State}
+
+/-- The tables a routine reads beyond the masks' (`Ctx.fixed` after its
+first four). -/
+def tables (c : Spec.CEntry.Ctx M) (s : M.State) : List (Region × Bool) :=
+  match c.kind with
+  | .malloc => [(c.mallocTable s, false)]
+  | .free => [(c.published s, false), (c.regionTable s, false)]
+  | .freeSized => [(c.sizedTable s, false), (c.published s, false), (c.regionTable s, false)]
+  | .calloc => [(c.callocTable s, false)]
+
+theorem fixed_tables (c : Spec.CEntry.Ctx M) (s : M.State) :
+    c.fixed s = (c.rsVar s, false) :: (c.cpuField s, false) :: (c.csField s, true) ::
+      (c.maskTable s, false) :: tables c s := by
+  obtain ⟨A, k, sig⟩ := c
+  cases k <;> rfl
+
+theorem tables_ro {x : Region × Bool} (h : x ∈ tables c s) : x.2 = false := by
+  obtain ⟨A, k, sig⟩ := c
+  cases k <;> simp only [tables, List.mem_cons, List.not_mem_nil, or_false] at h
+  · rw [h]
+  · rcases h with h | h <;> rw [h]
+  · rcases h with h | h | h <;> rw [h]
+  · rw [h]
+
+theorem disj_fixed_more (hw : c.World s) {a b : Region × Bool} (ha : a ∈ c.fixed s)
+    (hb : b ∈ c.more s) (h : (a.2 || b.2) = true) : a.1.Disjoint b.1 :=
+  (List.pairwise_append.mp hw.disj).2.2 a ha b hb h
+
+theorem mem_fixed {x : Region × Bool} (h : x ∈ c.fixed s) : x ∈ c.regions s :=
+  List.mem_append_left _ h
+
+theorem mem_more {x : Region × Bool} (h : x ∈ c.more s) : x ∈ c.regions s :=
+  List.mem_append_right _ h
+
+/-- `rseq_cs` and a table, or the masks' table, are apart. -/
+theorem cs_table (hl : c.Layout s) {x : Region × Bool}
+    (hx : x ∈ (c.maskTable s, false) :: tables c s) : (c.csField s).Disjoint x.1 := by
+  have hd := hl.disj
+  rw [fixed_tables] at hd
+  exact (List.pairwise_cons.mp (List.pairwise_cons.mp (List.pairwise_cons.mp hd).2).2).1 x hx
+    (Bool.true_or _)
+
+theorem table_mem_fixed {x : Region × Bool} (hx : x ∈ tables c s) : x ∈ c.fixed s := by
+  rw [fixed_tables]; simp [hx]
 
 theorem byteAt_lt (a : Addr) : c.byteAt s a < MASK_COUNT := by
   simp only [Spec.CEntry.Ctx.byteAt, MASK_COUNT]; exact ((c.mem s) a).isLt
@@ -100,6 +144,15 @@ theorem maskAt_sub {k : Nat} (hk : k < MASK_COUNT) :
   apply Offset.sub_base
   simp only [MASK_COUNT] at *
   omega
+
+/-- A class byte's whole entry is in the masks' table. -/
+theorem maskAt_contains {k : Nat} (hk : k < MASK_COUNT) :
+    (c.maskTable s).Contains (c.sym s SLABS + BitVec.ofNat 64 (8 * k + MASK_DISP)) 8 := by
+  simp only [Spec.CEntry.Ctx.maskTable]
+  rw [show 8 * k + MASK_DISP = MASK_DISP + 8 * k by omega, BitVec.ofNat_add, ← BitVec.add_assoc]
+  apply Offset.contains_base
+  · simp only [MASK_COUNT] at hk ⊢; omega
+  · simp only [MASK_COUNT] at hk; omega
 
 theorem nowrap_word (hpb : c.A.ptrBits = 64) (hl : c.Layout s) {k i : Nat} (hk : k < MASK_COUNT)
     (hi : i < SLAB_COUNT) : (wordAddr (c.sym s SLABS) i k).toNat + 8 ≤ 2 ^ 64 := by
@@ -220,11 +273,11 @@ theorem layout' (h : Same c s p) : c.Layout p ↔ c.Layout s := by
   · intro hl
     exact ⟨by rw [← h1]; exact hl.slabs_nowrap, by rw [← h1, ← h3]; exact hl.slabs_res,
       by rw [← h2]; exact hl.nowrap, by rw [← h2]; exact hl.disj, by rw [← h2, ← h1]; exact hl.slabs,
-      by rw [← h2, ← h3]; exact hl.res⟩
+      by rw [← h2, ← h3]; exact hl.res, by rw [← h1]; exact hl.page⟩
   · intro hl
     exact ⟨by rw [h1]; exact hl.slabs_nowrap, by rw [h1, h3]; exact hl.slabs_res,
       by rw [h2]; exact hl.nowrap, by rw [h2]; exact hl.disj, by rw [h2, h1]; exact hl.slabs,
-      by rw [h2, h3]; exact hl.res⟩
+      by rw [h2, h3]; exact hl.res, by rw [h1]; exact hl.page⟩
 
 end Same
 
@@ -270,6 +323,71 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
     exact h3 i hi j hj hij
 
 end Inv
+
+/-! ## A state with the same addresses and memory -/
+
+section Kept
+
+variable {M : ISA} {c : Spec.CEntry.Ctx M} {s p : M.State}
+
+/-- A state with the addresses and the memory of `s` has its regions. -/
+theorem Same.regions' (h : Same c s p) (hm : c.mem p = c.mem s) : c.regions p = c.regions s := by
+  have harg : ∀ i, c.arg p i = c.arg s i := h.arg
+  have hsym : ∀ n, c.sym p n = c.sym s n := h.sym
+  have hsize : c.size p = c.size s := by simp only [Spec.CEntry.Ctx.size, harg]
+  have hptr : c.ptr p = c.ptr s := by simp only [Spec.CEntry.Ctx.ptr, harg]
+  have hbyte : ∀ a, c.byteAt p a = c.byteAt s a := fun a => by
+    simp only [Spec.CEntry.Ctx.byteAt, hm]
+  have hover : c.overflows p ↔ c.overflows s := by simp only [Spec.CEntry.Ctx.overflows, harg]
+  have hidx : c.regionIndex p = c.regionIndex s := by
+    simp only [Spec.CEntry.Ctx.regionIndex, Spec.CEntry.Ctx.shift, Spec.CEntry.Ctx.baseIndex,
+      Spec.CEntry.Ctx.published, hptr, hsym, hm]
+  have hcls : c.cls? p = c.cls? s := by
+    simp only [Spec.CEntry.Ctx.cls?, Spec.CEntry.Ctx.mallocClass, Spec.CEntry.Ctx.predicted,
+      Spec.CEntry.Ctx.callocClass, Spec.CEntry.Ctx.regionByte, Spec.CEntry.Ctx.mallocTable,
+      Spec.CEntry.Ctx.sizedTable, Spec.CEntry.Ctx.callocTable, Spec.CEntry.Ctx.regionTable, hsize,
+      hptr, hidx, hbyte, hsym]
+    cases c.kind with
+    | calloc => exact ite_congr (propext (by rw [hover])) (fun _ => rfl) (fun _ => rfl)
+    | _ => rfl
+  have hcpu : c.cpu p = c.cpu s := by
+    show ((c.mem p).readW (c.slab.cpuField p).base 32).toNat =
+      ((c.mem s).readW (c.slab.cpuField s).base 32).toNat
+    rw [hm, Proof.Slab.Same.cpuField h]
+  have hword : ∀ k, c.word p k = c.word s k := fun k => by simp only [Spec.CEntry.Ctx.word, hcpu, hsym]
+  have hw : ∀ k, c.w p k = c.w s k := fun k => by simp only [Spec.CEntry.Ctx.w, hword, hm]
+  have hsl : ∀ k, c.slotsOf' p k = c.slotsOf' s k := fun k => by
+    simp only [Spec.CEntry.Ctx.slotsOf', Spec.CEntry.Ctx.maskOf, hsym, hm]
+  have hmore : c.more p = c.more s := by
+    unfold Spec.CEntry.Ctx.more
+    refine ite_congr (by simp only [Spec.CEntry.Ctx.InRange, hcpu]) (fun _ => ?_) (fun _ => rfl)
+    rw [hcls]
+    cases c.cls? s <;> simp only [Spec.CEntry.Ctx.magRegion, hw, hsl, hword]
+  simp only [Spec.CEntry.Ctx.regions, h.fixed', hmore]
+
+/-- The precondition holds in a state with the addresses, the memory and the
+permissions of one where it holds, if the convention's well-formedness does. -/
+theorem pre_of_same {post : M.State → M.State → Prop}
+    {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
+    {trace : M.State → List Event → Prop} {vals : M.State → List (BitVec 64)}
+    (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
+    (hb : ∀ x, Sig.bufs c.sig.params (vals x) = [])
+    (ha : ∀ x, c.A.argArea ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) x = [])
+    (hwf : c.A.wf ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) 0 p)
+    (hs : (contract c post exit abort trace).pre s) (hsame : Same c s p) (hm : c.mem p = c.mem s)
+    (hrd : c.A.rd p = c.A.rd s) (hwr : c.A.wr p = c.A.wr s) :
+    (contract c post exit abort trace).pre p := by
+  obtain ⟨-, hw, htp, hsym, hl, hinv⟩ := (pre_iff c hv (hb s) (ha s)).mp hs
+  have hreg := hsame.regions' hm
+  have hi : c.inv p := inv_frame hsame (W := []) (by rw [hm]; exact Frame.refl _ _) (by simp) hinv
+  refine (pre_iff c hv (hb p) (ha p)).mpr ⟨hwf, ⟨?_, ?_, ?_, ?_, ?_⟩, htp, hsym, hsame.layout'.mpr hl, hi⟩
+  · simp only [Spec.CEntry.Ctx.ro, hreg, hrd]; exact hw.rd
+  · simp only [Spec.CEntry.Ctx.rw, hreg, hwr]; exact hw.wr
+  · rw [hreg]; exact hw.nowrap
+  · rw [hreg]; exact hw.disj
+  · rw [hreg, hsame.res']; exact hw.res
+
+end Kept
 
 /-! ## A retry's precondition -/
 

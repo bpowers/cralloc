@@ -37,7 +37,15 @@ const TLS: usize = 252_000;
 /// data, the C library's block, and 64 KiB for frames that reach 34 KiB in a debug build.
 const DEEPEST: u64 = TLS as u64 + (8 << 10) + (64 << 10);
 
-const PAGE: u64 = 4096;
+/// The kernel's page size.
+fn page() -> u64 {
+    unsafe extern "C" {
+        fn sysconf(name: i32) -> i64;
+    }
+    const SC_PAGESIZE: i32 = 30;
+    // SAFETY: a query of a constant of the system.
+    unsafe { sysconf(SC_PAGESIZE) as u64 }
+}
 
 std::thread_local! {
     static BIG: std::cell::Cell<[u8; TLS]> = const { std::cell::Cell::new([0; TLS]) };
@@ -117,30 +125,30 @@ fn stack(task: &Path) -> Stack {
     // Each page's entry in `/proc/self/pagemap` says whether it is present (bit 63) and
     // whether it is a guard region (bit 58, Linux 6.14), without faulting anything in.
     // Neighbouring stacks may share the mapping; their guard pages separate them.
-    let pages = ((hi - lo) / PAGE) as usize;
+    let pages = ((hi - lo) / page()) as usize;
     let mut entries = vec![0u8; pages * 8];
     File::open("/proc/self/pagemap")
         .unwrap()
-        .read_exact_at(&mut entries, lo / PAGE * 8)
+        .read_exact_at(&mut entries, lo / page() * 8)
         .unwrap();
     let entry = |i: usize| u64::from_le_bytes(entries[i * 8..i * 8 + 8].try_into().unwrap());
     let present = |i: usize| entry(i) >> 63 & 1 != 0;
     let guard = |i: usize| entry(i) >> 58 & 1 != 0;
-    let at = ((sp - lo) / PAGE) as usize;
+    let at = ((sp - lo) / page()) as usize;
     let first = (0..=at).rev().find(|&i| guard(i)).map_or(0, |g| g + 1);
     let end = (at..pages).find(|&i| guard(i)).unwrap_or(pages);
     // Only present pages are read: a read through `/proc/self/mem` maps the zero page into
     // an absent page, which would then count as present. An absent page was never written.
     let mem = File::open("/proc/self/mem").unwrap();
-    let mut own = vec![0u8; (end - first) * PAGE as usize];
-    for (i, page) in own.chunks_mut(PAGE as usize).enumerate() {
+    let mut own = vec![0u8; (end - first) * page() as usize];
+    for (i, chunk) in own.chunks_mut(page() as usize).enumerate() {
         if present(first + i) {
-            mem.read_exact_at(page, lo + PAGE * (first + i) as u64)
+            mem.read_exact_at(chunk, lo + page() * (first + i) as u64)
                 .unwrap();
         }
     }
     let lowest = own.iter().position(|&b| b != 0).unwrap() as u64;
-    let resident = (first..end).filter(|&i| present(i)).count() as u64 * PAGE;
+    let resident = (first..end).filter(|&i| present(i)).count() as u64 * page();
     Stack {
         size: own.len() as u64,
         written: own.len() as u64 - lowest,
@@ -215,9 +223,9 @@ fn run(who: &str) {
         last.flags
     );
     // The touched pages, and a few the C library writes around them.
-    let touched = last.written.next_multiple_of(PAGE);
+    let touched = last.written.next_multiple_of(page());
     assert!(
-        last.resident <= touched + 4 * PAGE,
+        last.resident <= touched + 4 * page(),
         "{who}: {} bytes of the stack resident, {touched} touched",
         last.resident
     );
