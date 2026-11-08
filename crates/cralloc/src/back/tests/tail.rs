@@ -266,7 +266,7 @@ fn a_claim_above_the_boundary_marks_and_a_heartbeat_raises() {
     assert_ne!(before.from, 0);
     // The fills take the lowest free slots, which are in the tail now.
     let advised = os.calls(Call::AdviseHuge);
-    let again = fill(&back, class(), 4096);
+    let again = fill(&back, class(), 4096 * PAGE_SCALE);
     assert!(!again.is_empty());
     assert_eq!(
         os.calls(Call::AdviseHuge),
@@ -807,7 +807,7 @@ fn the_walk_reads_a_dense_huge_page_at_a_look() {
         true,
         super::super::purge::Scope::Idle,
         false,
-        false,
+        crate::back::purge::Splits::Any,
     );
     assert_eq!(purged, 0);
     let units = back.space().plan().region_size() / huge();
@@ -892,7 +892,7 @@ fn the_thread_is_woken_for_a_mark_and_not_for_a_refused_raise() {
     let _ = kept;
 }
 
-/// The fork hook, end to end: the child's first slow path draws its generation, the depot
+/// The fork hook, end to end: the call in the child that needs a generation draws it, the depot
 /// tells the back end (`Source::forked`), and every inherited tail word asks for a repair,
 /// loses an owner bit no thread of the child holds, and shows its mark to the lookers.
 #[test]
@@ -968,7 +968,7 @@ fn a_raise_past_the_watermark_goes_to_the_end() {
         .unwrap();
     let from = Hints::unpack(host.hints(region).load()).huge_from.unwrap();
     let first = from / hp;
-    assert!(first + 4 + super::super::policy::TAIL_HEADROOM_HUGE_PAGES < units);
+    assert!(first + 4 + super::super::policy::tail_headroom(Standard::GEOMETRY) < units);
     tick(&back, 2);
     let epoch = back.epoch();
     tail::note(&host, region, first + 1);
@@ -1047,7 +1047,7 @@ fn a_raise_ages_like_a_fill_and_the_walk_takes_back_what_was_rebuilt() {
         true,
         super::super::purge::Scope::Idle,
         false,
-        false,
+        crate::back::purge::Splits::Any,
     );
     assert_eq!(
         os.calls(Call::SplitHuge),
@@ -1081,7 +1081,7 @@ fn walk_once<'a>(back: &Back<'a, Sim>, region: crate::space::RegionId) {
         true,
         super::super::purge::Scope::IdleAnyRun,
         false,
-        false,
+        crate::back::purge::Splits::Any,
     );
 }
 
@@ -1332,7 +1332,7 @@ fn a_walk_done_below_the_frontier_lowers_its_note() {
         true,
         super::super::purge::Scope::Idle,
         false,
-        true,
+        crate::back::purge::Splits::One,
     );
     assert!(done);
     assert_eq!(word_at(&back, at).from, units - 1);
@@ -1384,7 +1384,7 @@ fn a_step_returns_no_more_than_its_limit_and_a_run() {
         true,
         super::super::purge::Scope::Idle,
         false,
-        false,
+        crate::back::purge::Splits::Any,
     );
     assert!(purged > 0);
     assert!(
@@ -1416,7 +1416,7 @@ fn short_runs_go_back_only_at_their_pass() {
             false,
             scope,
             false,
-            false,
+            crate::back::purge::Splits::Any,
         )
         .0
     };
@@ -1512,7 +1512,7 @@ fn a_whole_huge_page_above_the_boundary_gets_the_look_and_the_cut() {
         true,
         super::super::purge::Scope::IdleAnyRun,
         false,
-        false,
+        crate::back::purge::Splits::Any,
     );
     assert_eq!(
         os.calls(Call::SplitHuge),
@@ -1687,7 +1687,7 @@ fn the_count_of_a_lap_does_not_believe_the_clean_bits_under_the_advice() {
         true,
         super::super::purge::Scope::IdleAnyRun,
         true,
-        false,
+        crate::back::purge::Splits::Any,
     );
     assert!(
         found >= rebuilt * huge() / 2,

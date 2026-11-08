@@ -22,11 +22,12 @@ use super::Depot;
 use crate::classes::{MagazineSize, SLOT_BYTES};
 use crate::front::sync::AtomicPtr;
 use crate::os::Os;
-use crate::space::Space;
+use crate::space::{Plan, Space};
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use core::sync::atomic::fence;
 
 /// Bytes of the magazine area committed at a time, beyond what a new magazine needs, so that
 /// most magazines are made without a system call.
@@ -232,6 +233,14 @@ pub(super) const fn admits(
         && size.bytes() <= committed - offset
 }
 
+/// Where the magazine area of `plan` ends: its size, capped so that every offset in it has a
+/// 32-bit number. The last offset below `2^32` units has the number `u32::MAX`, so that is the
+/// cap, and it is a page boundary on every kernel, as a commit up to the end must be
+/// ([`Space::is_callable_range`]).
+fn area_end(plan: Plan) -> usize {
+    plan.magazine_area_size().min((1usize << 32) * UNIT)
+}
+
 /// The magazine area of a heap, with the depot's counters for it.
 pub(crate) struct Area<'a, O: Os> {
     space: Space<'a, O>,
@@ -256,13 +265,9 @@ impl<'a, O: Os> Area<'a, O> {
         UNIT
     }
 
-    /// The area's size in this reservation, capped so that every offset in it has a 32-bit
-    /// number.
+    /// Where the area ends in this reservation ([`area_end`]).
     fn end(&self) -> usize {
-        self.space
-            .plan()
-            .magazine_area_size()
-            .min(u32::MAX as usize * UNIT)
+        area_end(self.space.plan())
     }
 
     /// The pointer `offset` bytes into the area, with the reservation's provenance.
@@ -274,15 +279,34 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// The magazine of `size` at `offset`, if one can be there: past the first unit,
     /// aligned to its size, and inside the committed part.
+    ///
+    /// **The committed mark.** A slab word can name a magazine with no happens-before edge to this
+    /// thread: a thread that has moved reads another CPU's word, which a routine wrote with a
+    /// plain store. Whoever installed that magazine read a mark that admits it, with acquire, before
+    /// its store, so a reader that loads the word with acquire and then this mark finds one at
+    /// least as high. Rust's model does not cover a routine's store; Arm's rules and x86-64's total
+    /// store order both give this (`docs/research/memory-ordering.md`). A refusal, which most
+    /// callers turn into an abort, comes only after a second look behind a full fence, which needs
+    /// no order on the read of the word at all.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.growth.committed.load(Acquire);
-        let fits = admits(offset, size, Self::start(), committed);
+        let fits = admits(offset, size, Self::start(), committed)
+            || self.admitted_on_a_second_look(offset, size);
         // A number must fit the depot's 32 bits (`Area::end` keeps the area within them).
         MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
         fits.then(|| Magazine {
             word: self.at(offset).map_addr(|base| base | size.ordinal()),
             area: PhantomData,
         })
+    }
+
+    /// Whether the committed mark admits this after all, read behind a full fence, as it does not
+    /// on any path that runs but for a slab word or link that really names nothing.
+    #[cold]
+    fn admitted_on_a_second_look(&self, offset: usize, size: MagazineSize) -> bool {
+        fence(SeqCst);
+        let committed = self.depot.growth.committed.load(Acquire);
+        admits(offset, size, Self::start(), committed)
     }
 
     /// The number of a magazine of this area: its offset in units, which `magazine_at` checked
@@ -320,7 +344,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// Makes `start..end` of the area writable if it is not already.
     fn commit_to(&self, end: usize) -> bool {
-        let page = O::GEOMETRY.page_size();
+        let page = O::geometry().page_size();
         loop {
             let committed = self.depot.growth.committed.load(Acquire);
             if committed >= end {
@@ -336,7 +360,8 @@ impl<'a, O: Os> Area<'a, O> {
             }
             // Racing committers may cover the same pages; making them writable twice is
             // harmless, and the mark only moves up, after the memory under it is writable.
-            self.depot.growth.committed.fetch_max(target, AcqRel);
+            // Sequentially consistent, for the fence of a second look (`Area::magazine_at`).
+            self.depot.growth.committed.fetch_max(target, SeqCst);
         }
     }
 
@@ -391,5 +416,32 @@ impl<'a, O: Os> Area<'a, O> {
             .created
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(magazine)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::Geometry;
+
+    /// The commit that reaches the end of the area asks for a whole number of pages, or
+    /// `Space::commit` aborts where the area's being used up should only cost a magazine. And
+    /// every offset below the end has a number, at the largest regions too.
+    #[test]
+    fn the_area_ends_on_a_page_and_every_offset_in_it_has_a_number() {
+        for geometry in [
+            Geometry::DESIGN,
+            Geometry::of_kernel(12),
+            Geometry::of_kernel(14),
+            Geometry::of_kernel(16),
+        ] {
+            for shift in geometry.min_region_shift()..=geometry.max_region_shift() {
+                let plan = geometry.plan(shift).unwrap();
+                let end = area_end(plan);
+                assert_eq!(end, plan.magazine_area_size());
+                assert!(end.is_multiple_of(geometry.page_size()), "{shift}");
+                assert!(u32::try_from((end - UNIT) / UNIT).is_ok(), "{shift}");
+            }
+        }
     }
 }

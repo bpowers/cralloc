@@ -5,9 +5,20 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 out=$here/out
-cpus=${BUILD_CPUS:-4-7,20-23}
+if [ "$(uname -m)" = aarch64 ]; then default_cpus=0-5; else default_cpus=4-7,20-23; fi
+cpus=${BUILD_CPUS:-$default_cpus}
 run() { taskset -c "$cpus" "$@"; }
 mkdir -p "$out"
+if [ "$(uname -m)" = aarch64 ]; then
+  # Only the C loops: the study's candidate routines and stand-ins are x86-64 assembly.
+  cflags=(-O2 -fPIE -pie -Wall -Wextra -Wl,-z,now)
+  run cc "${cflags[@]}" -o "$out/cloop-plt" "$here/cloop.c"
+  run cc "${cflags[@]}" -fno-plt -o "$out/cloop-noplt" "$here/cloop.c"
+  (cd "$here/static" && run cargo build --release -q)
+  run cc "${cflags[@]}" -o "$out/cloop-static" "$here/cloop.c" "$here/static/target/release/libcentry_static.a"
+  echo "built $out"
+  exit 0
+fi
 run python3 "$here/gen.py" "$out"
 # No relaxation: a GOT load stays a GOT load, so both copies run the instructions written.
 as_flags=-Wa,-mrelax-relocations=no

@@ -14,6 +14,12 @@
 //! the same specifications in Rust. The slow paths are generic over this trait and use nothing
 //! else to write a slab.
 //!
+//! A routine's loads and stores are plain, so a routine orders nothing against another thread.
+//! The thread that next runs on the CPU sees what this one stored because a context switch is a
+//! full barrier, and a drainer because its fence is one (`Os::fence`); nothing else may rely on
+//! a commit having reached memory, or on a magazine's contents having reached it before the commit
+//! did (`docs/research/memory-ordering.md`).
+//!
 //! In each specification, `S` is the slab of the CPU the thread reads, `S[f]` the field `f` of
 //! it (a byte offset, [`Field::offset`]), and `M[a]` the pointer-sized word at address `a`.
 //! "Fail" means the routine returns the stated failure having changed nothing.

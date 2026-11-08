@@ -13,19 +13,26 @@
 # A build holds out/.lock exclusively, and a benchmark session holds it shared, so the
 # libraries cannot change under a running session.
 #
-# Builds are confined to BENCH_BUILD_CPUS (default 4-7,20-23) so they stay off the CPUs
-# that measurements use. out/manifest/ records versions, commits and flags.
+# Builds are confined to BENCH_BUILD_CPUS (default the set `heavy` of scripts/cpusets) so they
+# stay off the CPUs that measurements use. Start it through scripts/heavy. On aarch64 everything is
+# built for the host's CPU and page size, as `.cargo/config.toml` builds the Rust: inline LSE atomics
+# for all, since an allocator left on outlined atomics would be handicapped by our build and not
+# by its design. out/manifest/ records versions, commits and flags.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 # The main checkout: the parent of the git directory every worktree shares.
 main=$(dirname "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)")
 out=${BENCH_BASELINES:-$main/bench/baselines/out}
-cpus=${BENCH_BUILD_CPUS:-4-7,20-23}
-jobs=8
+cpus=${BENCH_BUILD_CPUS:-$("$here/../../scripts/cpusets" heavy)}
+jobs=$(taskset -c "$cpus" nproc)
 bazel=${BAZEL:-$HOME/bin/bazel}
 tp=${THIRD_PARTY:-$main/third_party}
 [ -d "$tp/mimalloc" ] || { echo "no third_party checkouts at $tp (set THIRD_PARTY)" >&2; exit 1; }
+case "$(uname -m)" in
+  aarch64) march=(-mcpu=native) ;;
+  *) march=() ;;
+esac
 
 components=("$@")
 [ ${#components[@]} -gt 0 ] || components=(probe jemalloc mimalloc cbench tcmalloc)
@@ -51,6 +58,8 @@ cc: $(cc --version | head -1)
 c++: $(c++ --version | head -1)
 cmake: $(cmake --version | head -1)
 rustc: $(rustc --version)
+page size: $(getconf PAGESIZE)
+compiler's reading of the CPU flags: ${march[*]:-none} $(cc "${march[@]}" -Q --help=target 2>/dev/null | sed -n 's/^ *-mcpu= *//p')
 EOF
 }
 
@@ -67,6 +76,9 @@ EOF
 }
 
 build_jemalloc() {
+  # On aarch64, from source: jemalloc takes the page size at configure time, so a distribution's
+  # package is for the kernels it chose, and its atomics are outlined.
+  if [ ${#march[@]} -gt 0 ]; then build_jemalloc_source; return; fi
   # The distribution package, for LD_PRELOAD runs: what a C program gets from jemalloc on
   # this system. Nothing to build; record what it is. Native Rust runs use the static build
   # that tikv-jemallocator compiles (bench/alloc), which cargo builds and records.
@@ -82,6 +94,30 @@ build_jemalloc() {
   } | manifest jemalloc
 }
 
+build_jemalloc_source() {
+  # The version the distribution ships, with its default configuration otherwise.
+  rm -rf "$out/jemalloc"; mkdir -p "$out/jemalloc"
+  tar -C "$tp" --exclude=.git -cf - jemalloc | tar -C "$out/jemalloc" -xf -
+  local src=$out/jemalloc/jemalloc lg_page version
+  lg_page=$(python3 -I -c 'import os; print(os.sysconf("SC_PAGESIZE").bit_length() - 1)')
+  version=$(git --no-optional-locks -C "$tp/jemalloc" describe --long --always)
+  local configure=(--with-lg-page="$lg_page" --with-version="$version" --enable-doc=no)
+  # 5.3.0 calls an internal of libstdc++ that GCC 16 no longer declares through <new>.
+  sed -i 's/std::__throw_bad_alloc()/throw std::bad_alloc()/' "$src/src/jemalloc_cpp.cpp"
+  (cd "$src" && autoconf && CFLAGS="${march[*]}" CXXFLAGS="${march[*]}" run ./configure "${configure[@]}") \
+    > "$out/jemalloc/configure.log"
+  run make -C "$src" -j "$jobs" build_lib_shared > "$out/jemalloc/build.log"
+  cp -L "$src/lib/libjemalloc.so.2" "$out/jemalloc/libjemalloc.so"
+  {
+    echo "source: third_party/jemalloc $(describe_of jemalloc) $(head_of jemalloc) ($(dirty_of jemalloc))"
+    echo "configure: CFLAGS=${march[*]} CXXFLAGS=${march[*]} ./configure ${configure[*]}"
+    echo "patched: jemalloc_cpp.cpp throws std::bad_alloc itself, for GCC 16"
+    echo "--- stats_print at exit of /bin/true:"
+    LD_PRELOAD=$out/jemalloc/libjemalloc.so MALLOC_CONF=stats_print:true /bin/true 2>&1 |
+      sed -n '/^Version/,/^Run-time/p;/Page size/p'
+  } | manifest jemalloc
+}
+
 build_mimalloc() {
   # Two builds of the same source. For Rust, a static archive compiled the way the
   # `libmimalloc-sys` crate compiles it: the single translation unit src/static.c, its
@@ -89,13 +125,13 @@ build_mimalloc() {
   # calls mi_* by name and C malloc stays glibc's. For LD_PRELOAD, the shared library with
   # override that mimalloc's own cmake build produces.
   rm -rf "$out/mimalloc"; mkdir -p "$out/mimalloc"
-  local static=(-O3 -fPIC -ffunction-sections -fdata-sections -std=gnu11 -DMI_DEBUG=0 -DMI_BUILD_RELEASE
+  local static=(-O3 "${march[@]}" -fPIC -ffunction-sections -fdata-sections -std=gnu11 -DMI_DEBUG=0 -DMI_BUILD_RELEASE
                 -DNDEBUG -ftls-model=initial-exec -Wno-error=date-time
                 -I "$tp/mimalloc/include" -I "$tp/mimalloc/src")
   run cc "${static[@]}" -c "$tp/mimalloc/src/static.c" -o "$out/mimalloc/static.o"
   ar rcs "$out/mimalloc/libmimalloc.a" "$out/mimalloc/static.o"
   local shared=(-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF
-                -DMI_OVERRIDE=ON -DMI_BUILD_SHARED=ON -DMI_BUILD_STATIC=OFF)
+                -DMI_OVERRIDE=ON -DMI_BUILD_SHARED=ON -DMI_BUILD_STATIC=OFF "-DCMAKE_C_FLAGS=${march[*]}")
   run cmake -S "$tp/mimalloc" -B "$out/mimalloc/build-shared" "${shared[@]}" > "$out/mimalloc/cmake-shared.log"
   run cmake --build "$out/mimalloc/build-shared" -j "$jobs" -- VERBOSE=1 > "$out/mimalloc/build-shared.log"
   cp -L "$out/mimalloc/build-shared/libmimalloc.so" "$out/mimalloc/"
@@ -115,6 +151,11 @@ build_tcmalloc() {
   local ws=$out/tcmalloc/src/tcmalloc
   mkdir -p "$ws/bench_shim"
   cp "$here/tcmalloc-shim/BUILD.bazel" "$ws/bench_shim/BUILD.bazel"
+  # The registry's abseil-cpp changed compatibility level between the release protobuf asks for
+  # and the one tcmalloc asks for, which bazel refuses unless the root chooses one: tcmalloc's.
+  local absl
+  absl=$(sed -n 's/^bazel_dep(name = "abseil-cpp", version = "\([^"]*\)".*/\1/p' "$ws/MODULE.bazel")
+  echo "single_version_override(module_name = \"abseil-cpp\", version = \"$absl\")" >> "$ws/MODULE.bazel"
   local root=$out/tcmalloc/bazel-root
   # Initial-exec TLS, as preloaded allocators are built (mimalloc's and jemalloc's shared
   # builds use it for their thread-locals). Without it, -fPIC with this GCC's default
@@ -124,15 +165,17 @@ build_tcmalloc() {
   # costs 5 to 7 cycles"). Static links relax either model to local-exec, so this changes only
   # the shared library.
   local flags=(-c opt --symlink_prefix=/ --jobs="$jobs" --local_resources=cpu="$jobs"
-               --experimental_cc_static_library --copt=-ftls-model=initial-exec)
-  (cd "$ws" && run "$bazel" --output_user_root="$root" build "${flags[@]}" \
-      //bench_shim:libtcmalloc.so //bench_shim:tcmalloc_static) 2>&1 | tee "$out/tcmalloc/build.log" | tail -5
+               --experimental_cc_static_library --copt=-ftls-model=initial-exec "${march[@]/#/--copt=}")
+  # The server outlives this script, so it must not inherit the lock, and must not linger either.
+  local startup=(--output_user_root="$root" --max_idle_secs=60)
+  (cd "$ws" && run "$bazel" "${startup[@]}" build "${flags[@]}" \
+      //bench_shim:libtcmalloc.so //bench_shim:tcmalloc_static) 9>&- 2>&1 | tee "$out/tcmalloc/build.log" | tail -5
   local bin
-  bin=$(cd "$ws" && "$bazel" --output_user_root="$root" info "${flags[@]}" bazel-bin 2>/dev/null)
+  bin=$(cd "$ws" && "$bazel" "${startup[@]}" info "${flags[@]}" bazel-bin 9>&- 2>/dev/null)
   cp "$bin/bench_shim/libtcmalloc.so" "$out/tcmalloc/libtcmalloc.so"
   cp "$bin/bench_shim/libtcmalloc_static.a" "$out/tcmalloc/libtcmalloc.a"
   chmod u+w "$out/tcmalloc/"lib*
-  (cd "$ws" && "$bazel" --output_user_root="$root" shutdown) || true
+  (cd "$ws" && "$bazel" "${startup[@]}" shutdown 9>&-) || true
   # Bazel autodetects the C++ toolchain; record what it found and what -c opt means there.
   local cc_build cxx opt
   cc_build=$(find "$root" -path '*external/*local_config_cc/BUILD' | head -1)
@@ -157,8 +200,8 @@ build_cbench() {
   local src=$tp/mimalloc-bench/bench
   local o=$out/cbench
   rm -rf "$o"; mkdir -p "$o/dl"
-  local cf="-O3 -DNDEBUG -w -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-return-mismatch -Wno-incompatible-pointer-types"
-  local cxf="-O3 -DNDEBUG -std=c++17 -w"
+  local cf="-O3 ${march[*]} -DNDEBUG -w -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-return-mismatch -Wno-incompatible-pointer-types"
+  local cxf="-O3 ${march[*]} -DNDEBUG -std=c++17 -w"
   run c++ $cxf -DCPP=1 -o "$o/larson" "$src/larson/larson.cpp" -lpthread
   run c++ $cxf -fsized-deallocation -DCPP=1 -DSIZED=1 -o "$o/larson-sized" "$src/larson/larson.cpp" -lpthread
   run cc $cf -o "$o/xmalloc-test" "$src/xmalloc-test/xmalloc-test.c" -lpthread

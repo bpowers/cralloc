@@ -368,6 +368,9 @@ structure Layout : Prop where
   disj : (c.fixed s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1)
   slabs : ∀ x ∈ c.fixed s, x.1.Disjoint (c.slabs s)
   res : ∀ x ∈ c.fixed s, ∀ q ∈ c.A.reserved 0 s, x.1.Disjoint q
+  /-- On a target whose code forms the slabs' address from its page alone, the
+  slabs start on a page. -/
+  page : c.A.slabsOnPage = true → (c.slabs s).base.toNat % 4096 = 0
 
 /-- The stack `env` keeps: out of line, the return address's slot (the
 reserved stack); inline, none, since the frame the block is inlined into may
@@ -488,6 +491,15 @@ commit is the last access and the only store to a slab word. -/
 def rd (a : Addr) (n v : Nat) : Event := ⟨a, n, false, v⟩
 def wr (a : Addr) (n v : Nat) : Event := ⟨a, n, true, v⟩
 
+/-- What the traces below are of, for an attempt from `s` whose accesses are `evs`:
+they start with the read of `__rseq_offset`. A routine that reads it once, in its
+setup (`Abi.setupFindsArea`), reads it in no attempt, so they are `evs` after that
+read, of the value it has in `s`, which is the one the setup read (`env` keeps it). -/
+def attemptEvents (evs : List Event) : List Event :=
+  bif c.A.setupFindsArea then
+    rd (c.sym s RSEQ_OFFSET) 8 ((c.mem s).readW (c.sym s RSEQ_OFFSET) 64).toNat :: evs
+  else evs
+
 /-- The accesses up to the slab word's, given the values read. -/
 def headTrace (o d i w : Nat) : List Event :=
   let a := c.tp s + BitVec.ofNat 64 o
@@ -574,7 +586,7 @@ def contract {M : ISA} (c : Ctx M) (post : M.State → M.State → Prop)
     post := post
     exit := exit
     abort := fun s p => abort s p ∧ c.inv p
-    trace := trace
+    trace := fun s evs => trace s (c.attemptEvents s evs)
     env := fun p p' => c.A.rd p' = c.ro p' ∧ c.A.wr p' = c.rw p' ∧
       Kept (c.rsVar p :: c.keptStack p) (c.mem p) (c.mem p') ∧ (c.inv p → c.inv p') }
   c.sig.contract A (post := post') (x := x)
@@ -613,6 +625,24 @@ def pushInlineContract {M : ISA} (A : Abi M) : Contract M :=
   contract c
     (post := fun s s' => c.Pushed s (c.arg s 2) s')
     (exit := fun t s s' => t = MISS ∧ c.PushMissed s (c.arg s 2) s')
+    (abort := PushAbort c)
+    (trace := fun s => c.PushTrace s (c.arg s 2))
+
+/-- `slab_push` inline with its result in a register, on a target where a
+conditional branch may not leave an inlined function (`Printer.coldFar`):
+`fn(word: usize, mask: usize, p: usize) -> usize`. -/
+def pushInlineRetSig : Sig where
+  params := [("word", .int .usize), ("mask", .int .usize), ("p", .int .usize)]
+  ret := some .usize
+
+/-- Inline push of `p`: pushes it and returns a value not zero, or returns zero and
+changes nothing the abstraction sees. -/
+def pushInlineRetContract {M : ISA} (A : Abi M) : Contract M :=
+  let c : Ctx M := ⟨A, .inline, pushInlineRetSig⟩
+  contract c
+    (post := fun s s' => (c.Pushed s (c.arg s 2) s' ∧ A.ret s' ≠ 0) ∨
+      (c.PushMissed s (c.arg s 2) s' ∧ A.ret s' = 0))
+    (exit := fun _ _ _ => False)
     (abort := PushAbort c)
     (trace := fun s => c.PushTrace s (c.arg s 2))
 
@@ -720,17 +750,44 @@ def cpuContract {M : ISA} (A : Abi M) : Contract M :=
   cpuSig.contract (A.withExtra (some (cpuRegions A))) (post := Curry.const (fun _ _ _ => True) _)
     (x := x)
 
+/-- The signature of `area_offset`. -/
+def areaOffsetSig : Sig where
+  params := []
+  ret := some .usize
+
+/-- What `area_offset` may read: `__rseq_offset`. -/
+def areaOffsetRegions {M : ISA} (A : Abi M) (s : M.State) : List (Region × Bool) :=
+  [((cpuView A).rsVar s, false)]
+
+/-- `area_offset` returns the rseq area's offset from the thread pointer, the word the routines'
+contracts call `__rseq_offset`, and changes no memory. -/
+def areaOffsetContract {M : ISA} (A : Abi M) : Contract M :=
+  let x : Sig.Extra M := {
+    pre := fun _ => A.sym.isSome
+    post := fun s s' => A.ret s' = (A.mem s).readW ((cpuView A).rsVar s).base 64 ∧ A.mem s' = A.mem s }
+  areaOffsetSig.contract (A.withExtra (some (areaOffsetRegions A)))
+    (post := Curry.const (fun _ _ _ => True) _) (x := x)
+
 /-! ## The functions
 
 Their documentation states what `Ctx.pre` and `Ctx.regions` require of the
 caller, in Rust terms. -/
 
-/-- How the documentation names the stack an out-of-line routine (`false`)
-and an inline one (`true`) may not touch: the calling convention's reserved
-memory (`Abi.reservedDoc`). -/
-def stackDoc (inline : Bool) : String :=
-  if inline then "the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it"
-  else "the return address on the stack"
+/-- What a routine's documentation says that differs from target to target, from the target's
+calling convention. -/
+structure Docs where
+  /-- How it names the stack the routine may not touch (`Abi.reservedDoc`), if the convention
+  reserves any. -/
+  stack : Option String
+  /-- What it requires of `SLABS` itself. -/
+  slabs : List String
+
+def Docs.of {M : ISA} (A : Abi M) : Docs where
+  stack := A.reservedDoc 0
+  slabs := bif A.slabsOnPage then
+    ["`SLABS` must start on a boundary of 4096 bytes: the code forms its address from its page \
+      alone (`VG.Spec.Slab.Ctx.Layout`)."]
+  else []
 
 /-- The memory every routine reads or writes whatever its CPU number, as
 the documentation names it (`Ctx.fixed`), for a mask entry `mask` (the C
@@ -739,8 +796,11 @@ def fixedNames (mask link : Option String) : List String :=
   ["`SLABS`", "the thread's `rseq_cs` and `cpu_id`", "`__rseq_offset`"] ++ mask.toList ++ link.toList
 
 /-- That the slabs and what `Ctx.fixed` names lie apart (`Ctx.Layout`). -/
-def layoutDoc (inline : Bool) (mask link : Option String) : String :=
-  s!"None of {englishList "and" (fixedNames mask link)} may overlap {stackDoc inline} or wrap \
+def layoutDoc (mask link : Option String) (d : Docs) : String :=
+  let stack := match d.stack with
+    | some st => s!"overlap {st} or wrap"
+    | none => "wrap"
+  s!"None of {englishList "and" (fixedNames mask link)} may {stack} \
     around the end of the address space, nor overlap another of them, but where both are only \
     read ({englishList "and" (["`cpu_id`", "`__rseq_offset`"] ++ mask.toList)}) \
     (`VG.Spec.Slab.Ctx.Layout`)."
@@ -764,26 +824,26 @@ def registeredDoc : String :=
 
 /-- What every pop and push requires of the thread and of the slabs; the
 mask is the argument `mask`. -/
-def safety : List String :=
+def safety (d : Docs) : List String :=
   [registeredDoc,
   s!"`word` must be `SLABS + 8 * class` for a class below {CLASS_LIMIT}: the address of the \
     class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of \
     `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}.",
-  layoutDoc true none none,
-  s!"in each of the {SLAB_COUNT} slabs of \
+  layoutDoc none none d] ++ d.slabs ++
+  [s!"in each of the {SLAB_COUNT} slabs of \
     `SLABS`, the class's slab word must be 0, a marker \
     (a word whose low {MARKER_SHIFT} bits are 1), or the address of a slot other than slot 0 \
     of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 \
     (a pop returns 0 for none) and which does not overlap \
-    {englishList "or" (fixedNames none none ++ [stackDoc true])}, the magazine another \
+    {englishList "or" (fixedNames none none ++ d.stack.toList)}, the magazine another \
     slab's word of the class names, nor wrap around the end of the address space. " ++ keepDoc]
 
 /-- What the slow path's routines require of the thread and the slab, and,
 for a stack's, of the stacks. -/
-def slowSafety (stack : Bool) (push : Bool) : List String :=
+def slowSafety (stack : Bool) (push : Bool) (d : Docs) : List String :=
   let link := if push then some "`magazine[0]`" else none
   [registeredDoc,
-    layoutDoc false none link] ++
+    layoutDoc none link d] ++ d.slabs ++
   (if stack then [] else
     [s!"In each of the {SLAB_COUNT} slabs of `SLABS`, the word at `offset` (rounded down to a \
       multiple of 8, within the slab) must not be `NO_CPU` (2), which the function returns \
@@ -794,8 +854,8 @@ def slowSafety (stack : Bool) (push : Bool) : List String :=
       multiple of 8, within the slab) must be a marker (a word whose low {MARKER_SHIFT} bits \
       are 1) or head a stack of magazines: 0, or the address, a nonzero multiple of 8, of a \
       magazine whose link slot holds the next head. No link slot of those stacks may overlap \
-      {englishList "or" (fixedNames none link ++ [stackDoc false])}, nor wrap around the end \
-      of the address space. " ++ keepDoc]
+      {englishList "or" (fixedNames none link ++ d.stack.toList)}, nor wrap around the \
+      end of the address space. " ++ keepDoc]
   else []) ++
   (if push then ["`magazine` must be a nonzero multiple of 8, and the magazine must be the \
     caller's: on no stack."] else [])
@@ -823,7 +883,7 @@ def popInlineApi : Api where
     word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine \
     none to give.\n\n\
     Contract: `VG.Spec.Slab.popInlineContract`."
-  safety := safety
+  safety A := safety (Docs.of A)
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
   rustConsts := rustConsts
 
@@ -836,7 +896,23 @@ def pushInlineApi : Api where
     slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or \
     the magazine no free slot to spare.\n\n\
     Contract: `VG.Spec.Slab.pushInlineContract`."
-  safety := safety
+  safety A := safety (Docs.of A)
+  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
+  rustConsts := rustConsts
+
+/-- The same function as `pushInlineApi`, as Rust calls it, with its result in a
+register. -/
+def pushInlineRetApi : Api where
+  module := "slab"
+  name := "slab_push"
+  sig := pushInlineRetSig
+  retNonzero := true
+  contracts := some fun A _ => pushInlineRetContract A
+  summary := "Pushes `p` on the magazine of the calling thread's CPU of the class whose word in \
+    slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or \
+    the magazine no free slot to spare.\n\n\
+    Contract: `VG.Spec.Slab.pushInlineRetContract`."
+  safety A := safety (Docs.of A)
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
   rustConsts := rustConsts
 
@@ -849,7 +925,7 @@ def casApi : Api where
     `expected`, and returns the word it read there; returns `NO_CPU` (2) if the CPU number \
     has no slab.\n\n\
     Contract: `VG.Spec.Slab.casContract`."
-  safety := slowSafety false false
+  safety A := slowSafety false false (Docs.of A)
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
   rustConsts := rustConsts
 
@@ -862,7 +938,7 @@ def stackPushApi : Api where
     unless the head is a marker, and returns the head it read; returns `NO_CPU` (2) if the \
     CPU number has no slab.\n\n\
     Contract: `VG.Spec.Slab.stackPushContract`."
-  safety := slowSafety true true
+  safety A := slowSafety true true (Docs.of A)
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
   rustConsts := rustConsts
 
@@ -875,7 +951,7 @@ def stackPopApi : Api where
     `offset`, unless the stack is empty (0) or the head a marker, and returns the head it \
     read; returns `NO_CPU` (2) if the CPU number has no slab.\n\n\
     Contract: `VG.Spec.Slab.stackPopContract`."
-  safety := slowSafety true false
+  safety A := slowSafety true false (Docs.of A)
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
   rustConsts := rustConsts
 
@@ -889,11 +965,27 @@ def currentCpuApi : Api where
     unregistered thread's reads as one). Not a restartable sequence: the thread may move to \
     another CPU before the caller uses the answer.\n\n\
     Contract: `VG.Spec.Slab.cpuContract`."
-  safety := [
+  safety A := [
     registeredDoc,
-    "Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the \
-      return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 \
-      bytes at it) or wrap around the end of the address space."]
+    match (Docs.of A).stack with
+    | some _ =>
+      "Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the \
+        return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 \
+        bytes at it) or wrap around the end of the address space."
+    | none => "Neither `__rseq_offset` nor the thread's `cpu_id` may wrap around the end of the \
+        address space."]
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
+
+/-- For a target whose routines hold the offset in their instructions, where the crate's own area
+has no word to read it from, and the crate must find the area to register it. -/
+def areaOffsetApi : Api where
+  module := "slab"
+  name := "area_offset"
+  sig := areaOffsetSig
+  contracts := some fun A _ => areaOffsetContract A
+  summary := "Returns the calling thread's rseq area's offset from its thread pointer, as the \
+    linker fixed it.\n\n\
+    Contract: `VG.Spec.Slab.areaOffsetContract`. No safety requirements: it touches no memory."
+  safety _ := []
 
 end VG.Spec.Slab

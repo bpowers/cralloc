@@ -8,6 +8,10 @@
 //! microseconds at most) and yields to the runtime between steps, so it never holds a worker
 //! for longer than a step; a call in an interval whose round is done returns at once.
 //!
+//! The one longer step is on a kernel whose huge pages are over 2 MiB and at most 64 MiB (32 MiB,
+//! on pages of 16 KiB): there a step may split one huge page, which holds a worker for 1 to 2 ms.
+//! That is the price of ever returning that memory without cralloc's background thread.
+//!
 //! ```no_run
 //! #[global_allocator]
 //! static GLOBAL: cralloc::Cralloc = cralloc::Cralloc;

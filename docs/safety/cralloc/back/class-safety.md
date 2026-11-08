@@ -8,40 +8,49 @@ writes the slot's memory during the call or needs its contents after; and the sl
 the watermark.
 
 **Where it is called.** `free_slot`, the free of one large slot, calls `purge_before_release`
-before it releases the slot's bit, and it purges when the slot is advised for huge pages
-because its object grew there (its size word's flag, `Recorded::huge`, which only the slot's
-holder reads or writes). Earlier forms kept an advised slot within a budget, or purged only
-past a count; each change only narrows or widens when the block runs, without changing what
-holds when it does. The advice is taken back after the purge; if the OS refuses that, the
-flag stays and the next allocation of the slot tries again (`alloc_at`). `free_slot` is
-reached from `Back::free` and `Back::free_by_address`, and from `move_large_with` for a move
-that is not an outgrowth (`Move::Other`), after the copy: there the slot is the one the
-move's caller gave up (BACK-CLASS-03), its bit still clear, and the move has returned only
-pages behind its copy, so nothing reads or needs the slot's memory any more.
+before it releases the slot's bit, and it purges when the slot is advised for huge pages because
+its object grew there (its size word's flag, `Recorded::huge`, which only the slot's holder reads
+or writes). The advice is taken back after the purge (`region::unadvise`), which changes no
+contents; if the OS refuses that, the flag stays and the next allocation of the slot tries again
+(`alloc_at`).
 
-A slot released resident is charged its pages whose clean bit is clear (`region::charge`);
-the free itself writes no clean bit. Before it releases the slot it writes the slot's size
-word, as its holder, with the fine count in `Recorded::freed` (`Back::stamp_slot`), which
-changes no contents and which the hold's walk reads only as a hint (BACK-REGION-01, "A second
-caller"). A clean bit says the page has not been written since it was carved or last purged:
-only a purge, a range the holder returned whole (a shrink's tail, a piece behind a move's
-copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-08;
-`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
-written) set one, each by the slot's holder (only the holder of every slot a bit describes
-writes it); the claim (`region::settle_slot`) clears the bits under
-what the new tenant may write, and so does any change that widens it (`region::cover`).
-Clean bits only steer the retained count and the purge walk; no zero bit is set by any of
-this, and a claim takes a slot for zero only from its zero bit, which only a purge sets. So a
-claim never reports pages as zero that are not
-(`a_small_tenant_after_a_large_one_is_charged_what_is_resident`). The advice is taken back after the purge
-(`region::unadvise`), which changes no contents. `free_slot` is private and has three callers:
-`Back::free` and `Back::free_by_address` for a large class, both crate-private
-(`pub(crate)`), with the region and slot that `slot_in` found for the pointer (`Back::free`
-after `validate` has checked the pointer lies in a region tagged for the class,
-`free_by_address` after reading the class from that region's tag), reached from
-`Heap::free_large` and the C `free` for a pointer the program is giving up; and
-`move_large_with` for a move that is not an outgrowth, with the region and slot `validate`
-found for the block the move's caller gives up (BACK-CLASS-03).
+`free_slot` is private and has three callers:
+
+- `Back::free_by_address`, crate-private, for a large class, with the region and slot that
+  `slot_in` found for the pointer after reading the class from that region's tag. It is reached
+  from `Heap::free_large` and the C `free`, for a pointer the program is giving up.
+- `Back::free`, crate-private, likewise after `validate` has checked that the pointer lies in a
+  region tagged for the class. Only tests take its large path; the heap frees small blocks by it.
+- `move_large_with`, for a move that is not an outgrowth (`Move::Other`), after the copy, with the
+  region and slot `validate` found for the block the move's caller gives up (BACK-CLASS-03). The
+  slot's bit is still clear, and the move has returned only pages behind its copy, so nothing
+  reads or needs the slot's memory any more.
+
+A slot released resident is charged its pages whose clean bit is clear (`region::charge`); the
+free itself writes no clean bit. Before it releases the slot it writes the slot's size word, as
+its holder, with the fine count in `Recorded::freed` (`Back::stamp_slot`), which changes no
+contents and which the hold's walk reads only as a hint (BACK-REGION-01, "A second caller").
+
+A clean bit says the page has not been written since it was carved or last purged. Only three
+things set one, each by the slot's holder (only the holder of every slot a bit describes writes
+it): a purge; a range the holder returned whole (a shrink's tail, a piece behind a move's copy
+before the move frees the slot, or the slack a claim trims, BACK-CLASS-08; `region::mark_clean`);
+and the carve of a slot (`region::mark_fresh`, for the pages outside its block, past its extent or
+below its stagger, which nothing has written). The claim (`region::settle_slot`) clears the bits
+under what the new tenant may write, from its first page, and so does any change that widens it
+(`region::cover`, from the first page the tenant may write, by its real start, and from the slot's
+start where the slot is advised for huge pages, since a huge fault makes the pages below a block
+resident).
+
+A clean bit must be true, since more than the retained count and the purge walk's choices rest on
+it: the purge that leaves every page of a free slot clean sets the slot's zero bit
+(BACK-REGION-01, step 3). No zero bit is set by anything else here, and a claim takes a slot for
+zero only from its zero bit, which only a purge sets. So a claim never reports pages as zero that
+are not (`a_small_tenant_after_a_large_one_is_charged_what_is_resident`, and the random runs of
+`large_charge`, which read every page after every step). Those runs use a shape that staggers by
+lines alone; what a stagger by pages does to the bits has directed tests in `back::tests::kernels`
+(`the_pages_a_stagger_passes_over_stay_clean`,
+`a_block_at_its_slots_start_grows_back_over_clean_pages`).
 
 **Proof.**
 
@@ -50,16 +59,22 @@ found for the block the move's caller gives up (BACK-CLASS-03).
    tagged for that class (checked by `validate`, or read from the tag by `free_by_address`).
    The watermark only grows.
 2. *The caller holds the slot.* The program was given the slot by `Back::alloc`, which
-   cleared its bit, and is freeing it now, so by the allocator's contract (a block is freed
-   once, by its owner, and not used afterwards) the bit is still clear and no one else has
-   the slot. A clear bit is held by whoever cleared it until that holder sets it: the only
-   writers of a leaf bit are claims (compare-and-swap from set to clear) and releases (set).
+   cleared its bit, or carved it with its bit never set, and is freeing it now, so by the
+   allocator's contract (a block is freed once, by its owner, and not used afterwards) the bit
+   is still clear and no one else has the slot. A clear bit is held by whoever cleared it until
+   that holder sets it: the only writers of a leaf bit are claims (compare-and-swap from set to
+   clear) and releases (set).
    No purge walk can touch the slot's pages meanwhile: `purge_unit` must first claim every
    slot touching its unit, and its claim of this slot fails while the bit is clear.
 3. *No one uses the memory, and nothing in it is needed.* The program has given the block
    up. The allocator keeps no state in object memory. The pages returned are those wholly
-   inside the slot (`Layout::slot_unit`); a large slot is whole pages in every geometry in
-   use (Kani, `a_large_slot_is_whole_pages`), so they are the slot and nothing else.
+   inside the slot (`Layout::slot_unit`), and a large slot is whole pages, so they are the slot
+   and nothing else. On pages of 4 KiB every large class is whole pages (Kani,
+   `a_large_slot_is_whole_pages`, which covers the design's geometry and not a kernel's with
+   larger pages). On larger pages some classes are not (56 KiB on 16 KiB), and the heap never
+   uses them: `heap::large::place` rounds a request up to a page before it finds the class, and
+   the class of a multiple of a power of two is one too
+   (`a_large_block_gets_a_slot_of_whole_pages_on_every_kernel`).
 4. *The zero and clean bits.* `purge_held` sets the slot's zero bit and its pages' clean
    bits after the pages are returned and before `release_one` sets the free bit, which is the
    rule those bitmaps have everywhere: written only while the writer holds every slot they
@@ -95,14 +110,14 @@ breaking it does, compared with a free that does not purge.
   one's with a stamp beside it. The new owner's recorded size may then be wrong, which is what
   `realloc` copies and `malloc_usable_size` reports. That is the second case above, a double
   free of a slot handed out again, which then releases the new owner's slot as well; the
-  store adds a wrong size to that corruption, and no memory-safety step of the allocator
-  rests on the word (the trim's range is bounded by the slot, BACK-CLASS-08).
+  store adds a wrong size to that corruption. Every purge stays inside the slot whatever the
+  word says (BACK-CLASS-02, -05, -08); a `realloc` that copies by a wrong size is part of the
+  corruption, and can read a stagger past the slot.
 
-The earlier form of this path released the slot first and then claimed it back to purge it,
-which held a claim across the `madvise` on a slot that was nominally free: a second free in
-that window set the bit silently and a third party could then allocate the slot while it was
-being purged. Purging before the release removes that: at no point is a free slot's memory
-returned by a thread that does not hold it through a claim of its own or the program's.
+The free purges before it releases: a free slot's memory is returned only by a thread that holds
+it, through a claim of its own or the program's. Released first and claimed back to purge, a
+second free in that window would set the bit silently, and a third party could then allocate the
+slot while it was being purged.
 
 **The second call: a block left unwritten (`return_unwritten`).** `purge_before_release`
 first calls `return_unwritten`, which calls `purge_held` for the same slot when the block's
@@ -118,13 +133,13 @@ flag is set), but a marked block that then grows densely in place has its slot a
 (`region::advise_grown` sets `huge`) and keeps the mark. `return_unwritten` declines any slot
 whose `huge` flag is set, so such a free takes the advised path above. A class whose slots are
 smaller than the floor is declined first, before the size word is read: no marked block lives
-there. The mark may stay in a free slot's size word until the next claim clears it; only the
-holder reads the word, so a stale mark is read only by a free of that slot, which is a double
-free and caught by the bit's check before any purge. When `purge_held` returns
-`false` (the slot lies in a huge-page part, has no whole page, or the OS refused) nothing was
-changed and the free goes on as an ordinary one. When it returns `true` the slot is clean and
-zero, and `free_slot` releases it with no charge and no hold stamp, as for an advised slot
-purged here.
+there. The mark may stay in a free slot's size word until the next claim clears it. Besides the
+holder only the hold's walk reads the word, for its stamp, so a stale mark is acted on only by a
+free of that slot, which is a double free and caught by the bit's check before any purge. When
+`purge_held` returns `false` (the slot lies in a huge-page part, has no whole page, or the OS
+refused) no bit was changed and the free goes on as an ordinary one. When it returns `true` the
+slot is clean and zero, and `free_slot` releases it with no charge and no hold stamp, as for an
+advised slot purged here.
 
 **Tests.** `heap::tests::unwritten`: a block left unwritten goes back known zero and
 uncounted, and the next tenant is not marked; a block written in full, and an unzeroed block,
@@ -133,9 +148,6 @@ old slot. `a_block_that_grows_gets_huge_pages_until_it_is_freed` (the advised sl
 back whole at the free, reads as zero and says so, and its advice is taken back);
 `an_advised_slot_is_purged_only_in_whole_huge_pages`; the model-based and stress tests of the
 back end run the same path with contents checked.
-
-**Review.** 2026-10-17, fresh adversarial reviewer: accepted, with the stronger statement of
-the third case above added at the reviewer's request.
 
 ## BACK-CLASS-02: the purges in `resize_in_place`
 
@@ -161,9 +173,10 @@ never staggered), the range is `from..from + len` with `from = into + size` roun
 page and the end `into + old` rounded up to a page, capped at the slot or run: whole pages,
 inside the slot, and wholly past the new usable size (`Back::usable_size` reports the bytes
 to the end of the page the object ends in, and the new size is recorded before the purge).
-`into + size` is checked to fit the slot, so `from` is at most the slot's size. The owner asked for the smaller size, so the
-bytes past it are given up. `validate` aborts unless the pointer is a handed-out slot of the
-class; a run is found by its head tag, and the size is checked against its length.
+`into + size` is checked to fit the slot, so `from` is at most the slot's size. The owner asked
+for the smaller size, so the bytes past it are given up. `validate` aborts unless the pointer is a
+handed-out slot of the class; a run is found by its head tag, and the size is checked against its
+length.
 
 Nothing else can touch the range: for a slot, a purge walk must claim the slot first and
 cannot while its bit is clear; a run's regions are tagged, so no class can be assigned them
@@ -175,8 +188,7 @@ went back (`purge_part` answers `true` only then), the holder marks those pages 
 place clears them again (`region::cover`). The holder of the slot is the only writer of the
 clean bits of pages inside it while it holds it. A clean bit never stands over a page that
 holds data: the pages were just returned, and the tenant may not write past its new size
-until a grow that clears them first. The zero bit is not touched, so nothing here can make a
-claim report memory zero.
+until a grow that clears them first. The zero bit describes a free slot, and is not touched.
 
 **What a later grow sees.** The pages read as zero. A grow in place exposes them as bytes
 past the old size, which `realloc` leaves indeterminate and the zeroing variants clear
@@ -189,17 +201,19 @@ themselves; nothing records them as holding the old contents.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
 
-**Blocks.** In `move_large_with`: the calls of `copy_window`, and `region::purge_part` or `Space::purge` on
-parts of `from`. In `copy_window`: `from.add(x).copy_to_nonoverlapping(to.add(x), ..)` for
-the runs it copies, `Space::purge` on whole pages of `to` under a window's zero pages, and
-`is_zero` on the window's pages of `from` (BACK-CLASS-04).
+**Blocks.** In `move_large_with`: the calls of `copy_window`, `region::purge_part` or `Space::purge`
+on parts of `from`, and `grown_into` (BACK-CLASS-04). In `copy_window`:
+`from.add(x).copy_to_nonoverlapping(to.add(x), ..)` for the runs it copies, `Space::purge` on whole
+pages of `to` under a window's zero pages, and `is_zero` on the window's pages of `from`
+(BACK-CLASS-04).
 
 **Preconditions.** As for `copy_nonoverlapping`, `purge_part`, `Space::purge` and `is_zero`
 (BACK-CLASS-04).
 
-**Offsets.** A large block starts at its slot's start or at its stagger, less than a page
-in; `offset_in_slot` gives which. Every range below that `purge_part` or `give_back` takes is
-counted from the slot's start (from the run's for a run, which is never staggered).
+**Offsets.** A large block starts at its slot's start or at its stagger, under an eighth of
+the slot and 4 KiB in (`policy::stagger_room`); `offset_in_slot` gives which. Every range below
+that `purge_part` or `give_back` takes is counted from the slot's start (from the run's for a run,
+which is never staggered).
 
 **Proof.** `move_large` is an `unsafe fn`: its caller promises that `from` is a large block it
 owns and gives up, readable for `len` bytes, that `to` is a block it owns, writable for `len`
@@ -243,7 +257,8 @@ zero (step 5).
    `to + start..to + end`: pages of the caller's block `to`, whose contents it does not need
    and which the move has not written (step 0); nothing else uses them. That is
    `Space::purge`'s precondition. The range is page-aligned by construction, and a whole
-   page inside `to`'s `len` bytes is a page of `to`'s slot or run. If the purge succeeds, the
+   page inside `to`'s `len` bytes is a page of `to`'s slot or run, also where `to` is a small
+   block, as when a block shrinks across the small classes. If the purge succeeds, the
    range reads as zero. It can fail: `MADV_DONTNEED` returns `EINVAL` on locked memory, so in
    a process that called `mlockall` it fails every time; then nothing is left out in this
    window and the move makes no further purge of `to` (`Dest::Unpurgeable`).
@@ -258,31 +273,29 @@ zero (step 5).
    empty, which is always so after a failed purge, every byte is copied, so no stale byte of
    `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`,
    `a_hole_is_copied_when_the_destinations_purge_fails`).
-4. *The purges of `from`.* Pieces end at multiples of the piece in the address space. Each range is
-   either a part already copied that ends at such a multiple (`into + done` rounded down to a
-   page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
-   takes the stagger's padding, which holds nothing, or the previous multiple, which is
-   page-aligned) or, once and for an outgrown slot not kept only, everything from the last
-   multiple at or below
-   `from + len` (or from the slot's start, if there is none) to the end of the slot. Every
-   byte of the block before that start has been copied. A block of one piece or less that
-   crosses no multiple gives back only that last range, the whole slot, after its one
-   copy. In a slot advised for huge pages
-   `purge_part` may trim a range inward to whole huge pages (BACK-REGION-03), which only
-   returns less, and then reports `false`, so step 5 does not count the range as gone. All
-   lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
-   has given it up, as in BACK-CLASS-01. The slot's bit is checked to be clear before
-   anything is purged, so a block that is already free aborts instead. A range of a slot that
-   went back whole is marked clean (`region::mark_clean`), by the holder, over pages that are
+4. *The purges of `from`.* Pieces end at multiples of the piece in the address space. Each range
+   is either a part already copied that ends at such a multiple (from the slot's start for the
+   first, which takes the pages a stagger passed over, whose contents no one needs, and an earlier
+   tenant may have left; and from the previous multiple after that, which is page-aligned; to
+   `into + boundary`) or, once and for an outgrown slot not kept only, everything from where the
+   last of those ended (or from the slot's start, if there was none) to the end of the slot. Every
+   byte of the block before that start has been copied. A block of one piece or less that crosses
+   no multiple gives back only that last range, the whole slot, after its one copy. In a slot
+   advised for huge pages `purge_part` may trim a range inward to whole huge pages
+   (BACK-REGION-03), which only returns less, and then reports `false`, so step 5 does not count
+   the range as gone. All lie inside `from`'s slot or run, whose start is page-aligned, and the
+   caller holds it and has given it up, as in BACK-CLASS-01. The slot's bit is checked to be clear
+   before anything is purged, so a block that is already free aborts instead. A range of a slot
+   that went back whole is marked clean (`region::mark_clean`), by the holder, over pages that are
    now not resident: a clean bit stays true.
 5. *The release.* The slot is marked zero only if every `give_back` reported its whole
    range returned: `purge_part` answers `true` only when the OS accepted the range it was
    given, untrimmed (`a_trimmed_purge_of_an_advised_slot_says_it_kept_part`), and the
-   ranges together are every page of the slot past the copy's start. So a slot marked zero
-   has no stale byte in it, and the next zeroed allocation of it may skip clearing. (Today
-   no move range is ever trimmed, since pieces end on huge-page boundaries and a piece is a
-   huge page; the argument does not depend on that.) If every purge succeeded, every page of
-   the slot has gone back, and
+   ranges together are every page of the slot, below the block too. So a slot marked zero
+   has no stale byte in it, and the next zeroed allocation of it may skip clearing. (No move
+   range is in fact trimmed, since a block under advice moves a huge page at a time at least,
+   so its pieces end on huge-page boundaries; the argument does not depend on that.) If every
+   purge succeeded, every page of the slot has gone back, and
    `mark_purged` and an uncounted release leave it exactly as `purge_held` does; if any did
    not, the slot is released as resident and counted by its pages that are not clean
    (`region::charge`), with no zero bit set and only the ranges that went back whole marked
@@ -317,29 +330,39 @@ with contents checked.
 ## BACK-CLASS-04: `is_zero`, `mostly_data` and `grown_into`
 
 **Blocks.** In `is_zero`, `core::slice::from_raw_parts(ptr, len)` and
-`bytes.align_to::<u64>()`; in `mostly_data`, `is_zero(ptr.add(at), n)`; in `grown_into`'s
-closure, `mostly_data(from, len, page)`; in `move_large_with`, the call of `grown_into`;
+`bytes.align_to::<u64>()`; in `mostly_data`, `is_zero(ptr.add(at), n)`; in `grown_into`'s closure,
+`mostly_data` on the last piece of the `len` bytes; in `move_large_with`, the call of `grown_into`;
 in `copy_window`, `is_zero(from.add(p), q - p)`.
 
-**Preconditions.** `ptr..ptr + len` is readable and not written during the call (the
-functions' `# Safety`); for `align_to`, that every bit pattern is valid for `u64`.
+**Preconditions.** `ptr..ptr + len` is readable and not written during the call (the functions'
+`# Safety`); for `align_to`, that every bit pattern is valid for `u64`; and that the bytes are
+initialised, since these are typed reads and the test branches on what they hold (below).
 
-**Proof.** The callers are in `move_large_with`, before anything of `from` is returned and
-with nothing else using `from` (BACK-CLASS-03): `grown_into` on the `len` bytes the caller
-promised readable, which hands them to `mostly_data` (only from the closure that
-`region::advise_grown` calls before it returns, so within `grown_into`'s call), which calls
-`is_zero` on consecutive pages with `at + n <= len`; `copy_window`, which calls `is_zero`
-on each page `p..q` of its window, at most `page` bytes long and inside those bytes, before
-the window is copied and so before that page is returned (BACK-CLASS-03, step 1); and `resize_in_place`, on the last piece of a growing block's first `old` bytes
-(BACK-CLASS-02). So the slice is valid for its lifetime, the call.
-Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its middle part
-only whole, aligned `u64`s within the slice. Reading a page that was never written maps the
-kernel's shared zero page; it changes no contents.
+**Proof.** There are three callers. `grown_into`, from `move_large_with` before anything of `from`
+is returned and with nothing else using `from` (BACK-CLASS-03), on the last piece of the `len`
+bytes the caller promised readable: the offset `last` is at most `len`, and the closure runs only
+inside `region::advise_grown`, so within `grown_into`'s call. `copy_window`, on each page `p..q` of
+its window, at most `page` bytes long and inside those bytes, before the window is copied and so
+before that page is returned (BACK-CLASS-03, step 1). And `resize_in_place`, on the last piece of a
+growing block's first `old` bytes (BACK-CLASS-02). `mostly_data` calls `is_zero` on consecutive
+pages with `at + n <= len`. So the slice is valid for its lifetime, the call. Any bit pattern is a
+valid `u8` and a valid `u64`, and `align_to` places in its middle part only whole, aligned `u64`s
+within the slice. Reading a page that was never written maps the kernel's shared zero page; it
+changes no contents.
+
+**Initialised bytes are assumed, not proved.** A program can put bytes in a block that Rust's model
+calls uninitialised, such as a struct's padding or a `MaybeUninit`, and in that model comparing one
+with zero is undefined. A copy carries such bytes as they are (MOD-01), but these reads look at
+them. What stands in is the machine: every byte of the reservation holds a value, and the compiler
+cannot carry what it knows of the program's store to these loads, since each is reached through a
+function that is not inlined (`Bound::resize`, `realloc_other`). With a value to read the test is
+right: a page is left out of a copy, or a block judged dense, only by what the page holds. We accept
+this, and no test holds such bytes.
 
 ## BACK-CLASS-05: the copies and the purge in `unspill`
 
 **Blocks.** In `resize_in_place`, the call of `unspill`. In `unspill`,
-`self.space.resident(rest, huge - page)`, `spill.copy_to_nonoverlapping(aside, part)`,
+`self.space.resident(rest, huge - part)`, `spill.copy_to_nonoverlapping(aside, part)`,
 `region::purge_part(host, region, slot, at, huge)`, and
 `aside.copy_to_nonoverlapping(spill, part)`.
 
@@ -361,23 +384,32 @@ slot's start, and the block may now use up to `into + new` rounded up to a page,
 most the class size, a whole number of pages, so it lies in the slot.
 
 `at` is the start of the huge page holding `end`; `fresh` is `into + new` rounded up to a
-page, the new usable end; `room` is the start of the huge page holding `fresh - 1`. `unspill`
-returns early unless `into < at`, `0 < part <= page` with `part = end - at`,
-`at + huge <= room`, and `room + part <= fresh`. So `spill` (offset `at`, `part` bytes) and
-`aside` (offset `room`, `part` bytes) both lie inside what the block may now use, and `aside`
-starts at or past `at + huge`, past the end of `spill`, so they do not overlap. `spill` holds
-the block's contents from `at` to `end`; `aside` lies past `end`, in new room whose contents
-the caller does not need, so writing it destroys nothing (a zeroed grow clears it after the
-resize, `Heap::resize_large_in_place`). `rest` is `at + page .. at + huge`, whole pages inside
-the block, which the caller does not write during the call and nothing else can reach (below);
-`resident` only reads, and its answer only decides whether the copies and the purge follow.
-The purge range is `at..at + huge`: whole pages, before `room` and so inside what the block may
-use and inside the slot, held by the caller. Its only contents are the `part` bytes now copied aside; the
-rest is past `end`. A purge may act on part of the range even when it fails, so the bytes are
-copied back whatever it returns; after it, the range reads as zero or as before, and the copy
-back writes the same `part` bytes at `spill`, restoring the block's contents exactly. Nothing
-else can reach the range: the slot's bit stays clear for the whole call, so no purge walk or
-claim can take it.
+page, the new usable end; `room` is the start of the huge page holding `fresh - 1`. Neither
+falls below the slot's start, so neither subtraction wraps. `unspill` runs only if
+`region::advise_grown` advised a whole huge page, so `into + new` reaches at least a huge page past
+the slot's first huge-page boundary, `gap` bytes in, with `gap` under a huge page. And the block at
+most doubled (`policy::grown_huge`), so `end >= into + old >= (into + new) / 2 >= (gap + huge) / 2`,
+which is past `gap`. Slots are whole pages, and a region is aligned to at least a huge page wherever
+huge pages are used, so these offsets mean the same in the address space, and every range below is
+page-aligned.
+
+`unspill` returns early unless `into < at`, `0 < part` with `part = end - at`, `part` at most a
+page or the block's stagger rounded up to a page (a whole number of pages, since `end` and `at`
+are), `at + huge <= room`, and `room + part <= fresh`; the two tests against `advised` decide only
+whether the purge helps. So `spill` (offset `at`, `part` bytes) and `aside` (offset `room`, `part`
+bytes) both lie inside what the block may now use, and `aside` starts at or past `at + huge`, past
+the end of `spill`, so they do not overlap. `spill` holds the block's contents from `at` to `end`;
+`aside` lies past `end`, in new room whose contents the caller does not need, so writing it
+destroys nothing (a zeroed grow clears it after the resize, `Bound::grow_block`, HEAP-08). `rest`
+is `at + part .. at + huge`, whole pages inside the block, which the caller does not write during
+the call and nothing else can reach (below); `resident` only reads, and its answer only decides
+whether the copies and the purge follow. The purge range is `at..at + huge`: whole pages, before
+`room` and so inside what the block may use and inside the slot, held by the caller. Its only
+contents are the `part` bytes now copied aside; the rest is past `end`. A purge may act on part of
+the range even when it fails, so the bytes are copied back whatever it returns; after it, the
+range reads as zero or as before, and the copy back writes the same `part` bytes at `spill`,
+restoring the block's contents exactly. Nothing else can reach the range: the slot's bit stays
+clear for the whole call, so no purge walk or claim can take it.
 
 No leaf, zero or clean bit is written. The purged pages lie inside what the block may write,
 whose clean bits `region::cover` clears right after; none is set here, so no clean bit stands
@@ -393,16 +425,18 @@ reservation (`Space::check` aborts otherwise), and nothing writes it during the 
 
 **Proof.** `return_unwritten` runs from `purge_before_release`, inside `free_slot`, while the
 caller holds the slot: its leaf bit is clear for the program, which is freeing it (BACK-CLASS-01,
-step 2). Each sampled page is `unit.start + (2i + 1) * pages / (2 * samples)` for `i` below
-`samples`, where `pages` is `end - unit.start` and `end`, from `region::extent_of`, is at most
-`unit.end`: the page lies in `unit.start..end`, inside the slot's whole pages
-(`Layout::slot_unit`), and so inside the reservation, page-aligned and one page long. The
-program has given the block up and the allocator keeps no state in it, so nothing writes it
-during the call. `mincore` reads only page tables and writes one byte, into a local of the OS
-layer. Its answer decides only whether `purge_held` is called, and both outcomes are valid
-frees whatever it says: a page swapped out or reclaimed reads as absent and leads, at worst, to
-returning a slot whose contents nobody needs; a page reported resident leads to an ordinary
-free. An error from the call (`Err`) is taken as "not left unwritten", an ordinary free.
+step 2). Each sampled page is `first + (2i + 1) * pages / (2 * samples)` for `i` below `samples`,
+where `first` is the page holding the slot's stagger, no lower than `unit.start`
+(`Layout::first_page`), `pages` is `end - first` or zero, and `end`, from `region::extent_of`, is
+at most `unit.end`. So the page lies in `first..end`, inside the slot's whole pages
+(`Layout::slot_unit`), and so inside the reservation, page-aligned and one page long; with no
+pages there is no sample and no call. The program has given the block up and the allocator keeps
+no state in it, so nothing writes it during the call. `mincore` reads only page tables and writes
+one byte, into a local of the OS layer. Its answer decides only whether `purge_held` is called,
+and both outcomes are valid frees whatever it says: a page swapped out or reclaimed reads as
+absent and leads, at worst, to returning a slot whose contents nobody needs; a page reported
+resident leads to an ordinary free. An error from the call (`Err`) is taken as "not left
+unwritten", an ordinary free.
 
 ## BACK-CLASS-07: `self.move_large_with(from, to, len, zeroed, why, || {})` in `move_large`
 
@@ -438,7 +472,7 @@ none of which touches the slot's memory.
    and no allocation can be handed it. The program does not know the block yet.
 2. *The range lies inside the slot, past everything the new block may write.* `settle_slot`
    finds `slack` among the pages of `Layout::slot_unit(slot)`, the pages wholly inside the
-   slot (a large slot is whole pages: Kani, `a_large_slot_is_whole_pages`), at or past
+   slot (a large slot is whole pages: BACK-CLASS-01, step 3), at or past
    `keep_from(layout, slot, unit, size, last)`, which is at least
    `extent_of(layout, slot, unit, size, huge)`: the page past the slot's start plus its stagger
    plus `size`, rounded up to a page (to a huge page if the slot is still advised, which only
@@ -463,7 +497,7 @@ none of which touches the slot's memory.
    bits have everywhere, and a clean bit over them is true until a widening of the block
    clears it (step 2). No zero bit is written: the slot is held. When the call is refused,
    wholly or in part, nothing is marked, and the pages stay not clean, so the block's free
-   charges them, as it charged them before this rule.
+   charges them.
 
 **What a double free can do here.** As for any claim: if the program frees the slot's last
 tenant a second time after this claim, the release finds the bit clear and sets it, and another
@@ -474,10 +508,11 @@ case); the trim adds the zeroing, of pages the first claimer would not write.
 
 **A slot that kept its huge-page advice** (only a refused `unadvise` leaves one). Its claim
 computes both extents in whole huge pages, and `purge_part` cuts the step inward to whole huge
-pages inside the slot's interior, which leaves nothing of 128 pages there. Part of a step can
-still lie outside the slot's whole huge pages, in its unaligned tail, which the advice never
-covered: that part is returned and `purge_part` reports false, so no clean bit is set and the
-free charges those pages though they are gone. An over-count, never a page in use.
+pages inside the slot's interior. A step is less than a huge page on every real kernel, so nothing
+of it goes there. Part of a step can still lie outside the slot's whole huge pages, in its
+unaligned tail, which the advice never covered: that part is returned and `purge_part` reports
+false, so no clean bit is set and the free charges those pages though they are gone. An
+over-count, never a page in use.
 
 **An accepted limit: a refused purge at the free, then a successful `unadvise`.** The free of
 an advised slot purges it whole and then takes the advice back. If the purge is refused and
@@ -487,10 +522,10 @@ which frees nothing until the kernel splits it and stays charged to the cgroup m
 a shrink in place over a huge page does (`region`, "Huge pages for grown blocks"). It needs a
 refused `madvise` first; we accept it rather than track it.
 
-**Accounting, not safety.** The claim takes the slot's whole charge off the retained count,
-as before the trim: the pages under the block are live, the top step of the slack goes back,
-and the rest of the slot's resident pages stay resident and in no count until the block's
-free charges them again, or the slot's next claim trims another step.
+**Accounting, not safety.** The claim takes the slot's whole charge off the retained count: the
+pages under the block are live, the top step of the slack goes back, and the rest of the slot's
+resident pages stay resident and in no count until the block's free charges them again, or the
+slot's next claim trims another step.
 
 **Tests.** `back::tests::slack`: a claim returns what the tenants before the last left and
 keeps the last tenant's room, and the count follows; a trim returns a step at most, from the
@@ -506,4 +541,4 @@ with purges and advice failing) and the exploration `an_age_walk_races_large_ten
 tenants trim (`TestHost::purge` fails a schedule in which a purger does not hold every slot it
 returns).
 
-Reviewed: 7ddb618
+Reviewed: 5a8ade1

@@ -190,8 +190,11 @@ for seed in $(seq 1 "$seeds"); do
 done
 
 # Deterministic, so once: every instruction of every sequence, against the release library.
+# Which copy of a routine the compiler keeps on a path nothing reaches depends on the target.
+unreached="$root/crates/cralloc-preload/tests/programs/sweep-unreached.txt"
+[ "$(uname -m)" = aarch64 ] && unreached="${unreached%.txt}-aarch64.txt"
 alone sweep "$mem" 60m env SOAK_INSNS="$work/insns" SOAK_FUNCS="$work/funcs" \
-  SOAK_UNREACHED="$root/crates/cralloc-preload/tests/programs/sweep-unreached.txt" \
+  SOAK_UNREACHED="$unreached" \
   taskset -c "${cpus[0]}" "$soak" sweep threads=1
 wanted sweep && grep -h 'soak sweep: [0-9]* of' "$work/sweep.preload.err" | sed 's/^/      /'
 

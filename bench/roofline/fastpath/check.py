@@ -6,24 +6,34 @@ feature, disassembles each `site_*` function and checks its hot loop, from the t
 first backward branch to that branch: it must hold both restartable sequences (two arming
 stores to `rseq_cs` and two CPU-number compares) and no call. The calls to the slow paths sit
 in blocks LLVM lays out after the hot loop's branch; the abort handlers and miss stubs are in
-`.text.unlikely` and the descriptors in `__rseq_cs`. Prints the hot loop's bytes and
-instructions.
+`.text.unlikely` (on aarch64 the abort handlers are past the function's end, and a miss stays in
+the routine) and the descriptors in `__rseq_cs`. Prints the hot loop's bytes and instructions.
+On aarch64 the `executable` feature changes nothing, so there is one build.
 
     taskset -c 4-7 ./check.py          # about ten seconds once dependencies are built
 
 Needs objdump and nm (binutils).
 """
 import pathlib
+import platform
 import re
 import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 SITES = ["site_constant", "site_box", "site_runtime"]
-ARM = re.compile(r"mov\s+QWORD PTR fs:\[r10\+0x8\],r11")
-CPU = re.compile(r"cmp\s+r8d,0x2000")
+AARCH64 = platform.machine() == "aarch64"
+if AARCH64:
+    ARM = re.compile(r"str\s+x11, \[x10, #(?:0x)?8\]")
+    CPU = re.compile(r"cmp\s+w8, #0x2, lsl #12")
+    BRANCH = re.compile(r"^(?:b\.\w+|cbn?z\s+\w+,|tbn?z\s+\w+, #\w+,)\s+(?:0x)?([0-9a-f]+)\b")
+    CALL = "bl"
+else:
+    ARM = re.compile(r"mov\s+QWORD PTR fs:\[r10\+0x8\],r11")
+    CPU = re.compile(r"cmp\s+r8d,0x2000")
+    BRANCH = re.compile(r"^j(?!mp)\w*\s+([0-9a-f]+)\b")
+    CALL = "call"
 INSN = re.compile(r"^\s*([0-9a-f]+):\s+(.*)$")
-BRANCH = re.compile(r"^j(?!mp)\w*\s+([0-9a-f]+)\b")
 
 
 def build(features: list[str]) -> pathlib.Path:
@@ -45,7 +55,8 @@ def function(binary: pathlib.Path, name: str) -> list[tuple[int, str]]:
             break
     else:
         raise SystemExit(f"{binary}: no function {name} (inlined into main?)")
-    dis = subprocess.run(["objdump", "-d", "-M", "intel", "--no-show-raw-insn", "-C",
+    syntax = [] if AARCH64 else ["-M", "intel"]
+    dis = subprocess.run(["objdump", "-d", *syntax, "--no-show-raw-insn", "-C",
                           f"--start-address={start}", f"--stop-address={start + size}",
                           str(binary)], check=True, capture_output=True, text=True).stdout
     out = []
@@ -71,9 +82,9 @@ def loop(insns: list[tuple[int, str]]) -> list[tuple[int, str]]:
 
 def main() -> int:
     bad = []
-    for features in ([], ["executable"]):
+    for features in ([],) if AARCH64 else ([], ["executable"]):
         binary = build(features)
-        form = "direct __rseq_offset" if features else "__rseq_offset by the GOT"
+        form = "direct __rseq_offset" if features else "__rseq_offset through a word"
         print(f"{form}:")
         for name in SITES:
             body = loop(function(binary, name))
@@ -83,7 +94,7 @@ def main() -> int:
             texts = [t for _, t in body]
             arms = sum(bool(ARM.search(t)) for t in texts)
             cpus = sum(bool(CPU.search(t)) for t in texts)
-            calls = [t for t in texts if t.startswith("call")]
+            calls = [t for t in texts if t.split()[0] == CALL]
             nbytes = body[-1][0] - body[0][0]
             print(f"  {name:<14} loop {nbytes:>4} bytes before its branch, {len(body):>3} instructions,"
                   f" {arms} sequences, {len(calls)} calls")

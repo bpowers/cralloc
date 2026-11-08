@@ -42,28 +42,22 @@ mod source;
 #[cfg(feature = "allocator-api")]
 mod allocator;
 // Also in the crate's own tests, so that the gate builds, lints and runs it.
-#[cfg(all(
-    any(test, feature = "background"),
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(any(test, feature = "background"), cralloc_real))]
 pub(crate) mod background;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 mod global;
 #[cfg(any(test, feature = "sim"))]
 mod sim;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub use global::Cralloc;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use global::{c_alloc_small, c_free_small};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimCralloc, SimHeap};
 
 pub(crate) use address::Found;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use address::process;
 
 use crate::back::{Back, State};
@@ -184,9 +178,9 @@ impl<O: Os> Heap<O> {
     }
 
     /// The bytes the caller may use of the block starting at `ptr`: the class size of a small
-    /// one; for a large one, the size last asked for rounded up to a page, never the whole slot
-    /// or run, which may be far bigger (`Back::usable_size`). `None` if no slot or run starts
-    /// there.
+    /// one; for a large one, the size last asked for carried to the end of the page it ends in,
+    /// never the whole slot or run, which may be far bigger (`Back::usable_size`). `None` if no
+    /// slot or run starts there.
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         self.back()?.usable_size(ptr)
     }

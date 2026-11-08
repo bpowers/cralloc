@@ -115,7 +115,7 @@ impl MagazineSize {
     pub(crate) const MIN: MagazineSize = MagazineSize(MIN_LOG2);
 
     /// The largest magazine: 1,024 slots, 1,022 objects, 8 KiB.
-    pub(crate) const MAX: MagazineSize = MagazineSize(MAX_LOG2);
+    pub const MAX: MagazineSize = MagazineSize(MAX_LOG2);
 
     /// The number of magazine sizes.
     pub(crate) const COUNT: usize = (MAX_LOG2 - MIN_LOG2 + 1) as usize;
