@@ -209,7 +209,14 @@ impl Counters {
             Target::Me => 0,
             Target::ChildBeforeExec(pid) => pid,
         };
-        let pmu = core_pmu(&Cpus::allowed_by(pid).0);
+        Counters::open_on(events, target, &Cpus::allowed_by(pid).0)
+    }
+
+    /// [`open`](Self::open) for a target that will run on `cpus`. A child just forked may not
+    /// have set its own affinity yet, and until then reads as its parent's, whose core may have
+    /// another PMU.
+    pub fn open_on(events: &[Event], target: Target, cpus: &[usize]) -> io::Result<Counters> {
+        let pmu = core_pmu(cpus);
         events.iter().map(|&e| Counter::open(e, target, pmu)).collect::<io::Result<Vec<_>>>().map(Counters)
     }
 
