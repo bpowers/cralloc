@@ -630,11 +630,19 @@ mod generated {
 
 /// C's `realloc` gives back the block it leaves, also when the push of the old block misses. Many
 /// blocks moved up a class and back for many rounds visit a bounded set of addresses; a path that
-/// drops the old block takes new memory every round. Other tests share the heap and move blocks in
-/// and out of these classes now and then, so a few rounds may see new addresses; most must not.
+/// drops the old block takes new memory every round. In a process of its own and on one CPU, since
+/// other things bring in new addresses and none of them is a block dropped: other tests move blocks
+/// in and out of these classes, and a thread's first visit to a CPU takes that CPU's magazines,
+/// which on a busy machine is enough to fill the rounds of a run.
 #[test]
 fn c_realloc_gives_back_the_blocks_it_leaves() {
+    let path = "c::tests::c_realloc_gives_back_the_blocks_it_leaves";
+    if !crate::fresh::is_child(path) {
+        return crate::fresh::run(path);
+    }
+    crate::fresh::pin(crate::fresh::allowed_cpus()[0]);
     for (count, rounds, warm) in [(1usize, 4000usize, 100usize), (1200, 60, 30)] {
+        let started = std::time::Instant::now();
         let mut blocks: Vec<*mut c_void> = (0..count).map(|_| malloc(100)).collect();
         let mut seen = std::collections::BTreeSet::new();
         let mut grown = Vec::new();
@@ -652,9 +660,104 @@ fn c_realloc_gives_back_the_blocks_it_leaves() {
         }
         blocks.into_iter().for_each(release);
         let late = &grown[warm..];
+        let same = late.iter().filter(|&&g| g == 0).count();
+        // A run held up for an interval, as heavy work is by a measurement, may have the clocked
+        // work send slots back, and the next fill take one the test never had.
+        let held_up = started.elapsed() > std::time::Duration::from_millis(500);
         assert!(
-            late.iter().filter(|&&g| g == 0).count() * 4 >= late.len() * 3,
+            same == late.len() || held_up && same * 4 >= late.len() * 3,
             "{count} blocks resized back and forth keep taking new addresses: {grown:?}"
+        );
+    }
+}
+
+/// A block handed between threads, with the index in [`HANDED_SIZES`] of the size it has.
+struct Handed(*mut c_void, usize);
+
+// SAFETY: a block of the heap belongs to whichever thread has it; C allows any thread to resize or
+// free it.
+unsafe impl Send for Handed {}
+
+const HANDED_SIZES: [usize; 2] = [100, 250];
+
+/// Threads that move between CPUs and hand blocks to each other lose none, in whatever order the
+/// machine lets them see each other's writes: once the heap has taken everything back, every
+/// address they were given comes out again. A lost block would show only as memory that never
+/// returns, which a test of one thread's addresses cannot tell from what other CPUs hold.
+#[test]
+fn threads_that_move_and_hand_over_blocks_lose_none() {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    let path = "c::tests::threads_that_move_and_hand_over_blocks_lose_none";
+    if !crate::fresh::is_child(path) {
+        return crate::fresh::run(path);
+    }
+    let cpus = crate::fresh::allowed_cpus();
+    let pool = Mutex::new(Vec::<Handed>::new());
+    let seen = Mutex::new([BTreeSet::new(), BTreeSet::new()]);
+    let stop = Instant::now() + Duration::from_secs(1);
+    std::thread::scope(|scope| {
+        for first in 0..cpus.len().max(2) {
+            let (pool, seen, cpus) = (&pool, &seen, &cpus);
+            scope.spawn(move || {
+                let mut given = [BTreeSet::new(), BTreeSet::new()];
+                let mut blocks: Vec<Handed> = (0..400)
+                    .map(|_| Handed(malloc(HANDED_SIZES[0]), 0))
+                    .collect();
+                let mut round = first;
+                while Instant::now() < stop {
+                    round += 1;
+                    if round.is_multiple_of(3) {
+                        crate::fresh::pin(cpus[round / 3 % cpus.len()]);
+                    }
+                    for block in &mut blocks {
+                        let to = 1 - block.1;
+                        // SAFETY: a live block this thread has, given up once the call succeeds.
+                        block.0 = unsafe { realloc(block.0, HANDED_SIZES[to]) };
+                        assert!(!block.0.is_null());
+                        given[to].insert(block.0.addr());
+                        block.1 = to;
+                    }
+                    let mut shared = pool.lock().unwrap();
+                    shared.extend(blocks.drain(..100));
+                    let kept = shared.len() - 100;
+                    blocks.extend(shared.drain(kept..));
+                }
+                blocks.into_iter().for_each(|block| release(block.0));
+                let mut all = seen.lock().unwrap();
+                for (all, given) in all.iter_mut().zip(given) {
+                    all.extend(given);
+                }
+            });
+        }
+    });
+    pool.into_inner()
+        .unwrap()
+        .into_iter()
+        .for_each(|block| release(block.0));
+    // On one CPU from here: a refill's magazine stays on a CPU this thread leaves, with the rest of
+    // what it holds out of this thread's reach.
+    crate::fresh::pin(cpus[0]);
+    for (given, size) in seen.into_inner().unwrap().iter().zip(HANDED_SIZES) {
+        crate::c::malloc_trim(0);
+        let mut missing = given.clone();
+        let mut held = Vec::new();
+        // The heap carved a little more than it handed out; four times over is far more than that.
+        for _ in 0..4 * given.len() + 4096 {
+            let p = malloc(size);
+            missing.remove(&p.addr());
+            held.push(p);
+            if missing.is_empty() {
+                break;
+            }
+        }
+        held.into_iter().for_each(release);
+        assert!(
+            missing.is_empty(),
+            "{} of {} blocks of {size} bytes never came back",
+            missing.len(),
+            given.len()
         );
     }
 }
