@@ -5,8 +5,7 @@ architecture, x86-64 or AArch64, proved correct against that model, and printed
 as Rust source. Nothing in the allocator is assembly written by hand: the
 generated files are the only assembly it contains, and a check fails if they
 differ from what Lean generates now. (The AArch64 routines are moving here from
-`front/provisional/`, written by hand; only the self-test, the pop and the push are
-generated so far.)
+`front/provisional/`, written by hand; all but the C entry points are generated so far.)
 
 This directory is a fork of the Lean framework of
 [verified-garbage](https://github.com/pyca/verified-garbage), which does the

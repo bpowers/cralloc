@@ -464,4 +464,78 @@ theorem harmless_mag (hf : c.form = .inline) {r w : Region} (ha : c.Apart s r)
 
 end Harmless
 
+/-! ## Where a slow-path routine's regions are in `regions` -/
+
+section Of
+
+variable {M : ISA} {c : Spec.Slab.Ctx M} {s : M.State}
+
+theorem mem_ro {x : Region} (h : (x, false) ∈ c.regions s) : x ∈ c.ro s :=
+  List.mem_map.mpr ⟨(x, false), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
+
+theorem mem_rw {x : Region} (h : (x, true) ∈ c.regions s) : x ∈ c.rw s :=
+  List.mem_map.mpr ⟨(x, true), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
+
+theorem fixed_mem {x : Region × Bool} (h : x ∈ c.fixed s) : x ∈ c.regions s :=
+  List.mem_append_left _ h
+
+theorem word_mem (hi : c.InRange s) : (⟨c.word s, 8⟩, true) ∈ c.regions s := by
+  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
+  exact List.mem_append_right _ (List.mem_cons_self ..)
+
+theorem more_mem (hi : c.InRange s) {x : Region × Bool} (h : x ∈ c.more s) : x ∈ c.regions s := by
+  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
+  exact List.mem_append_right _ (List.mem_cons_of_mem _ h)
+
+theorem cpu_mem_fixed : (c.cpuField s, false) ∈ c.fixed s :=
+  List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))
+
+/-- A stack push's magazine's link slot is apart from `rseq_cs`. -/
+theorem link_cs_disj (hf : c.form = .stackPush) (hl : c.Layout s) :
+    (c.link s).Disjoint (c.csField s) := by
+  obtain ⟨A, f, sig⟩ := c
+  cases hf
+  exact (fixed_disj (a := (Spec.Slab.Ctx.csField ⟨A, .stackPush, sig⟩ s, true))
+    (l₁ := [(Spec.Slab.Ctx.rsVar ⟨A, .stackPush, sig⟩ s, false),
+      (Spec.Slab.Ctx.cpuField ⟨A, .stackPush, sig⟩ s, false)]) hl rfl (List.mem_singleton_self _)
+    (Bool.true_or _)).symm
+
+end Of
+
+/-! ## A commit's alignment -/
+
+/-- A slab word is aligned, in slabs that start on a page (`Ctx.Layout.page`). The contracts'
+traces say a routine's commit is at such a word, and so is one access
+(`TCB/AArch64/Isa.lean`). -/
+theorem wordAddr_aligned {slabs : Addr} (cpu cls : Nat) (h : slabs.toNat % 4096 = 0) :
+    (wordAddr slabs cpu cls).toNat % 8 = 0 := by
+  simp only [wordAddr, BitVec.toNat_add, BitVec.toNat_ofNat, SLAB_BYTES, SLAB_SHIFT]
+  omega
+
+/-! ## `current_cpu`'s precondition, unfolded -/
+
+theorem cpu_pre_iff {M : ISA} (A : Abi M) {s : M.State} {vals : M.State → List (BitVec 64)}
+    (hv : A.args ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals)
+    (hb : Sig.bufs cpuSig.params (vals s) = [])
+    (ha : A.argArea ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) s = []) :
+    (cpuContract A).pre s ↔
+      A.wf ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) 0 s ∧
+      A.rd s = ((cpuRegions A s).filter (!·.2)).map (·.1) ∧
+      A.wr s = ((cpuRegions A s).filter (·.2)).map (·.1) ∧
+      (∀ x ∈ cpuRegions A s, x.1.base.toNat + x.1.len ≤ 2 ^ A.ptrBits) ∧
+      (∀ x ∈ cpuRegions A s, ∀ r ∈ A.reserved 0 s, x.1.Disjoint r) ∧
+      A.tp.isSome ∧ A.sym.isSome := by
+  simp only [cpuContract, Sig.contract, Abi.withExtra, hv, hb, ha, List.map_nil, List.append_nil,
+    List.filter_nil, List.Pairwise.nil, List.not_mem_nil, false_implies, implies_true, true_and,
+    Curry.apply_const]
+  constructor
+  · rintro ⟨⟨hwf, hd1, hd2, hnw, -, hres, -, -⟩, hrd, hwr, hpre⟩
+    exact ⟨hwf, take_drop_eq hrd hd1, take_drop_eq hwr hd2, hnw, hres, hpre⟩
+  · rintro ⟨hwf, hrd, hwr, hnw, hres, hpre⟩
+    have hp : (cpuRegions A s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) := by
+      simp [cpuRegions]
+    simp only [hrd, hwr, Nat.sub_self, List.take_zero, List.drop_zero, List.not_mem_nil,
+      false_implies, implies_true, and_true, true_and]
+    exact ⟨⟨hwf, hnw, hp, hres⟩, hpre⟩
+
 end VG.Proof.Slab
