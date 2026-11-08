@@ -10,9 +10,6 @@
 //! one line here. Miri and Kani both pass their `cfg` to the query cargo makes for build
 //! scripts, which is what `CARGO_CFG_MIRI` and `CARGO_CFG_KANI` come from.
 //!
-//! `cralloc_a64_direct`, given in `RUSTFLAGS` to a link by `rust-lld`, reads `__rseq_offset` directly
-//! on aarch64, to compare that form with the one that stays.
-//!
 //! `cfg(kani)` is declared here too because the workspace lint table cannot carry the
 //! declaration for one crate without moving every crate's lints.
 use std::env::var_os;
@@ -24,7 +21,6 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(kani)");
     println!("cargo::rustc-check-cfg=cfg(cralloc_os)");
     println!("cargo::rustc-check-cfg=cfg(cralloc_real)");
-    println!("cargo::rustc-check-cfg=cfg(cralloc_a64_direct)");
     let is = |name: &str, value: &str| var_os(name).is_some_and(|v| v == value);
     if is("CARGO_CFG_TARGET_OS", "linux")
         && (is("CARGO_CFG_TARGET_ARCH", "x86_64") || is("CARGO_CFG_TARGET_ARCH", "aarch64"))

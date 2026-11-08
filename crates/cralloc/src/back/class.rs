@@ -131,10 +131,20 @@ impl Sink for Descending<'_> {
         else {
             return;
         };
-        let mut next = first;
-        for slot in part.iter().rev() {
-            slot.store(next, Relaxed);
-            next = next.wrapping_byte_add(stride);
+        // Two at a time, each from a pointer stepping two strides: one that steps one stride a
+        // slot makes a chain of adds, which holds a core with two store ports to a slot a cycle.
+        let (rest, pairs) = part.as_rchunks::<2>();
+        let mut even = first;
+        let mut odd = first.wrapping_byte_add(stride);
+        let step = stride.wrapping_mul(2);
+        for [a, b] in pairs.iter().rev() {
+            b.store(even, Relaxed);
+            a.store(odd, Relaxed);
+            even = even.wrapping_byte_add(step);
+            odd = odd.wrapping_byte_add(step);
+        }
+        for slot in rest {
+            slot.store(even, Relaxed);
         }
     }
 
@@ -1750,6 +1760,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
             inverse: odd_inverse((size >> shift) as u64),
             shift,
             limit: met.limit as u64,
+            stride: size,
         }
     }
 
@@ -1782,6 +1793,85 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
     }
 }
 
+/// Looks in a row that find no stretch, after which a batch gives up on them. A look that fails
+/// costs a few instructions, and a whole word's slots if its ends agree and its middle does not.
+const STRETCH_MISSES: u32 = 2;
+
+/// The fewest slots worth a stretch: fewer go by the slot-by-slot loop as cheaply.
+const STRETCH_LEAST: usize = 8;
+
+/// The objects from `at` on, if they carry on from the one before it a slot at a time, upward or
+/// downward, to the end of its word or of the batch: how many, and their bits, none if they would
+/// be too few to bother. None at all if they do not. A magazine that comes back in the order it
+/// went out is mostly this, and a slot here costs a quarter of what it costs one at a time. Only
+/// the slot before, which has passed, needs the fast check: one a whole number of strides from it
+/// in the same word is a slot below the watermark too. `first` and `span` are the word's slots
+/// ([`Fast::word`]).
+#[inline(always)]
+fn stretch<P: SlotPointer>(
+    fast: &Fast,
+    objects: &[P],
+    at: usize,
+    first: u64,
+    span: u64,
+) -> Option<(usize, u64)> {
+    let before = objects.get(at.checked_sub(1)?)?.address().addr();
+    let rest = objects.get(at..)?;
+    let within = fast
+        .slot(core::ptr::without_provenance(before))
+        .wrapping_sub(first);
+    if within >= span {
+        return None;
+    }
+    let step = rest.first()?.address().addr().wrapping_sub(before);
+    let (count, lowest) = if step == fast.stride {
+        let count = ((span - within - 1) as usize).min(rest.len());
+        (count, within + 1)
+    } else if step == fast.stride.wrapping_neg() {
+        let count = (within as usize).min(rest.len());
+        (count, within - count as u64)
+    } else {
+        return None;
+    };
+    if count < STRETCH_LEAST {
+        return Some((0, 0));
+    }
+    let stretch = rest.get(..count)?;
+    let last = before.wrapping_add(step.wrapping_mul(count));
+    if stretch.last()?.address().addr() != last || !steps(stretch, before, step) {
+        return None;
+    }
+    // At most 63 slots, since the one before is in the word too, and `first` starts the word.
+    Some((count, ((1u64 << count) - 1) << lowest))
+}
+
+/// Whether `objects` are `from + stride`, `from + 2 * stride` and on. Four at a time, since a loop
+/// that takes a branch for each slot can do no better than one a cycle on a core that takes one
+/// branch a cycle, and this one has nothing else to wait for.
+#[inline(always)]
+fn steps<P: SlotPointer>(objects: &[P], from: usize, stride: usize) -> bool {
+    let (fours, rest) = objects.as_chunks::<4>();
+    let (twice, thrice, four) = (
+        stride.wrapping_mul(2),
+        stride.wrapping_mul(3),
+        stride.wrapping_mul(4),
+    );
+    let mut off = 0;
+    let mut next = from;
+    for [a, b, c, d] in fours {
+        off |= a.address().addr() ^ next.wrapping_add(stride);
+        off |= b.address().addr() ^ next.wrapping_add(twice);
+        off |= c.address().addr() ^ next.wrapping_add(thrice);
+        next = next.wrapping_add(four);
+        off |= d.address().addr() ^ next;
+    }
+    for object in rest {
+        next = next.wrapping_add(stride);
+        off |= object.address().addr() ^ next;
+    }
+    off == 0
+}
+
 /// Gathers `objects` into `Words` by bitmap word and ORs them into `release`: see
 /// `group`. `met` and `fast` are the region the batch met first and its check, which follow
 /// the pointers from region to region.
@@ -1811,15 +1901,28 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
     // Runs of one slot in a row: a scattered batch, which the loop below would take a run at
     // a time, entering and leaving its dense loop for every slot.
     let mut singles = 0;
+    // Looks in a row for a stretch that found none: a batch that gives up looks no more.
+    let mut misses = 0;
     let mut at = 1;
     loop {
-        // Slots of the run's word, one after another: the shape of a dense magazine. Ends at
-        // the first slot of another word, or one the fast check fails. The loop a dense
-        // launder spends its time in, at about eleven micro-ops: one compare covers the slot
-        // check, the watermark and the word, and the count comes from the position rather
-        // than an increment.
         let start = at;
         let mut bits = held.bits;
+        // The rest of the word at once, if the batch climbs or descends it a slot at a time.
+        if misses < STRETCH_MISSES {
+            match stretch(fast, objects, at, first, span) {
+                Some((0, _)) => {}
+                Some((count, more)) => {
+                    bits |= more;
+                    at += count;
+                    misses = 0;
+                }
+                None => misses += 1,
+            }
+        }
+        // Slots of the run's word, one after another: the shape of a magazine that does not
+        // keep to its slots' order. Ends at the first slot of another word, or one the fast
+        // check fails. One compare covers the slot check, the watermark and the word, and the
+        // count comes from the position rather than an increment.
         let mut ended = None;
         while let Some(object) = objects.get(at) {
             at += 1;
@@ -1956,6 +2059,8 @@ pub(super) struct Fast {
     pub(super) inverse: u64,
     pub(super) shift: u32,
     pub(super) limit: u64,
+    /// The distance between slots, which [`stretch`] walks.
+    pub(super) stride: usize,
 }
 
 impl Fast {
@@ -2090,6 +2195,7 @@ mod tests {
                     inverse: odd_inverse((class.size() >> shift) as u64),
                     shift,
                     limit,
+                    stride: class.size(),
                 };
                 let ks = [
                     0,

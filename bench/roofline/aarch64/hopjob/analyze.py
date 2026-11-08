@@ -75,3 +75,15 @@ for job, by in rows.items():
             if job in calls:
                 line += f", {d / (k * calls[job]):+.3f} of a cycle a call for a cycle of hop"
             print(line)
+
+# Two variants measured at the same placements: the ratio at each, its mean and standard deviation.
+variants = sorted({name for by in rows.values() for name in by})
+if len(variants) == 2:
+    a, b = variants
+    print(f"{b} against {a}, percent, by placement:")
+    for job, by in rows.items():
+        pads = sorted(set(by[a]) & set(by[b]), key=lambda p: int(p or 0))
+        ratios = [(st.median(by[b][p]) / st.median(by[a][p]) - 1) * 100 for p in pads]
+        if len(ratios) > 1:
+            print(f"  {job:<24} mean {st.mean(ratios):+6.2f} sd {st.stdev(ratios):5.2f}  " +
+                  " ".join(f"{r:+.2f}" for r in ratios))
