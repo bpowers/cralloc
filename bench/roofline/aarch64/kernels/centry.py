@@ -43,25 +43,25 @@ def table(reg, off):
   add {reg}, {reg}, :lo12:rf_tables + {off}"""
 
 
+def word_setup(masks):
+    """What `word_and_mask` reads, formed before the sequence: the slabs in x13, the masks in x14."""
+    return "  adrp x13, rf_slabs" if masks in ("slab", "packed") else f"  adrp x13, rf_slabs\n{table('x14', MASKS)}"
+
+
 def word_and_mask(masks, cls="x5"):
     """From the class's position in `cls` (a byte), the hot word in x1, its address operand, and
     the mask in w6. Returns text; the word's operand is [x3, x8]. `scaled` forms the CPU's slab's
     address first and indexes it by the position: it has no ALU op after the table's load."""
     if masks == "scaled":
-        return f"""  adrp x13, rf_slabs
-  add x3, x13, x8
+        return f"""  add x3, x13, x8
   ldr x1, [x3, {cls}, lsl #3]
-{table("x14", MASKS)}
   ldr x6, [x14, {cls}, lsl #3]"""
     if masks == "table":
-        return f"""  adrp x13, rf_slabs
-  add x3, x13, {cls}, lsl #3
+        return f"""  add x3, x13, {cls}, lsl #3
   ldr x1, [x3, x8]
-{table("x14", MASKS)}
   ldr x6, [x14, {cls}, lsl #3]"""
     if masks == "slab":
-        return f"""  adrp x13, rf_slabs
-  add x3, x13, {cls}, lsl #3
+        return f"""  add x3, x13, {cls}, lsl #3
   ldr x1, [x3, x8]
   ldr x6, [x3, #2048]"""
     raise ValueError(masks)
@@ -69,19 +69,19 @@ def word_and_mask(masks, cls="x5"):
 
 def malloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
     if masks == "packed":
-        lookup = f"""{table("x12", SIZES32)}
-  ldr w5, [x12, x2, lsl #2]
-  adrp x13, rf_slabs
+        tables = table("x12", SIZES32)
+        lookup = """  ldr w5, [x12, x2, lsl #2]
   and x7, x5, #0xffff
   add x3, x13, x7
   ldr x1, [x3, x8]
   lsr w6, w5, #16"""
     else:
-        lookup = f"""{table("x12", SIZES)}
-  ldrb w5, [x12, x2]
+        tables = table("x12", SIZES)
+        lookup = f"""  ldrb w5, [x12, x2]
 {word_and_mask(masks)}"""
-    return f"""{area(rseq)}
-{p}_restart:
+    return f"""{tables}
+{word_setup(masks)}
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {cpu_steps(cpu, p + "_slow")}
@@ -105,11 +105,14 @@ def malloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
   .subsection 0"""
 
 
+# The published words' page, before the sequence: x16, since the older shapes keep their tables apart.
+PUBLISHED_SETUP = table("x16", PUBLISHED)
+
+
 def region_index(p, reg="x4"):
     """The region index of x0 in `reg`, and to the slow path if it is out of range."""
-    return f"""  adrp x14, rf_tables + {PUBLISHED}
-  ldr w6, [x14, :lo12:rf_tables + {PUBLISHED}]
-  ldr x7, [x14, :lo12:rf_tables + {PUBLISHED + 8}]
+    return f"""  ldr w6, [x16]
+  ldr x7, [x16, #8]
   lsr {reg}, x0, x6
   sub {reg}, {reg}, x7
   cmp {reg}, #1, lsl #12
@@ -118,19 +121,20 @@ def region_index(p, reg="x4"):
 
 def free_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
     if masks == "packed":
-        lookup = f"""{table("x12", REGIONS32)}
-  ldr w5, [x12, x4, lsl #2]
-  adrp x13, rf_slabs
+        tables = table("x12", REGIONS32)
+        lookup = """  ldr w5, [x12, x4, lsl #2]
   and x7, x5, #0xffff
   add x3, x13, x7
   ldr x1, [x3, x8]
   lsr w6, w5, #16"""
     else:
-        lookup = f"""{table("x12", REGIONS)}
-  ldrb w5, [x12, x4]
+        tables = table("x12", REGIONS)
+        lookup = f"""  ldrb w5, [x12, x4]
 {word_and_mask(masks)}"""
-    return f"""{area(rseq)}
-{p}_restart:
+    return f"""{tables}
+{word_setup(masks)}
+{PUBLISHED_SETUP}
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {cpu_steps(cpu, p + "_slow")}
@@ -153,23 +157,22 @@ def free_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
 
 def free_sized_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
     """Class from the size, the address checks it. x1 is the size on entry, so the word uses x15."""
-    return f"""{area(rseq)}
-{p}_restart:
+    return f"""{table("x12", REGIONS)}
+{table("x17", SIZED)}
+{word_setup(masks)}
+{PUBLISHED_SETUP}
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {cpu_steps(cpu, p + "_slow")}
-{table("x12", SIZED)}
   and x2, x1, #0xffff
-  ldrb w5, [x12, x2]
+  ldrb w5, [x17, x2]
 {region_index(p)}
-{table("x12", REGIONS)}
   ldrb w7, [x12, x4]
   cmp w5, w7
   b.ne {p}_slow
-  adrp x13, rf_slabs
 {"  add x3, x13, x8" if masks == "scaled" else "  add x3, x13, x5, lsl #3"}
   ldr x15, {"[x3, x5, lsl #3]" if masks == "scaled" else "[x3, x8]"}
-{table("x14", MASKS) if masks != "slab" else ""}
   {"ldr x6, [x14, x5, lsl #3]" if masks != "slab" else "ldr x6, [x3, #2048]"}
   add x2, x15, #8
   tst w2, w6
@@ -185,22 +188,42 @@ def free_sized_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
   .subsection 0"""
 
 
-def calloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp", tail="stores"):
+# What a calloc's commit tail-calls, as the crate's `calloc_zero_tail` does: nothing after a commit is
+# in the sequence, so the routine stores nothing there. n in x0, size in x1, the block in x2. A total
+# of 8 or less is the 8-byte class, whose block is 8 bytes.
+ZERO_TAIL = """  mul x9, x0, x1
+  mov x0, x2
+  cmp x9, #8
+  b.hi 1f
+  str xzr, [x0]
+  ret
+1:
+  stp xzr, xzr, [x0]
+  cmp x9, #16
+  b.ls 2f
+  stp xzr, xzr, [x0, #16]
+  cmp x9, #32
+  b.ls 2f
+  brk #3
+2:
+  ret"""
+
+
+def calloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp"):
     """n in x0, size in x1, copied to x7 since the hot word's load writes x1 and an abort restarts
     with registers as they stand. The product goes in x15."""
-    return f"""{area(rseq)}
+    return f"""{table("x12", CALLOC)}
+{word_setup(masks)}
   mov x7, x1
-{p}_restart:
+{area(rseq)}
 {arming(p, arm)}
 {p}_start:
 {cpu_steps(cpu, p + "_slow")}
-  orr x2, x0, x7
-  cmp x2, #16, lsl #12
-  b.hs {p}_slow
+  umulh x2, x0, x7
+  cbnz x2, {p}_slow
   mul x15, x0, x7
   cmp x15, #1024
   b.hi {p}_slow
-{table("x12", CALLOC)}
   ldrb w5, [x12, x15]
 {word_and_mask(masks)}
   tst w1, w6
@@ -210,29 +233,20 @@ def calloc_body(p, rseq="word", cpu="cmp", masks="table", arm="adrp", tail="stor
   str x1, {"[x3, x5, lsl #3]" if masks == "scaled" else "[x3, x8]"}
 {p}_end:
 {rseq_section(None, "pop", p)}
-  mov x0, x4
-  cmp x15, #8
-  b.hi {p}_wide
-  str xzr, [x0]
-  ret
-{p}_wide:
-  stp xzr, xzr, [x0]
-  cmp x15, #16
-  b.ls {p}_done
-  stp xzr, xzr, [x0, #16]
-  cmp x15, #32
-  b.ls {p}_done
-  brk #3
-{p}_done:
-  ret
+  mov x1, x7
+  mov x2, x4
+  b rf_zero_tail
   .subsection 1
 {p}_slow:
   brk #2
   .subsection 0"""
 
 
+SLABS_SETUP = "  adrp x13, rf_slabs"
+
+
 def slab_index(p):
-    """x3 starts as `NO_CPU`, the answer if the number has no slab; x9 and x8 end as the operand of
+    """x3 starts as `NO_CPU`, the answer if the number has no slab; x13 and x8 end as the operand of
     the slab word at the offset in x0."""
     return f"""  mov x3, #2
   ldr w8, [x10, #4]
@@ -240,17 +254,16 @@ def slab_index(p):
   b.hs {p}_end
   lsl x8, x8, #12
   and x9, x0, #0xff8
-  add x8, x8, x9
-  adrp x9, rf_slabs"""
+  add x8, x8, x9"""
 
 
 def slab_cas(p, rseq="word"):
-    return f"""{lean_prologue(p, rseq)}
+    return f"""{lean_prologue(p, rseq, SLABS_SETUP)}
 {slab_index(p)}
-  ldr x3, [x9, x8]
+  ldr x3, [x13, x8]
   cmp x3, x1
   b.ne {p}_end
-  str x2, [x9, x8]
+  str x2, [x13, x8]
 {p}_end:
 {lean_group(p)}
   mov x0, x3
@@ -258,12 +271,12 @@ def slab_cas(p, rseq="word"):
 
 
 def stack_push(p, rseq="word"):
-    return f"""{lean_prologue(p, rseq)}
+    return f"""{lean_prologue(p, rseq, SLABS_SETUP)}
 {slab_index(p)}
-  ldr x3, [x9, x8]
+  ldr x3, [x13, x8]
   tbnz w3, #0, {p}_end
   str x3, [x1]
-  str x1, [x9, x8]
+  str x1, [x13, x8]
 {p}_end:
 {lean_group(p)}
   mov x0, x3
@@ -271,13 +284,13 @@ def stack_push(p, rseq="word"):
 
 
 def stack_pop(p, rseq="word"):
-    return f"""{lean_prologue(p, rseq)}
+    return f"""{lean_prologue(p, rseq, SLABS_SETUP)}
 {slab_index(p)}
-  ldr x3, [x9, x8]
+  ldr x3, [x13, x8]
   tbnz w3, #0, {p}_end
   cbz x3, {p}_end
   ldr x4, [x3]
-  str x4, [x9, x8]
+  str x4, [x13, x8]
 {p}_end:
 {lean_group(p)}
   mov x0, x3
@@ -327,19 +340,28 @@ def got_call(name):
 
 
 # Published words and masks share a page, and the region table is 4096 bytes past the masks, as in
-# `front::Front`: one `adrp` serves all three.
-LEAN_FRONT = f"""  adrp x14, rf_tables + {PUBLISHED}"""
-LEAN_MASKS = f"""  add x15, x14, :lo12:rf_tables + {MASKS}"""
+# `front::Front`: one `adrp` serves all three. All of it comes before the sequence, which holds no
+# relocation. `front="apart"` gives each table its own `adrp`, to see what sharing is worth.
+LEAN_SLABS = "  adrp x13, rf_slabs"
+LEAN_MASKS = f"""  adrp x14, rf_tables + {PUBLISHED}
+  add x15, x14, :lo12:rf_tables + {MASKS}"""
+LEAN_REGIONS = f"""{LEAN_MASKS}
+  add x12, x15, #{REGIONS - MASKS}"""
+LEAN_APART = f"""{table("x14", PUBLISHED)}
+{table("x15", MASKS)}
+{table("x12", REGIONS)}"""
 
 
 def lean_slab():
     return """  lsl x8, x8, #12
-  adrp x13, rf_slabs
   add x3, x13, x8"""
 
 
-def lean_malloc(p):
-    return f"""{lean_prologue(p)}
+def lean_malloc(p, late=False):
+    setup = f"""{table("x12", SIZES)}
+{LEAN_SLABS}
+{LEAN_MASKS}"""
+    return f"""{lean_prologue(p, setup=setup, late=late)}
   ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs {p}_slow
@@ -347,12 +369,9 @@ def lean_malloc(p):
   b.hi {p}_slow
   add x2, x0, #7
   lsr x2, x2, #3
-{table("x12", SIZES)}
   ldrb w5, [x12, x2]
 {lean_slab()}
   ldr x1, [x3, x5, lsl #3]
-{LEAN_FRONT}
-{LEAN_MASKS}
   ldr x6, [x15, x5, lsl #3]
   tst w1, w6
   b.eq {p}_slow
@@ -369,26 +388,26 @@ def lean_malloc(p):
   .subsection 0"""
 
 
-def lean_region(p):
-    return f"""{LEAN_FRONT}
-  ldr w6, [x14, :lo12:rf_tables + {PUBLISHED}]
-  ldr x7, [x14, :lo12:rf_tables + {PUBLISHED + 8}]
+def lean_region(p, front="shared"):
+    first, second = ("#0", "#8") if front == "apart" else (f"#{PUBLISHED & 4095}", f"#{(PUBLISHED & 4095) + 8}")
+    return f"""  ldr w6, [x14, {first}]
+  ldr x7, [x14, {second}]
   lsr x4, x0, x6
   sub x4, x4, x7
   cmp x4, #1, lsl #12
-  b.hs {p}_slow
-{LEAN_MASKS}
-  add x12, x15, #{REGIONS - MASKS}"""
+  b.hs {p}_slow"""
 
 
-def lean_free(p):
-    return f"""{lean_prologue(p)}
+def lean_free(p, front="shared", late=False):
+    setup = f"""{LEAN_SLABS}
+{LEAN_APART if front == "apart" else LEAN_REGIONS}"""
+    return f"""{lean_prologue(p, setup=setup, late=late)}
   ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs {p}_slow
   cbz x0, {p}_end
 {lean_slab()}
-{lean_region(p)}
+{lean_region(p, front)}
   ldrb w5, [x12, x4]
   ldr x1, [x3, x5, lsl #3]
   ldr x6, [x15, x5, lsl #3]
@@ -412,26 +431,30 @@ def lean_free_swapped(p):
     return lean_free(p).replace("ldrb w5, [x12, x4]", "ldrb w5, [x4, x12]")
 
 
-def lean_free_sized(p):
-    return f"""{lean_prologue(p)}
+def lean_free_sized(p, front="shared", late=False):
+    """x1 is the size a restart reads and x2 the table, so the hot word is in x9 and the new one in
+    x4, whose region index is done with by then."""
+    setup = f"""{table("x2", SIZED)}
+{LEAN_SLABS}
+{LEAN_APART if front == "apart" else LEAN_REGIONS}"""
+    return f"""{lean_prologue(p, setup=setup, late=late)}
   ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs {p}_slow
 {lean_slab()}
-{table("x2", SIZED)}
   and x9, x1, #0xffff
   ldrb w5, [x2, x9]
-{lean_region(p)}
+{lean_region(p, front)}
   ldrb w7, [x12, x4]
   cmp w5, w7
   b.ne {p}_slow
   ldr x9, [x3, x5, lsl #3]
   ldr x6, [x15, x5, lsl #3]
-  add x2, x9, #8
-  tst w2, w6
+  add x4, x9, #8
+  tst w4, w6
   b.eq {p}_slow
   str x0, [x9]
-  str x2, [x3, x5, lsl #3]
+  str x4, [x3, x5, lsl #3]
 {p}_end:
 {lean_group(p)}
   ret
@@ -441,27 +464,24 @@ def lean_free_sized(p):
   .subsection 0"""
 
 
-def lean_calloc(p, overflow="orr"):
-    """n in x0, size in x1, both left alone for the slow path and the zeroing tail. `orr` turns away
-    anything with a large argument, `umulh` exactly the products that overflow."""
-    check = {
-        "orr": f"  orr x2, x0, x1\n  cmp x2, #16, lsl #12\n  b.hs {p}_slow",
-        "umulh": f"  umulh x2, x0, x1\n  cbnz x2, {p}_slow",
-    }[overflow]
-    return f"""{lean_prologue(p)}
+def lean_calloc(p, late=False):
+    """n in x0, size in x1, both left alone for a restart, the slow path and the zeroing tail. The
+    overflow check is exact, and the tail does all the zeroing."""
+    setup = f"""{table("x12", CALLOC)}
+{LEAN_SLABS}
+{LEAN_MASKS}"""
+    return f"""{lean_prologue(p, setup=setup, late=late)}
   ldr w8, [x10, #4]
   cmp w8, #2, lsl #12
   b.hs {p}_slow
-{check}
+  umulh x2, x0, x1
+  cbnz x2, {p}_slow
   mul x9, x0, x1
   cmp x9, #1024
   b.hi {p}_slow
-{table("x12", CALLOC)}
   ldrb w5, [x12, x9]
 {lean_slab()}
   ldr x2, [x3, x5, lsl #3]
-{LEAN_FRONT}
-{LEAN_MASKS}
   ldr x6, [x15, x5, lsl #3]
   tst w2, w6
   b.eq {p}_slow
@@ -470,21 +490,8 @@ def lean_calloc(p, overflow="orr"):
   str x2, [x3, x5, lsl #3]
 {p}_end:
 {lean_group(p)}
-  mov x0, x4
-  cmp x9, #8
-  b.hi {p}_wide
-  str xzr, [x0]
-  ret
-{p}_wide:
-  stp xzr, xzr, [x0]
-  cmp x9, #16
-  b.ls {p}_done
-  stp xzr, xzr, [x0, #16]
-  cmp x9, #32
-  b.ls {p}_done
-  brk #3
-{p}_done:
-  ret
+  mov x2, x4
+  b rf_zero_tail
   .subsection 1
 {p}_slow:
   brk #2
@@ -492,6 +499,7 @@ def lean_calloc(p, overflow="orr"):
 
 
 def build_lean(k):
+    fn(k, "rf_zero_tail", ZERO_TAIL)
     malloc, free, sized, calloc = "rf_l_malloc", "rf_l_free", "rf_l_sized", "rf_l_calloc"
     fn(k, malloc, lean_malloc(malloc))
     fn(k, free, lean_free(free))
@@ -542,13 +550,25 @@ def build_lean(k):
   add x24, x24, #1
   cmp x24, #32
   b.ne 4b""", ops=32, kind="Slab", note="lean malloc, free, batch of 32 of 32 bytes")
-    exact = "rf_l_calloc_u"
-    fn(k, exact, lean_calloc(exact, "umulh"))
+    # The setup ahead of finding the area, or after it, and the tables' addresses shared or apart.
+    fn(k, "rf_l_malloc_late", lean_malloc("rf_l_malloc_late", late=True))
+    fn(k, "rf_l_free_late", lean_free("rf_l_free_late", late=True))
+    fn(k, "rf_l_sized_late", lean_free_sized("rf_l_sized_late", late=True))
+    fn(k, "rf_l_free_apart", lean_free("rf_l_free_apart", front="apart"))
+    fn(k, "rf_l_sized_apart", lean_free_sized("rf_l_sized_apart", front="apart"))
+    k.kernel("cl_late_free", f"{size}\n  bl rf_l_malloc_late\n  bl rf_l_free_late", kind="Slab", note="setup after the area: malloc, free")
+    k.kernel("cl_late_sized", f"{size}\n  bl rf_l_malloc_late\n  mov x1, #32\n  bl rf_l_sized_late", kind="Slab", note="setup after the area: malloc, sized free")
+    k.kernel("cl_late_sized_mix", f"{next_size}  bl rf_l_malloc_late\n  mov x1, x26\n  bl rf_l_sized_late", setup=mix_setup, kind="Slab", note="the same, 64 sizes")
+    k.kernel("cl_apart_free", f"{size}\n  bl {malloc}\n  bl rf_l_free_apart", kind="Slab", note="an adrp for each table: malloc, free")
+    k.kernel("cl_apart_sized", f"{size}\n  bl {malloc}\n  mov x1, #32\n  bl rf_l_sized_apart", kind="Slab", note="an adrp for each table: malloc, sized free")
+    k.kernel("cl_apart_sized_mix", f"{next_size}  bl {malloc}\n  mov x1, x26\n  bl rf_l_sized_apart", setup=mix_setup, kind="Slab", note="the same, 64 sizes")
+    # A width-bound caller is what could feel the three more instructions.
+    for n in (32, 64):
+        nops = "\n".join("  nop" for _ in range(n))
+        k.kernel(f"cl_sized_w{n}", f"{size}\n  bl {malloc}\n{nops}\n  mov x1, #32\n  bl {sized}\n{nops}", kind="Slab", note=f"malloc, sized free, {2 * n} nops")
+        k.kernel(f"cl_apart_w{n}", f"{size}\n  bl {malloc}\n{nops}\n  mov x1, #32\n  bl rf_l_sized_apart\n{nops}", kind="Slab", note=f"the same, an adrp for each table, {2 * n} nops")
     for n in (16, 32):
-        k.kernel(f"cl_calloc_u_{n}", f"  mov x0, #1\n  mov x1, #{n}\n  bl {exact}\n  bl {free}", kind="Slab",
-                 note=f"lean calloc(1, {n}), overflow by umulh, free")
-    for n in (16, 32):
-        k.kernel(f"cl_calloc_{n}", f"  mov x0, #1\n  mov x1, #{n}\n  bl {calloc}\n  bl {free}", kind="Slab", note=f"lean calloc(1, {n}) and free")
+        k.kernel(f"cl_calloc_{n}",f"  mov x0, #1\n  mov x1, #{n}\n  bl {calloc}\n  bl {free}", kind="Slab", note=f"lean calloc(1, {n}) and free")
     # The sized comparison for the plainer routines, in the mixed loop.
     for tag in ("base", "scaled"):
         k.kernel(f"cs_{tag}_mix", f"{next_size}  bl rf_c_malloc_{tag}\n  mov x1, x26\n  bl rf_c_frees_{tag}", setup=mix_setup, kind="Slab", note=f"C pair with a sized free, 64 sizes: {tag}")

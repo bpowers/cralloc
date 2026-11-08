@@ -26,6 +26,10 @@
 //! - Displacements are small and `adr` reaches 1 MiB, so what x86-64 reads at a displacement from
 //!   `SLABS` it reaches here by `adrp`, which reaches 4 GiB. The displacements are the specification's,
 //!   the same on every target.
+//! - A sequence holds no `adrp` or other relocation: every address is formed before the arming store,
+//!   which is the only thing a retry repeats outside the sequence. rustc links with
+//!   `--fix-cortex-a53-843419`, which can replace a load after an `adrp` near a page's end with a
+//!   branch to a stub, and a preemption in a stub out of the sequence's range does not abort it.
 //! - The `executable` feature changes nothing: GNU ld will not copy a C library's variable into a
 //!   position-independent executable for `adrp` to reach, so every routine reads through a word.
 //!   The configuration `cralloc_a64_direct`, for a link by `rust-lld`, compares the direct read.

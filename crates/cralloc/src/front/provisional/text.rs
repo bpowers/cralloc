@@ -5,8 +5,15 @@
 //! Labels: `5` the arming store, where the abort handler returns; `6` the sequence's first
 //! instruction; `7` the end of the sequence; `3` its descriptor; `4` its abort handler; `8` a word
 //! holding the address of `__rseq_offset`, for a routine with no descriptor; `20` a C routine's
-//! miss. Registers: x10 the rseq area and x11 the descriptor, which nothing writes after `5`, x8 the
-//! CPU number, and the rest as each routine says.
+//! miss. Registers: x10 the rseq area and x11 the descriptor, x8 the CPU number, and the rest as
+//! each routine says.
+//!
+//! A routine forms every address before its arming store, and a sequence holds no relocation. A
+//! linker working around Cortex-A53 erratum 843419 (rustc asks for it on every aarch64 link) can
+//! replace a load after an `adrp` at the end of a page with a branch to a stub, and a preemption in
+//! a stub outside the sequence's range does not abort it. No `adrp` here is followed directly by a
+//! load or store, which the erratum's pattern needs, so none is replaced either. Nothing in a
+//! sequence writes a register formed before it, since a restart begins at the arming store.
 
 /// Finds the rseq area through the word after the routine's descriptor, which saves an `adrp` on
 /// a core where they compete with branches, and arms the sequence. The word is 32-aligned, off the
@@ -160,21 +167,17 @@ macro_rules! cralloc_a64_c_cpu {
     };
 }
 
-/// This CPU's slab into x3: indexing it by a class's position leaves no ALU instruction between a
-/// table's load and the hot word's, which is what a free's commit waits on.
+/// Before the sequence: the slabs into x13.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! cralloc_a64_c_slab {
+macro_rules! cralloc_a64_c_slabs {
     () => {
-        concat!(
-            "lsl x8, x8, #12\n",
-            "adrp x13, {SLABS}\n",
-            "add x3, x13, x8\n",
-        )
+        "adrp x13, {SLABS}\n"
     };
 }
 
-/// The page holding the published words and the masks, into x14, and the masks into x15.
+/// Before the sequence: the page holding the published words and the masks into x14, and the masks
+/// into x15.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_masks {
@@ -183,22 +186,38 @@ macro_rules! cralloc_a64_c_masks {
     };
 }
 
-/// The region index of `ptr` in x0 into x4, to the miss if it is out of range, with the masks in
-/// x15 and the region table in x12, 4096 bytes past them.
+/// Before the sequence: [`cralloc_a64_c_masks`], and the region table into x12, 4096 bytes past the
+/// masks.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_regions {
+    () => {
+        concat!($crate::cralloc_a64_c_masks!(), "add x12, x15, #1, lsl #12\n",)
+    };
+}
+
+/// This CPU's slab into x3: indexing it by a class's position leaves no ALU instruction between a
+/// table's load and the hot word's, which is what a free's commit waits on.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_a64_c_slab {
+    () => {
+        concat!("lsl x8, x8, #12\n", "add x3, x13, x8\n",)
+    };
+}
+
+/// The region index of `ptr` in x0 into x4, to the miss if it is out of range.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_region {
     () => {
         concat!(
-            "adrp x14, {SLABS}+33554432\n",
             "ldr w6, [x14, #1024]\n",
             "ldr x7, [x14, #1032]\n",
             "lsr x4, x0, x6\n",
             "sub x4, x4, x7\n",
             "cmp x4, #1, lsl #12\n",
             "b.hs 20f\n",
-            "add x15, x14, #2048\n",
-            "add x12, x15, #1, lsl #12\n",
         )
     };
 }
@@ -219,18 +238,19 @@ macro_rules! cralloc_a64_c_malloc {
     () => {
         concat!(
             ".cfi_startproc\n",
+            "adrp x12, {C_SIZES}+2048\n",
+            "add x12, x12, :lo12:{C_SIZES}+2048\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_masks!(),
             $crate::cralloc_a64_arm!(),
             $crate::cralloc_a64_c_cpu!(),
             "cmp x0, #8, lsl #12\n",
             "b.hi 20f\n",
             "add x2, x0, #7\n",
             "lsr x2, x2, #3\n",
-            "adrp x12, {C_SIZES}+2048\n",
-            "add x12, x12, :lo12:{C_SIZES}+2048\n",
             "ldrb w5, [x12, x2]\n",
             $crate::cralloc_a64_c_slab!(),
             "ldr x1, [x3, x5, lsl #3]\n",
-            $crate::cralloc_a64_c_masks!(),
             "ldr x6, [x15, x5, lsl #3]\n",
             "tst w1, w6\n",
             "b.eq 20f\n",
@@ -245,15 +265,19 @@ macro_rules! cralloc_a64_c_malloc {
     };
 }
 
-/// `c_calloc`. x0 and x1 stay as they came, for a restart, the slow path and the zeroing tail: both
-/// below 65536 is a product that cannot overflow, and anything else is the slow path's. The hot
-/// word is in x2, and the block goes there for the tail.
+/// `c_calloc`. x0 and x1 stay as they came, for a restart, the slow path and the zeroing tail. The
+/// hot word is in x2, and the block goes there for the tail, which does all the zeroing: nothing
+/// after a commit is in the sequence, so no store comes after this one.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_calloc {
     () => {
         concat!(
             ".cfi_startproc\n",
+            "adrp x12, {C_CALLOC_SIZES}+2048\n",
+            "add x12, x12, :lo12:{C_CALLOC_SIZES}+2048\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_masks!(),
             $crate::cralloc_a64_arm!(),
             $crate::cralloc_a64_c_cpu!(),
             "umulh x2, x0, x1\n",
@@ -261,12 +285,9 @@ macro_rules! cralloc_a64_c_calloc {
             "mul x9, x0, x1\n",
             "cmp x9, #1024\n",
             "b.hi 20f\n",
-            "adrp x12, {C_CALLOC_SIZES}+2048\n",
-            "add x12, x12, :lo12:{C_CALLOC_SIZES}+2048\n",
             "ldrb w5, [x12, x9]\n",
             $crate::cralloc_a64_c_slab!(),
             "ldr x2, [x3, x5, lsl #3]\n",
-            $crate::cralloc_a64_c_masks!(),
             "ldr x6, [x15, x5, lsl #3]\n",
             "tst w2, w6\n",
             "b.eq 20f\n",
@@ -288,6 +309,8 @@ macro_rules! cralloc_a64_c_free {
     () => {
         concat!(
             ".cfi_startproc\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_regions!(),
             $crate::cralloc_a64_arm!(),
             $crate::cralloc_a64_c_cpu!(),
             "cbz x0, 7f\n",
@@ -308,18 +331,21 @@ macro_rules! cralloc_a64_c_free {
     };
 }
 
-/// `c_free_sized`. x1 is the size a restart and the slow path read, so the hot word is in x9.
+/// `c_free_sized`. x1 is the size a restart and the slow path read, so the hot word is in x9, and
+/// x2 is the size table a restart reads, so the new word is in x4.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! cralloc_a64_c_free_sized {
     () => {
         concat!(
             ".cfi_startproc\n",
+            "adrp x2, {C_SIZED_SIZES}+2048\n",
+            "add x2, x2, :lo12:{C_SIZED_SIZES}+2048\n",
+            $crate::cralloc_a64_c_slabs!(),
+            $crate::cralloc_a64_c_regions!(),
             $crate::cralloc_a64_arm!(),
             $crate::cralloc_a64_c_cpu!(),
             $crate::cralloc_a64_c_slab!(),
-            "adrp x2, {C_SIZED_SIZES}+2048\n",
-            "add x2, x2, :lo12:{C_SIZED_SIZES}+2048\n",
             "and x9, x1, #0xffff\n",
             "ldrb w5, [x2, x9]\n",
             $crate::cralloc_a64_c_region!(),
@@ -328,11 +354,11 @@ macro_rules! cralloc_a64_c_free_sized {
             "b.ne 20f\n",
             "ldr x9, [x3, x5, lsl #3]\n",
             "ldr x6, [x15, x5, lsl #3]\n",
-            "add x2, x9, #8\n",
-            "tst w2, w6\n",
+            "add x4, x9, #8\n",
+            "tst w4, w6\n",
             "b.eq 20f\n",
             "str x0, [x9]\n",
-            "str x2, [x3, x5, lsl #3]\n",
+            "str x4, [x3, x5, lsl #3]\n",
             $crate::cralloc_a64_end!(),
             "ret\n",
             $crate::cralloc_a64_c_miss!(),
@@ -340,8 +366,9 @@ macro_rules! cralloc_a64_c_free_sized {
     };
 }
 
-/// The field of this CPU's slab at the offset in x0: its operand `[x9, x8]`, and its value into
-/// x3. x3 starts as `NO_CPU` (2), the answer if the number has no slab.
+/// The field of this CPU's slab at the offset in x0: its operand `[x13, x8]`, with the slabs in x13
+/// from before the sequence, and its value into x3. x3 starts as `NO_CPU` (2), the answer if the
+/// number has no slab.
 macro_rules! a64_slab_field {
     () => {
         concat!(
@@ -352,8 +379,7 @@ macro_rules! a64_slab_field {
             "lsl x8, x8, #12\n",
             "and x9, x0, #0xff8\n",
             "add x8, x8, x9\n",
-            "adrp x9, {SLABS}\n",
-            "ldr x3, [x9, x8]\n",
+            "ldr x3, [x13, x8]\n",
         )
     };
 }

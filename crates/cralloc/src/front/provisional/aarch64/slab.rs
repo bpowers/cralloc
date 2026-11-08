@@ -14,11 +14,12 @@ pub(crate) unsafe extern "C" fn slab_cas(offset: usize, expected: usize, new: us
     core::arch::naked_asm!(
         concat!(
             ".cfi_startproc\n",
+            crate::cralloc_a64_c_slabs!(),
             crate::cralloc_a64_arm!(),
             a64_slab_field!(),
             "cmp x3, x1\n",
             "b.ne 7f\n",
-            "str x2, [x9, x8]\n",
+            "str x2, [x13, x8]\n",
             crate::cralloc_a64_end!(),
             a64_slab_return!(),
         ),
@@ -39,11 +40,12 @@ pub(crate) unsafe extern "C" fn slab_stack_push(offset: usize, magazine: usize) 
     core::arch::naked_asm!(
         concat!(
             ".cfi_startproc\n",
+            crate::cralloc_a64_c_slabs!(),
             a64_arm_direct!(),
             a64_slab_field!(),
             "tbnz w3, #0, 7f\n",
             "str x3, [x1]\n",
-            "str x1, [x9, x8]\n",
+            "str x1, [x13, x8]\n",
             a64_end_direct!(),
             a64_slab_return!(),
         ),
@@ -64,12 +66,13 @@ pub(crate) unsafe extern "C" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(
         concat!(
             ".cfi_startproc\n",
+            crate::cralloc_a64_c_slabs!(),
             a64_arm_direct!(),
             a64_slab_field!(),
             "tbnz w3, #0, 7f\n",
             "cbz x3, 7f\n",
             "ldr x4, [x3]\n",
-            "str x4, [x9, x8]\n",
+            "str x4, [x13, x8]\n",
             a64_end_direct!(),
             a64_slab_return!(),
         ),

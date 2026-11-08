@@ -103,14 +103,14 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
             match position {
                 $($p => unsafe {
                     core::arch::asm!(
+                        "adrp x12, {SLABS}",
                         a64_arm_direct!(),
                         "mov x0, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
                         "b.hs 7f",
-                        "adrp x9, {SLABS}",
                         "lsl x8, x8, #12",
-                        "add x9, x9, x8",
+                        "add x9, x12, x8",
                         "cmp x18, x9",
                         "b.eq 21f",
                         "mov x18, x9",
@@ -131,6 +131,7 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
                         out("x9") _,
                         out("x10") _,
                         out("x11") _,
+                        out("x12") _,
                         out("x18") _,
                         options(nostack),
                     )
@@ -154,14 +155,14 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
             match position {
                 $($p => unsafe {
                     core::arch::asm!(
+                        "adrp x12, {SLABS}",
                         a64_arm_direct!(),
                         "mov x4, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
                         "b.hs 7f",
-                        "adrp x9, {SLABS}",
                         "lsl x8, x8, #12",
-                        "add x9, x9, x8",
+                        "add x9, x12, x8",
                         "cmp x18, x9",
                         "b.eq 21f",
                         "mov x18, x9",
@@ -184,6 +185,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
                         out("x9") _,
                         out("x10") _,
                         out("x11") _,
+                        out("x12") _,
                         out("x18") _,
                         options(nostack),
                     )

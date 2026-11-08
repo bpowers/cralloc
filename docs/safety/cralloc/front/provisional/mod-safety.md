@@ -64,18 +64,25 @@ under the C names.
 
 **Proof.** As PROVISIONAL-01, with these differences.
 
-1. *The tables.* A table's address comes by `adrp`, with the displacements of the specification,
-   which `aarch64/mod.rs` asserts, and `SLABS` is page-aligned. Each index is in range as on x86-64:
-   the size compared first for `malloc` and `calloc`, the low 16 bits for the sized free's table, and
-   the compare with 4096 for the region table. `calloc`'s product is below 2^32, both factors being
-   below 65536, and is compared with 1024 before it indexes. A position read from a table is a byte,
-   below the 256 entries of the masks' table, and a zero mask misses. The hot word is at `[x3, x5,
-   lsl #3]`, this CPU's slab indexed by that position.
-2. *The arguments.* x0 and x1 are not written before a commit by a routine that takes them, so a
-   restart finds them, and a miss reaches its slow path with them by one `b`. `c_malloc` writes x1,
-   which is not its argument, and holds its block in x4 until after the commit, and `c_calloc` moves
-   its block to x2 after the commit for the tail. Neither restart nor miss reads x2.
-3. *The mirror.* A stale region shift, base or byte gives a position whose mask is zero, an index
+1. *The tables.* A table's address comes by `adrp` before the arming store, with the displacements
+   of the specification, which `aarch64/mod.rs` asserts, and `SLABS` is page-aligned. Each index is
+   in range as on x86-64: the size compared first for `malloc` and `calloc`, the low 16 bits for the
+   sized free's table, and the compare with 4096 for the region table. `calloc`'s product has its
+   high word checked by `umulh`, as x86-64's multiply checks overflow, and is compared with 1024
+   before it indexes. A position read from a table is a byte, below the 256 entries of the masks'
+   table, and a zero mask misses. The hot word is at `[x3, x5, lsl #3]`, this CPU's slab indexed by
+   that position.
+2. *The arguments and the setup.* x0 and x1 are not written before a commit by a routine that takes
+   them, and the registers formed before the arming store (x2 in `c_free_sized`, x10 to x15) are not
+   written in the sequence at all, so a restart finds them, and a miss reaches its slow path with the
+   arguments by one `b`. `c_malloc` writes x1, which is not its argument, and holds its block in x4
+   until after the commit, and `c_calloc` moves its block to x2 after the commit for the tail, which
+   does all the zeroing: no store follows a commit. Neither a restart nor a miss reads a register the
+   sequence writes.
+3. *The linker.* A sequence holds no `adrp` or other relocation, and no `adrp` before one is directly
+   followed by a load or store, so the pattern of Cortex-A53 erratum 843419 occurs nowhere in a
+   routine and no linker replaces a load in a sequence with a branch out of its range.
+4. *The mirror.* A stale region shift, base or byte gives a position whose mask is zero, an index
    out of range or a class that the slow path corrects, as on x86-64: the routine's contract holds
    for every content of those words. So their order on a weak machine is no matter of safety.
 
