@@ -21,6 +21,7 @@ trusted").
 | `cpu_id` is negative with no registration | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; seen under valgrind. Refusal by seccomp under glibc is from source |
 | `membarrier` on every CPU returns only after every sequence in flight has completed or been aborted | 7.2.9 | `rseq_drain.rs` |
 | The same, aimed at one CPU, which is what the drain uses | tag v7.2 | No probe isolates it: a test that it returns success, and soak modes that drain |
+| Either form is also a full barrier between the caller and those CPUs, which `membarrier(2)` does not promise of it ([memory-ordering.md](memory-ordering.md)) | tag v7.2 | `kernel_fence` in `depot/ordering.rs` |
 | glibc registers a thread's area before the thread can call the allocator | glibc 2.43 | `rseq_lifecycle.rs`; `rseq_preload.rs`. In a static program an IFUNC resolver runs before the thread pointer exists (not tested) |
 | A forked child is safe. A `vfork` or `CLONE_VM` child is not, and glibc never allocates in one | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; `cid_stress.rs`; `rseq_preload.rs` |
 
@@ -126,6 +127,11 @@ interrupt, so its abort is pending. One scheduled out elsewhere is not in a sequ
 it starts later begins after the caller's stores: the call has a full barrier at entry and exit,
 paired with the scheduler's.
 
+That barrier is also how a drainer sees a routine's plain stores on a weakly ordered CPU, with no
+release in the routine: what that CPU's threads stored before the handler's barrier, the caller's
+loads after the call see, and the same on arm64 as on x86-64
+([memory-ordering.md](memory-ordering.md), "What stands in for a release").
+
 - **Registration.** `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ`, once per address space, or
   `EPERM`. With more than one thread it allocates a CPU mask and waits for an RCU grace period
   (`:465`, `:473`). A forked child inherits it (observed); `execve` clears it (from source).
@@ -134,9 +140,10 @@ paired with the scheduler's.
   nothing, so a drain's back-out answers `EPERM`, `EINVAL` or a seccomp filter, not memory pressure.
   A failed registration turns drains off for the life of the process, with no retry
   (`depot/generation.rs`).
-- **Shortcuts, all correct.** One user of the address space or one online CPU returns at once. A CPU
-  number past `nr_cpu_ids`, not online, or running another address space returns 0 with no
-  interrupt.
+- **Shortcuts, all correct.** One user of the address space or one online CPU returns at once, with
+  no barrier at all, so `LinuxOs` follows the call with an acquire fence
+  ([memory-ordering.md](memory-ordering.md)). A CPU number past `nr_cpu_ids`, not online, or running
+  another address space returns 0 with no interrupt.
 - **Cost.** 3.5 to 5.7 microseconds a process-wide call run alone, 18 and 26 beside stress runs,
   with 8 to 24 CPUs busy in the process. Process-wide calls share one system-wide mutex
   (`:172-175`), per-CPU calls a mutex per CPU (`:176`). The per-CPU form's cost was not measured.

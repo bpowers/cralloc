@@ -44,7 +44,9 @@
 //! - `abort` panics, so a test can observe it.
 //!
 //! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
-//! [`Native`] for large classes, [`Tiny`] for Kani harnesses. Other crates may define their own.
+//! [`Native`] for large classes, [`Tiny`] for Kani harnesses, and [`Kernel4k`], [`Kernel16k`] and
+//! [`Kernel64k`] for the rules of a real kernel at their real size. Other crates may define their
+//! own.
 //!
 //! The simulator takes no locks: every piece of state is an atomic, and racing reservations
 //! claim pages by compare-and-swap.
@@ -87,6 +89,11 @@ const PAGE_SHIFT: u32 = match option_env!("CRALLOC_SIM_PAGE_SHIFT") {
     },
     None => 12,
 };
+
+/// How many of the pages of 4 KiB that a test's sizes were written for fit a page of the [`Standard`]
+/// and [`Native`] shapes: what a test multiplies its sizes by to keep their proportion to a page.
+#[cfg(test)]
+pub const PAGE_SCALE: usize = 1 << (PAGE_SHIFT - 12);
 
 /// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
 /// (128 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions
@@ -145,11 +152,52 @@ impl Shape for Tiny {
     const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
 }
 
+/// The shape of a real kernel with pages of 4 KiB and huge pages of 2 MiB, under a real kernel's
+/// rules: every byte a rule states is the byte it says, so that a test can see the retained cap
+/// act at 64 MiB. Regions of 256 MiB down to the 2 MiB floor, 8 GiB of address space that the
+/// host commits only as it is touched.
+pub enum Kernel4k {}
+
+impl Shape for Kernel4k {
+    const GEOMETRY: Geometry =
+        Geometry::new(12, 21, 28, 21, 32, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
+/// The shape of a real kernel with pages of 16 KiB and huge pages of 32 MiB, as [`Kernel4k`] is
+/// of its own: regions of 1 GiB, which hold enough huge pages for a class to reach the huge-page
+/// threshold of 256 MiB, down to the 2 MiB floor, where a huge page is larger than a region. A
+/// reservation made in less simulated memory ([`SimOs::with_capacity`]) gets such regions.
+pub enum Kernel16k {}
+
+impl Shape for Kernel16k {
+    const GEOMETRY: Geometry =
+        Geometry::new(14, 25, 30, 21, 32, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
+/// The shape of a real kernel with pages of 64 KiB and huge pages of 512 MiB, as [`Kernel4k`] is
+/// of its own: regions of 1 GiB, which a huge page fits in but which do not use one, since it is
+/// over the retained cap, down to the 2 MiB floor, where it does not fit either.
+pub enum Kernel64k {}
+
+impl Shape for Kernel64k {
+    const GEOMETRY: Geometry =
+        Geometry::new(16, 29, 30, 21, 16, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
 /// Bytes of simulated memory that hold one reservation of a shape's largest plan, rounded up to
 /// the largest region size.
 pub const fn capacity_for<S: Shape>() -> usize {
     let plan = S::GEOMETRY.largest_plan();
     plan.size().next_multiple_of(plan.region_size())
+}
+
+/// Whether this process may have the address space a heap of `S` takes. A limit on address space,
+/// as `scripts/memlimit`'s fallback sets, refuses the kernels' shapes, and tests on them pass over.
+pub fn room_for<S: Shape>() -> bool {
+    memory::room_for(
+        capacity_for::<S>(),
+        S::GEOMETRY.largest_plan().region_size(),
+    )
 }
 
 /// The random generator's step (splitmix64's increment: the odd number nearest `2^64 / phi`).
@@ -1000,6 +1048,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn fence_all(&self) -> Result<(), OsError> {
         if self.fence_registered() {
+            self.cpus.fence_all();
             self.sleeps.fences.fetch_add(1, Ordering::AcqRel);
             Ok(())
         } else {

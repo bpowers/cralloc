@@ -80,7 +80,7 @@ first but the clobbers: the arguments, which are none of them, and the stack poi
 theorem restartsOk : ∀ s s', attempt.pre s → Restarts inlineTargetX4 pushInline attempt s s' →
     inlineTargetX4.abiPreserved s s' ∧ ArgsKept inlineTargetX4.abi pushInlineRetSig s s' ∧
     (inlineTargetX4.inline = true → inlineTargetX4.preservedExcept clobbers s s') :=
-  restartsOk_inline (A := inlineAbiX4) (ret := "x4") verified (fun _ hs => (clobbersOk hs).2.2)
+  restartsOk_inline (ret := .x4) verified (fun _ hs => (clobbersOk hs).2.2)
     fun _ _ hpe => argsKept_regs hX (by decide) fun r hr => hpe r (by revert r; decide)
 
 end VG.Proof.Slab.AArch64.PushInline

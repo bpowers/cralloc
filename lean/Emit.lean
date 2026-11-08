@@ -27,7 +27,8 @@ can change what is audited or emitted. The audits:
   (`VG.axiomsOf`, which walks the declarations themselves);
 * the compiled code of the lists and of `VG.Emit.run` is what the kernel
   checked (`VG.compilerOverrides`);
-* every `VG.Spec` definition is declared in `Spec/` (`VG.specOutsideSpec`).
+* every `VG.Spec` definition is declared in `Spec/` (`VG.specOutsideSpec`);
+* every target is built in `TCB/` and every `Api` in `Spec/` (`VG.builtOutside`).
 
 That each declaration was checked by the kernel at all (and not, say,
 skipped with `debug.skipKernelTC`) is checked separately, by replaying every
@@ -43,7 +44,8 @@ def audit (env : Environment) (roots : List Name) : List String :=
   (axioms.filter (!VG.standardAxioms.contains ·)).map (s!"non-standard axiom: {·}") ++
   missing.map (s!"unknown constant: {·}") ++
   VG.compilerOverrides env (roots ++ [``VG.Emit.run]) ++
-  (VG.specOutsideSpec env).map fun (n, m) => s!"`{n}` is declared outside `Spec/`, in {m}"
+  (VG.specOutsideSpec env).map (fun (n, m) => s!"`{n}` is declared outside `Spec/`, in {m}") ++
+  (VG.builtOutside env).map fun (n, c, m) => s!"`{n}` builds a `{c}` outside what may, in {m}"
 
 /-- The artifact lists `roots`, evaluated in `env`, in order. Each is a
 constant of type `List VG.Artifact` (`registrations` names them, and the
@@ -83,7 +85,8 @@ unsafe def main (args : List String) : IO UInt32 := do
     IO.eprintln "the audit failed: nothing was emitted"
     return 1
   IO.println s!"audited {roots.length} registration files: standard axioms only, the compiled \
-    code is what the kernel checked, and every `VG.Spec` definition is from `Spec/`"
+    code is what the kernel checked, every `VG.Spec` definition is from `Spec/`, and every \
+    target and `Api` is built where it may be"
   match evalAll env roots with
   | .ok arts => VG.Emit.run arts args
   | .error e =>

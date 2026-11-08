@@ -52,10 +52,10 @@ fn threads() -> Vec<Wants> {
     let smalls: Vec<Class> = SmallClass::all().map(SmallClass::class).collect();
     let mut all = Vec::new();
     for _ in 0..4 {
-        all.push(std::vec![large(region / 2); 12]);
+        all.push(std::vec![large_of(region / 2); 12]);
     }
     for _ in 0..2 {
-        all.push(std::vec![large(region); 6]);
+        all.push(std::vec![large_of(region); 6]);
     }
     for t in 0..3 {
         all.push((0..12).map(|i| smalls[3 * i + t]).collect());

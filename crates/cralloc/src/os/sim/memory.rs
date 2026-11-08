@@ -43,6 +43,24 @@ fn host_page() -> usize {
     LinuxOs::geometry().page_size()
 }
 
+/// Whether `len` bytes of address space aligned to `align` can be had now.
+#[cfg(cralloc_real)]
+pub(super) fn room_for(len: usize, align: usize) -> bool {
+    let host = host_page();
+    let whole = len.next_multiple_of(host);
+    let Ok(base) = LinuxOs.reserve(whole, align.max(host)) else {
+        return false;
+    };
+    // SAFETY: the reservation just made, whole, that nothing else knows of.
+    unsafe { LinuxOs.unmap(base, whole) }.is_ok()
+}
+
+/// Where the memory is an ordinary allocation, a shape's address space is its memory.
+#[cfg(not(cralloc_real))]
+pub(super) fn room_for(_len: usize, _align: usize) -> bool {
+    false
+}
+
 impl Memory {
     /// `len` zero bytes aligned to `align`, for a shape whose pages are `page` bytes: guarded if
     /// those are whole host pages and the platform allows it. Panics if `len` is zero, the layout

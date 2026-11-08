@@ -213,6 +213,7 @@ Each note ends with its own open questions.
 | [workloads.md](workloads.md) | What is in the suite and why? |
 | [prior-art.md](prior-art.md) | What do other allocators do, and what did we take or reject? |
 | [verification.md](verification.md) | How do we know it is correct? |
+| [memory-ordering.md](memory-ordering.md) | What does the allocator need of the memory order, and why does it hold on a weak one? |
 | [linux-rseq-contract.md](linux-rseq-contract.md) | What does the kernel promise about rseq? |
 | [portability.md](portability.md) | What changes under musl, static linking, thread stacks and Miri? |
 

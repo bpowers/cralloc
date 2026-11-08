@@ -5,8 +5,7 @@ architecture, x86-64 or AArch64, proved correct against that model, and printed
 as Rust source. Nothing in the allocator is assembly written by hand: the
 generated files are the only assembly it contains, and a check fails if they
 differ from what Lean generates now. (The AArch64 routines are moving here from
-`front/provisional/`, written by hand; only the self-test, the pop and the push are
-generated so far.)
+`front/provisional/`, written by hand; all but the C entry points are generated so far.)
 
 This directory is a fork of the Lean framework of
 [verified-garbage](https://github.com/pyca/verified-garbage), which does the
@@ -161,6 +160,15 @@ restart needs cannot be verified. `Verified` is the same for both, about attempt
   compares it with the model.
 * For each artifact: its contract and `Api` in `Spec/`.
 * Lean's kernel, and the assembler in `rustc` and LLVM.
+* The linker. It writes each relocation as the printers assume, and it can do more: for
+  Cortex-A53 erratum 843419 it moves a load or store that follows an `adrp` out of line,
+  which rustc asks of it on every AArch64 link. So the emitter refuses a restartable
+  sequence with anything in its body that a linker writes or could move
+  (`Rust.checkRseq`), and an `adrp` near enough before it.
+* The argument about memory order. The model is sequential: a run is one thread's, its
+  memory accesses in order, and other threads appear only while it is aborted. That the
+  routines are right under the processors' weaker orders is argued in
+  `docs/research/memory-ordering.md`, not proved here.
 
 Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
 
@@ -183,6 +191,11 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
 * The emitter runs compiled code, so nothing it runs may carry
   `implemented_by`, `extern` or `export`, and nothing under `Cralloc/` may
   declare a `csimp` theorem or an `initialize` (`TCB/Audit.lean`).
+* Only `TCB/` builds a `Target`, `ISA`, `Printer`, `Abi` or `Artifact`, and only `Spec/` an
+  `Api`, which the audit checks of every definition (`TCB/Audit.lean`): a registration
+  chooses among them, and cannot bring a printer of its own to go with its proof.
+* A routine whose proof goes through but which would run wrong, because the model is not
+  the machine there, goes in `CrallocTest/Forgery/` once the emitter refuses it.
 * Never edit the generated files by hand.
 
 For symbolic execution, step a block with `runBlock_cons`, `runStep_some`

@@ -45,15 +45,16 @@ structure A64 (A : Abi isa) (regs : List Reg) : Prop where
   param : A.param = none
   reserved : ∀ s, A.reserved 0 s = []
   setupFinds : A.setupFindsArea = true
+  slabsPage : A.slabsOnPage = true
 
 theorem a64_abi : A64 abi argRegs :=
-  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl⟩
+  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl, rfl⟩
 
 theorem a64_inline : A64 inlineAbi inlineArgRegs :=
-  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl⟩
+  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl, rfl⟩
 
 theorem a64_inlineX4 : A64 inlineAbiX4 inlineArgRegs :=
-  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl⟩
+  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl, fun _ => rfl, rfl, rfl⟩
 
 /-- The thread's rseq area. -/
 def area (s : State) : Addr := s.tpidr + s.mem.readW (s.syms RS) 64

@@ -37,8 +37,17 @@ Modelling choices:
   `rd ++ wr`, stores within `wr`; otherwise the instruction faults. Alignment is
   not modelled: Linux leaves SCTLR_EL1.A clear for user code, so a misaligned
   access to Normal memory does not fault (DDI 0487, "Alignment of data
-  accesses"), though it may not be single-copy atomic. A routine's commit is
-  aligned because a slab word is.
+  accesses"), though it may not be single-copy atomic. So a sequence's commit, the
+  store other threads and the kernel must see whole, must be aligned, which holds
+  this way: its contract's trace says where it is (`Spec.Slab.Ctx.PopTrace` and its kin),
+  a slab word, `SLABS` plus a multiple of 8, and `SLABS` starts on a page
+  (`Spec.Slab.Ctx.Layout.page`, `Proof.Slab.wordAddr_aligned`). The store to `rseq_cs`
+  is 8 bytes into the thread's area, which the kernel refuses to register unless it is
+  32-byte aligned. In a body the emitter refuses an immediate offset that is not a
+  multiple of the access's size (`Printer.bodyRefuses`).
+* The model is sequential (`TCB/Code.lean`, "What the model leaves out"). On this
+  architecture's weaker memory order, the routines rest on what
+  docs/research/memory-ordering.md argues.
 * The model describes every instruction with an operand of any value. Which
   immediates, offsets and shifts an instruction can encode is the printer's to
   check (`Printer.unencodable`, `TCB/AArch64/Print.lean`): the emitter refuses

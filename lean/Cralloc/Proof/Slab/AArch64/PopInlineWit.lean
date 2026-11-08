@@ -82,7 +82,7 @@ first but the clobbers: the arguments, which are none of them, and the stack poi
 theorem restartsOk : ∀ s s', attempt.pre s → Restarts inlineTarget popInline attempt s s' →
     inlineTarget.abiPreserved s s' ∧ ArgsKept inlineTarget.abi popInlineSig s s' ∧
     (inlineTarget.inline = true → inlineTarget.preservedExcept clobbers s s') :=
-  restartsOk_inline (A := inlineAbi) (ret := "x0") verified (fun _ hs => (clobbersOk hs).2.2)
+  restartsOk_inline (ret := .x0) verified (fun _ hs => (clobbersOk hs).2.2)
     fun _ _ hpe => argsKept_regs hX (by decide) fun r hr => hpe r (by revert r; decide)
 
 end VG.Proof.Slab.AArch64.PopInline
