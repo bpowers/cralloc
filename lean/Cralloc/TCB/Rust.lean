@@ -447,14 +447,17 @@ are), and the result in its result register. Every register the code may
 change is declared, from the same list the proof covers
 (`Artifact.clobbersOk`); `asm!` keeps the others. A function with exits
 returns `bool`: `false` from each exit's label, `true` from the end of the
-block. -/
+block. One whose result says only whether it did anything (`Api.retNonzero`)
+returns `bool` too: `ret != 0`. -/
 def inlineFunction (a : Artifact) (lines : List Line) : String :=
   let T := a.target
   let args := (T.argRegs.zip (argNames a.sig))
   let ret := a.sig.ret
   let exits := exitNames a.code
   let refs := dedup (lines.flatMap Line.refs) |>.filter (!exits.contains ·)
-  let retTy := match ret with | some ty => ty.rust | none => "bool"
+  let retTy := match ret, a.retNonzero with
+    | some ty, false => ty.rust
+    | _, _ => "bool"
   let sig := "(" ++ ", ".intercalate (a.sig.params.map fun p => p.2.rust p.1) ++ ")" ++
     (if exits.isEmpty && ret.isNone then "" else s!" -> {retTy}")
   let ins := args.map fun (r, n) =>
@@ -479,7 +482,8 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
   "            options(nostack),\n" ++
   "        );\n" ++
   "    }\n" ++
-  (if ret.isSome then "    ret\n" else if exits.isEmpty then "" else "    true\n") ++
+  (if ret.isSome then (if a.retNonzero then "    ret != 0\n" else "    ret\n")
+    else if exits.isEmpty then "" else "    true\n") ++
   "}\n"
 
 /-- Whether code calls a function or has a frame, which an inline function,
@@ -495,10 +499,13 @@ def usesStack {I C : Type} : Code I C → Bool
 registers as clobbers, each once, has no more arguments than argument
 registers, and returns no value if it has exits (`asm!` cannot have a label
 and an output: rust-lang/rust#119364); one of a naked target declares no
-clobbers and no generic parameters. -/
+clobbers and no generic parameters. Only an inline function with a result may
+return that it is not zero (`Api.retNonzero`). -/
 def checkInline (a : Artifact) : Except String Unit := do
   let T := a.target
   let n := s!"{T.name}: {a.name}"
+  if a.retNonzero && !(T.inline && a.sig.ret.isSome) then
+    throw s!"{n} returns that its result is not zero, but is not inline with a result"
   if T.inline then
     if usesStack a.code then throw s!"{n} is inline but calls a function or has a frame"
     for c in a.clobbers do

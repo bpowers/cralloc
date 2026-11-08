@@ -108,6 +108,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   generics := api.generics
   rustConsts := api.rustConsts
   exports := api.exports
+  retNonzero := api.retNonzero
   setup := r.setup
   code := r.code
   contract := r.contract

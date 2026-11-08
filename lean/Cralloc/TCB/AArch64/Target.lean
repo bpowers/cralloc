@@ -67,6 +67,8 @@ def abi : Abi isa where
   reservedDoc n := if n = 0 then none else some s!"the {n} bytes of stack below the stack pointer"
   sym := some fun s name => s.syms name
   tp := some fun s => s.tpidr
+  setupFindsArea := true
+  slabsOnPage := true
 
 /-! ## Restartable sequences
 
@@ -176,5 +178,12 @@ abbrev inlineTarget : Target :=
     regs := clobberable.map Reg.x
     preservedExcept := preservedExcept
     printer := { printer with stubExits := false, coldFar := true } }
+
+/-- The calling convention of an inline function whose result is in `x4`: one that
+has `x0` as an argument it must keep until its commit (the inline push). -/
+def inlineAbiX4 : Abi isa := { inlineAbi with ret s := s.gpr .x4 }
+
+/-- The inline target, for a function whose result is in `x4`. -/
+abbrev inlineTargetX4 : Target := { inlineTarget with abi := inlineAbiX4, retReg := "x4" }
 
 end VG.AArch64
