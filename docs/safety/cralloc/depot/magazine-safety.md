@@ -23,10 +23,12 @@ the smallest size is never taken and would in any case only shrink the slots rea
 derive their pointer from the stored one with `map_addr`, so they keep its provenance.
 
 **The binding.** An `Area` pairs a `Space` with the `Depot` whose `carved` and `committed`
-counters describe that space's magazine area. It is made only by `Cache::with_tuning`, whose
-contract (CACHE-01, `depot/mod-safety.md`) is that the depot is only ever used with that space. Without it, one
-depot's committed mark could admit uncommitted memory of another space, or two depots could
-carve the same magazines.
+counters describe that space's magazine area. `Cache::with_tuning` makes one under its contract
+(CACHE-01, `depot/mod-safety.md`) that the depot is only ever used with that space. `depot::inspect`,
+the only other maker, has no such contract, so it is private to the crate, and its one caller that
+ships, `Bound::inspect`, passes the depot and space of one `Heap`, as `Bound::cache` does (HEAP-02).
+Without the binding, one depot's committed mark could admit uncommitted memory of another space, or
+two depots could carve the same magazines.
 
 **Proof.**
 
@@ -42,17 +44,21 @@ carve the same magazines.
   `Space`, and so the OS value that owns the reservation (a `SpaceCell` unmaps only when dropped,
   which needs `&mut` and so no live `Space`). Nothing in the crate purges or unmaps the magazine
   area while a `Space` exists. The returned reference borrows the handle, so it lives no longer.
+  A fork child has the mappings under the mark it inherits: the mark's store follows `mprotect`'s
+  return, and that call cannot overlap the fork's copy of the mappings, which holds the address
+  space's lock.
 - *Provenance.* `base()` comes from `Space::magazines()` through `map_addr`, so it carries the
   reservation's provenance.
 - *Aligned.* The area is aligned to the region size (`Plan::magazines_offset`), which
-  `Geometry::try_new` requires to be at least the largest magazine at every region size the
-  geometry allows (`space::verify`, `plans_keep_their_parts_apart`), and the offset is a multiple
-  of the magazine's size, so the base is aligned to the magazine's size (at least 32) and every
-  slot to 8.
-- *No non-atomic access.* Every access to magazine memory in the crate is atomic: this
-  function's views, `Magazine::objects`' slice (MAGAZINE-02), through which the back end's
-  fill and launder store and load with relaxed atomics, the twins' (`front/twin.rs`), and the
-  routines' single `mov`s, which are atomic for aligned words on x86-64.
+  `Geometry::try_new` requires to be at least the geometry's largest magazine at every region size
+  it allows (`space::verify`, `plans_keep_their_parts_apart`), `MagazineSize::MAX` on every real
+  kernel's geometry, and the offset is a multiple of the magazine's size, so the base is aligned to
+  the magazine's size (at least 32) and every slot to 8.
+- *No non-atomic access.* Every access to magazine memory in the crate is atomic: this function's
+  views; `Magazine::objects`' slice (MAGAZINE-02), through which the back end's fill and launder,
+  the slow path's move of a short fill, `siblings::spread` and `move_top_into` store and load with
+  relaxed atomics; the twins' (`front/twin.rs`); and the routines' single `mov`s on x86-64 and `ldr`s
+  and `str`s on aarch64, which are single-copy atomic for aligned words.
 
 ## MAGAZINE-02: `slice::from_raw_parts` in `Magazine::objects`
 
@@ -74,8 +80,9 @@ non-atomic access" covers them all). The size is at most the largest magazine, a
 `front::sync::AtomicPtr` is a transparent wrapper of the same `core` type, so the views agree
 in layout under the tests' checker too.
 
-For both entries, what a slot holds is not a memory-safety matter: the middle tier never dereferences an
-object pointer, and a wrong link or level is caught by `admits` the next time it is used as an
-address, which makes the code abort rather than reach outside the area.
+For both entries, what a slot holds is not a memory-safety matter here: the middle tier never
+dereferences an object pointer, a wrong link is caught by `admits` the next time it is used as an
+address, which makes the code abort rather than reach outside the area, and a wrong level is capped
+at the capacity.
 
-Reviewed: e5e1248
+Reviewed: 5a8ade1
