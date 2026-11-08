@@ -281,7 +281,7 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 |---|---|---|
 | Summary words, hint or sleep to release writes and relaxed reads | caught, each | not run |
 | Every bitmap word relaxed | caught, by the summary test only | not run |
-| `LinuxOs::fence` does nothing | caught in 3 s, twice of twice (`a_drain_leaves_each_thread_its_own_blocks`, "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
+| `LinuxOs::fence` does nothing | caught in 3 of 4 runs of 3 s (`a_drain_leaves_each_thread_its_own_blocks`: "a block two threads hold", or "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
 | A push's release, or a pop's acquire | not caught | caught |
 | A free's OR with no release, or a claim with no acquire | not caught | caught |
 | Summary words, hint or sleep to acquire and release | not caught | caught |
