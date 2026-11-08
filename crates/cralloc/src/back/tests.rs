@@ -2,12 +2,12 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_outgrown,
+    DECAY_TICKS, STAGGER_LINES, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_outgrown,
     move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
-use crate::os::sim::{Call, Faults, Native, Shape, SimOs, Standard};
+use crate::os::sim::{Call, Faults, Native, PAGE_SCALE, Shape, SimOs, Standard};
 use crate::os::{HugePages, Os};
 use crate::space::RegionTag;
 use core::ptr::NonNull;
@@ -18,6 +18,9 @@ use std::thread;
 use std::vec::Vec;
 
 type Sim<S = Standard> = SimOs<S>;
+
+/// A kibibyte as a test states it, on pages of 4 KiB (`PAGE_SCALE`).
+const KIB: usize = PAGE_SCALE << 10;
 
 /// A back end whose clocked pass has no floor: most of these tests drive the pass over heaps
 /// smaller than the floor (`policy::allowance_floor`), whose own tests use [`floored_state`].
@@ -39,10 +42,17 @@ fn small(size: usize) -> SmallClass {
     Class::of_size(size).unwrap().small().unwrap()
 }
 
-fn large(size: usize) -> Class {
+/// The large class of exactly `size` bytes.
+fn large_of(size: usize) -> Class {
     let class = Class::of_size(size).unwrap();
     assert!(!class.is_small());
     class
+}
+
+/// The large class of `size` bytes as a test states it, on pages of 4 KiB: its proportion to a page
+/// stays on the simulated pages of any other size (`PAGE_SCALE`).
+fn large(size: usize) -> Class {
+    large_of(size * PAGE_SCALE)
 }
 
 fn fill<O: Os>(back: &Back<'_, O>, class: SmallClass, n: usize) -> Vec<*mut u8> {
@@ -147,6 +157,92 @@ fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     let rest = fill(&back, class, 40);
     assert_eq!(&rest[..30], &slots[30..60]);
     assert_eq!(rest[30], slots[199].wrapping_add(64));
+}
+
+/// A batch that climbs or descends its slots, across words, or that leaves off doing so part way,
+/// frees exactly its slots, however much of it goes by the stretch and however much by the slot.
+#[test]
+fn stretches_free_exactly_their_slots() {
+    type Shape = fn(&[*mut u8]) -> Vec<*mut u8>;
+    let shapes: [Shape; 7] = [
+        |s| s.to_vec(),
+        |s| s.iter().rev().copied().collect(),
+        // Starting and ending part way through words.
+        |s| s[5..300].to_vec(),
+        |s| s[5..300].iter().rev().copied().collect(),
+        // Too short for a stretch at each end of a word.
+        |s| s[60..70].to_vec(),
+        // A slot out of place in what would be a stretch: its ends agree and its middle does not.
+        |s| {
+            let mut batch = s[64..128].to_vec();
+            batch.swap(20, 21);
+            batch
+        },
+        // Upward, then downward, then neither.
+        |s| {
+            let mut batch = s[..100].to_vec();
+            batch.extend(s[100..200].iter().rev());
+            batch.extend(s[200..300].iter().step_by(2));
+            batch.extend(s[201..300].iter().step_by(2));
+            batch
+        },
+    ];
+    for shape in shapes {
+        for size in [8, 24, 256] {
+            let state = state::<Standard>();
+            let back = state.get_or_reserve().unwrap();
+            let class = small(size);
+            let slots = fill(&back, class, 300);
+            let batch = shape(&slots);
+            // SAFETY: the test holds these slots.
+            unsafe { back.launder(class, &batch) };
+            assert_eq!(back.retained(), batch.len() * size);
+            let mut expected = batch.clone();
+            expected.sort();
+            // Lowest first, and every one of them.
+            assert_eq!(fill(&back, class, batch.len()), expected);
+            assert_eq!(back.retained(), 0);
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_after_its_stretch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let mut batch = slots[..30].to_vec();
+    batch.push(slots[10]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+#[test]
+#[should_panic(expected = "not the start of a slot")]
+fn a_pointer_inside_a_slot_in_a_stretch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let mut batch = slots[..30].to_vec();
+    batch[20] = batch[20].wrapping_add(1);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// A stretch stops at the watermark, so a slot past it goes to the check that catches it.
+#[test]
+#[should_panic(expected = "never handed out")]
+fn a_stretch_past_the_watermark_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let batch: Vec<*mut u8> = (0..50).map(|i| slots[0].wrapping_add(i * 16)).collect();
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
 }
 
 /// A fill bounded in claims takes what that many words hold and stops, short of what was
@@ -800,8 +896,9 @@ fn a_refused_commit_gives_null_and_nothing_else() {
     // Fail the commit a carve needs in the middle of a fill: the fill stops short, and the slots
     // it did hand out are good.
     state.os().set_faults(Call::Commit, Faults::once_after(0));
-    let more = fill(&back, class, 2000);
-    assert!(more.len() < 2000);
+    let wanted = 2000 * PAGE_SCALE;
+    let more = fill(&back, class, wanted);
+    assert!(more.len() < wanted);
     for &p in slots.iter().chain(&more) {
         assert!(
             state
@@ -1516,7 +1613,7 @@ fn the_clocked_pass_spares_what_fills_reuse() {
         beat(&back);
     }
     let page = Standard::GEOMETRY.page_size();
-    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGES as usize * page);
+    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGE_UNITS as usize * page);
     for _ in 0..super::policy::PURGE_ANY_RUN_EVERY {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
@@ -1558,11 +1655,11 @@ fn the_clocked_pass_returns_a_run_of_free_pages_in_one_call() {
 }
 
 /// A run of free pages a little longer than `PURGE_MAX_RUN_PAGES` goes back whole in the first
-/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGES`, and the
+/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGE_UNITS`, and the
 /// tail, directly below a run just purged, does not wait for the pass that takes any run.
 #[test]
 fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
-    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES};
+    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGE_UNITS};
     use crate::classes::MagazineSize;
     use crate::os::sim::Shape;
     use crate::space::Geometry;
@@ -1579,7 +1676,7 @@ fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
     let class = small(1024);
     let per_page = Wide::GEOMETRY.page_size() / 1024;
     let pages = small_part(&back, class) / per_page;
-    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGES / 2) as usize;
+    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGE_UNITS / 2) as usize;
     assert!(pages > run + 2);
     let slots = fill(&back, class, pages * per_page);
     for &p in &slots {
@@ -2031,25 +2128,26 @@ fn free_memory_goes_back_in_one_pass_once_no_fill_reaches_it() {
 fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    let class = small(1024);
+    let size = 1024 * PAGE_SCALE;
+    let class = small(size);
     let page = Standard::GEOMETRY.page_size();
     // The small-page part, so that whatever is free is purged in pages.
     let n = small_part(&back, class);
     let slots = fill(&back, class, n);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &slots) };
-    assert_eq!(back.retained(), n * 1024);
+    assert_eq!(back.retained(), n * size);
     let again = fill(&back, class, 16);
-    assert_eq!(back.retained(), (n - 16) * 1024);
-    assert_eq!(back.trim(), (n - 16) * 1024);
+    assert_eq!(back.retained(), (n - 16) * size);
+    assert_eq!(back.trim(), (n - 16) * size);
     assert_eq!(back.retained(), 0);
     // One slot of a purged page: the page's other slots are free and resident again.
     let one = fill(&back, class, 1);
-    assert_eq!(back.retained(), page - 1024);
+    assert_eq!(back.retained(), page - size);
     let all: Vec<*mut u8> = again.into_iter().chain(one).collect();
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &all) };
-    assert_eq!(back.retained(), page + 16 * 1024);
+    assert_eq!(back.retained(), page + 16 * size);
 }
 
 /// A heap whose free memory is all fragmentation is walked once an interval and not between:
@@ -2149,7 +2247,8 @@ fn classes_of_a_page_or_more_never_get_huge_pages() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let plan = back.space().plan();
-    for class in [small(2048).class(), small(8 << 10).class(), large(64 << 10)] {
+    for size in [2048, 8 << 10, 64 << 10] {
+        let class = Class::of_size(size * PAGE_SCALE).unwrap();
         // More than a region's worth, so a second region is assigned too.
         let n = plan.slots_per_region(class) as usize + 2;
         let blocks: Vec<Block> = (0..n)
@@ -2686,7 +2785,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     // A block of one piece or less goes back the same way, in one purge, where a free would
     // keep it: an outgrown block left resident is the trail a program growing many buffers
     // leaves behind.
-    let small_class = large(piece);
+    let small_class = large_of(piece);
     let one = back.alloc(small_class, small_class.size()).unwrap().ptr;
     pattern(one.as_ptr(), small_class.size());
     let purges = os.calls(Call::Purge);
@@ -2734,16 +2833,16 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
         assert!(patterned(new.as_ptr(), len));
         new
     };
-    let dense = grow(80 << 10, 160 << 10);
+    let dense = grow(80 * KIB, 160 * KIB);
     let at = |offset: usize| os.huge_pages(dense.map_addr(|a| a.saturating_add(offset)));
     // The whole huge pages the new size covers, and not the rest or the room past it.
     assert_eq!(at(0), Some(HugePages::Prefer));
     assert_eq!(at(2 * huge - 1), Some(HugePages::Prefer));
     assert_eq!(at(2 * huge), Some(HugePages::Avoid));
     // Growing on in place, densely, extends it.
-    pattern(dense.as_ptr(), 160 << 10);
+    pattern(dense.as_ptr(), 160 * KIB);
     // SAFETY: the test holds the block and uses none of it during the call.
-    unsafe { back.resize_in_place(dense, 320 << 10) };
+    unsafe { back.resize_in_place(dense, 320 * KIB) };
     assert_eq!(at(5 * huge - 1), Some(HugePages::Prefer));
     assert_eq!(at(5 * huge), Some(HugePages::Avoid));
     let purges = os.calls(Call::Purge);
@@ -2761,20 +2860,20 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     assert!(again.zeroed);
     back.free(again.ptr, new_class);
     // Growing more than twofold at once says nothing about density.
-    let far = grow(80 << 10, 200 << 10);
+    let far = grow(80 * KIB, 200 * KIB);
     assert_eq!(os.huge_pages(far), Some(HugePages::Avoid));
     back.free(far, new_class);
     // Nor does a block whose pages are mostly empty: one page of 20 written.
-    let old = back.alloc(old_class, 80 << 10).unwrap().ptr;
+    let old = back.alloc(old_class, 80 * KIB).unwrap().ptr;
     paint(old.as_ptr(), 100, 0x33);
     let block = back.alloc(new_class, new_class.size()).unwrap();
-    back.resize(block.ptr, 160 << 10);
+    back.resize(block.ptr, 160 * KIB);
     // SAFETY: both are live blocks that nothing else uses.
     unsafe {
         back.move_large(
             old,
             block.ptr,
-            80 << 10,
+            80 * KIB,
             block.zeroed,
             crate::back::Move::Outgrown,
         )
@@ -2810,7 +2909,7 @@ fn a_block_growing_over_its_spilled_huge_page_returns_it_and_keeps_its_bytes() {
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     let page = Native::GEOMETRY.page_size();
-    let class = large(4 * huge);
+    let class = large_of(4 * huge);
     // Slot 0 has no stagger; slot 1 starts a cache line in; slot 2 is a block that spills
     // more than a page, since it is not a whole number of huge pages.
     let blocks: std::vec::Vec<_> = (0..3)
@@ -3413,20 +3512,20 @@ fn staggered_blocks_start_at_different_cache_lines_and_free_by_address() {
     let back = state.get_or_reserve().unwrap();
     let page = Native::GEOMETRY.page_size();
     let class = large(64 << 10);
-    let size = class.size() - STAGGER_ROOM;
+    let size = class.size() - STAGGER_LINES;
     let blocks: Vec<_> = (0..8)
         .map(|_| back.alloc_staggered(class, size).unwrap().ptr)
         .collect();
     let mut offsets: Vec<usize> = blocks
         .iter()
-        .map(|b| b.addr().get() % STAGGER_ROOM)
+        .map(|b| b.addr().get() % STAGGER_LINES)
         .collect();
     assert!(offsets.iter().all(|o| o % STAGGER_STEP == 0));
     offsets.sort_unstable();
     offsets.dedup();
     assert_eq!(offsets.len(), blocks.len(), "each slot its own stagger");
     for &b in &blocks {
-        let into = b.addr().get() % STAGGER_ROOM;
+        let into = b.addr().get() % STAGGER_LINES;
         assert_eq!(back.lookup(b.as_ptr()), Some(Kind::Slot(class)));
         assert_eq!(back.size(b.as_ptr()), Some(size));
         assert_eq!(back.room(b.as_ptr()), Some(class.size() - into));
@@ -3548,6 +3647,37 @@ fn a_descending_fill_puts_the_lowest_address_on_top() {
     assert!(few.is_sorted());
 }
 
+/// A run of any length lands in its positions, lowest address on top, touching no others.
+#[test]
+fn a_descending_run_writes_exactly_its_positions() {
+    use super::{Descending, Sink};
+    use core::sync::atomic::AtomicPtr;
+    use core::sync::atomic::Ordering::Relaxed;
+    let stride = 24;
+    let first = core::ptr::without_provenance_mut::<u8>(4096);
+    for count in 0..9 {
+        for at in 0..3 {
+            let slots: Vec<AtomicPtr<u8>> = (0..12)
+                .map(|_| AtomicPtr::new(core::ptr::null_mut()))
+                .collect();
+            Descending(&slots).run(at, first, stride, count);
+            for (i, slot) in slots.iter().enumerate() {
+                let position = slots.len() - 1 - i;
+                let expected = if (at..at + count).contains(&position) {
+                    first.wrapping_byte_add((position - at) * stride)
+                } else {
+                    core::ptr::null_mut()
+                };
+                assert_eq!(
+                    slot.load(Relaxed),
+                    expected,
+                    "{count} from {at}, position {position}"
+                );
+            }
+        }
+    }
+}
+
 /// A staggered block moving to another staggered block, densely and sparsely: the contents
 /// arrive, and every page of the old slot goes back, so it is handed out again as zero.
 #[test]
@@ -3561,7 +3691,7 @@ fn a_staggered_block_moves_and_returns_its_whole_slot() {
     for sparse in [false, true] {
         // Take a slot first, so the next ones are staggered.
         let skip = back.alloc_staggered(old_class, 1 << 10).unwrap().ptr;
-        let len = old_class.size() - STAGGER_ROOM;
+        let len = old_class.size() - STAGGER_LINES;
         let old = back.alloc_staggered(old_class, len).unwrap().ptr;
         assert_ne!(old.addr().get() % Native::GEOMETRY.page_size(), 0);
         if sparse {
@@ -5163,6 +5293,10 @@ mod direct_launder {
     #[cfg_attr(miri, ignore)]
     fn every_slot_a_launder_frees_is_visible_in_trees_of_one_and_two_words() {
         for (size, height) in [(2048, 1), (4096, 0)] {
+            let size = size * PAGE_SCALE;
+            if !Class::of_size(size).unwrap().is_small() {
+                continue;
+            }
             let state = state::<Standard>();
             let back = state.get_or_reserve().unwrap();
             let host = back.host(small(size).class()).unwrap();
@@ -5177,6 +5311,10 @@ mod direct_launder {
     #[cfg_attr(miri, ignore)]
     fn a_wide_batch_meets_a_region_late_in_short_trees() {
         for (size, height) in [(8, 2), (2048, 1), (4096, 0)] {
+            let size = size * PAGE_SCALE;
+            if !Class::of_size(size).unwrap().is_small() {
+                continue;
+            }
             for ends in [false, true] {
                 let state = state::<Standard>();
                 let back = state.get_or_reserve().unwrap();
@@ -5585,3 +5723,6 @@ mod published_tag;
 /// What the bitmaps, the summary bits and the assignment of regions need of the memory order, on
 /// real threads.
 mod ordering;
+
+/// The heap's rules on simulated kernels at their real size.
+mod kernels;

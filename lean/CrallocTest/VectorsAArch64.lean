@@ -164,6 +164,22 @@ def addrTests : List Instr := [.adrp .x0 (.sym "vg_sym"), .adrp .x0 (.sym "vg_sy
   .addLo12 .x0 .x1 (.sym "vg_sym"), .addLo12 .x0 .x1 (.sym "vg_sym" 8), .addLo12 .x0 .x1 (.sym "vg_sym" 0xdc8),
   .addLo12 .x11 .x1 .desc, .mrsTp .x10, .movGot .x0 "vg_sym"]
 
+/-- The crate's own area's distance from the thread pointer, in the script's link: its section's
+alignment, past the 16 bytes the ABI keeps above the thread pointer, and the 768 bytes it skips. -/
+def AREA_TPREL : BitVec 64 := 0x1300
+
+/-- `st`, with the model's word holding that distance. -/
+def stArea (inp : List (Reg × BitVec 64)) (nzcv : Nat) : State :=
+  let s := st inp nzcv
+  { s with
+    mem := s.mem.writeW BUF AREA_TPREL
+    syms := fun n => if n = rseqOffsetSym then BUF else s.syms n }
+
+/-- A test of an addition of that distance, on the edges of `x1` and from `x10` to itself. -/
+def areaTest (id : Nat) (i : Instr) (inputs : List (List (Reg × BitVec 64))) : List String :=
+  let t := s!"T {id} I {plain (printer.instr i)}"
+  t :: inputs.map fun inp => let s := stArea inp 0xA; vector id s (exec i s)
+
 /-- Each branch condition. -/
 def conds : List Cond := [.eq, .ne, .hs, .lo, .hi, .ls, .cbz .x .x1, .cbz .w .x1, .cbnz .x .x1, .cbnz .w .x1,
   .tbz .x1 0, .tbz .x1 31, .tbz .x1 32, .tbz .x1 63, .tbnz .x1 0, .tbnz .x1 31, .tbnz .x1 32, .tbnz .x1 63]
@@ -223,6 +239,10 @@ def main : IO Unit := do
     emit (instrTest id i [[(.x1, 0x123456789abcd000)]]); id := id + 1
   for c in conds do
     emit (condTest id c); id := id + 1
+  for i in [Instr.addAreaHi .x0 .x1, .addAreaLo .x0 .x1] do
+    emit (areaTest id i oneReg); id := id + 1
+  for i in [Instr.addAreaHi .x10 .x10, .addAreaLo .x10 .x10] do
+    emit (areaTest id i [[(.x10, 0x123456789abcd000)]]); id := id + 1
   emit (wordTest id)
 
 end VG.Test.VectorsAArch64

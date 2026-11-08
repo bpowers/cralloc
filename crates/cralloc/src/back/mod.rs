@@ -26,7 +26,7 @@
 //!   carve purge toward the retained cap (`purge`); a free purges nothing but a large slot
 //!   advised for huge pages, which goes back whole, and a block left mostly unwritten. A block
 //!   that outgrows its slot leaves it resident while the slots so kept are within
-//!   `policy::KEPT_OUTGROWN_HUGE_PAGES`, counted on their own, and returns it beyond. The claim
+//!   `policy::KEPT_OUTGROWN_HUGE_UNITS`, counted on their own, and returns it beyond. The claim
 //!   of a free large slot returns what lies past both its block and the slot's last tenant, and
 //!   free large slots age by the hold each on its own as well as by their region (`hold`).
 //!

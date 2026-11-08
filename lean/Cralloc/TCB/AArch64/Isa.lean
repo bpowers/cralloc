@@ -61,11 +61,28 @@ Modelling choices:
   dynamic linker fills before any code of the program runs, like a global offset
   table slot, so neither is a memory access of the program's: neither needs a
   region, and neither faults, but for the address `ldrWord` is given.
+* On a C library that registers no rseq area for the thread (musl), the crate defines
+  its own, in the executable's thread-local data, and there is no word `__rseq_offset`:
+  no assembler for this architecture can write the area's distance from the thread
+  pointer as data, so the linker writes it into two instructions, `addAreaHi` and
+  `addAreaLo`. The contracts still say what the area is by the word
+  (`Spec.Slab.Ctx.area`). So it is a ghost there: a word of the model that holds the
+  distance, which only these two read, and no region or trace needs to name for them,
+  since no real instruction loads it. It is at an address nothing else uses, so the
+  region a contract gives it overlaps nothing it must not, and a routine's proof that it
+  never writes the regions it only reads keeps it constant.
 -/
 
 @[expose] public section
 
 namespace VG.AArch64
+
+/-- The symbol of the rseq area the crate defines itself (`ownRseqArea`). -/
+def ownAreaSym : String := "cralloc_rseq_area"
+
+/-- The name of glibc's variable holding the rseq area's offset from the
+thread pointer. -/
+def rseqOffsetSym : String := "__rseq_offset"
 
 /-- Branch conditions: the condition codes of `b.cond` and the tests of
 `cbz`, `cbnz`, `tbz` and `tbnz`. -/
@@ -184,7 +201,16 @@ inductive Instr
   /-- `adrp d, 8f` and `ldr d, [d, :lo12:8f]`, of a word of the routine's own
   holding the address of the symbol `name` (`gotLines`). -/
   | movGot (d : Reg) (name : String)
+  /-- `add d, n, :tprel_hi12:cralloc_rseq_area`: `n` plus the crate's own area's distance from
+  the thread pointer, but for its low 12 bits. -/
+  | addAreaHi (d n : Reg)
+  /-- `add d, n, :tprel_lo12_nc:cralloc_rseq_area`: `n` plus that distance's low 12 bits. -/
+  | addAreaLo (d n : Reg)
   deriving DecidableEq, Repr
+
+/-- The distance the linker writes into `addAreaHi` and `addAreaLo`, as the model's word holds
+it. -/
+def State.areaOffset (s : State) : Addr := s.mem.readW (s.syms rseqOffsetSym) 64
 
 /-- Semantics of an instruction. DDI 0487 C6.2:
 
@@ -231,7 +257,12 @@ inductive Instr
   program runs (AAELF64, `R_<CLS>_ABS64`): `X[d, 64] = S`. It faults unless `n`
   holds the descriptor's address, the only thing the word is known to follow.
 * `movGot`: "ADRP" and "LDR (immediate)" of a word in relocated read-only data,
-  filled as `ldrWord`'s is: `X[d, 64] = S`. -/
+  filled as `ldrWord`'s is: `X[d, 64] = S`.
+* `addAreaHi`, `addAreaLo`: "ADD (immediate)" with the `imm12`, shifted left by 12 for the
+  first, that the linker writes as bits 23:12 and bits 11:0 of `X = TPREL(S + A)` (AAELF64,
+  `R_<CLS>_TLSLE_ADD_TPREL_HI12`, which does not link unless `0 ≤ X < 2 ^ 24`, and
+  `R_<CLS>_TLSLE_ADD_TPREL_LO12_NC`). So for every program that links, the first adds `X` with
+  its low 12 bits clear, and the two add `X`. -/
 def exec : Instr → State → Option State
   | .ldr .x t m, s => (s.load64 (s.ea m)).map fun v => s.setReg t v
   | .ldr .w t m, s => (s.load32 (s.ea m)).map fun v => s.setReg t (v.setWidth 64)
@@ -263,11 +294,14 @@ def exec : Instr → State → Option State
   | .mrsTp d, s => some (s.setReg d s.tpidr)
   | .ldrWord d n name, s => if s.gpr n = s.csDesc then some (s.setReg d (s.syms name)) else none
   | .movGot d name, s => some (s.setReg d (s.syms name))
+  | .addAreaHi d n, s => some (s.setReg d (s.gpr n + page s.areaOffset))
+  | .addAreaLo d n, s => some (s.setReg d (s.gpr n + lo12 s.areaOffset))
 
 /-- The memory accesses of an instruction run from `s` to `s'` (`Event`): a load
 of the bytes of its memory source, with the value `s` holds there; a store of
 the bytes of its memory destination, with the value `s'` holds there. `ldrWord`
-and `movGot` read words no program writes, and are not listed. -/
+and `movGot` read words no program writes, and `addAreaHi` and `addAreaLo` none at all, so
+none is listed. -/
 def Instr.events (i : Instr) (s s' : State) : List Event :=
   let rd (a : Addr) (n : Nat) : List Event := [⟨a, n, false, (s.mem.read a n).toNat⟩]
   let wr (a : Addr) (n : Nat) : List Event := [⟨a, n, true, (s'.mem.read a n).toNat⟩]
