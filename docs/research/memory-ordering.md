@@ -205,8 +205,8 @@ same in `mov`s), and these stand in for a proof:
 - **A push's entry and word stores can reorder,** and a pop's commit can pass its load of the entry.
   Only the same CPU's next thread and a drainer after its fence read entries, and those have the
   barrier between (see "The slots a routine wrote").
-- **The C entry points' loads are independent:** the shift and base index in one `ldp`, the region
-  byte by address on those, then the mask and the hot word by address on the byte. x86-64 keeps these
+- **The C entry points' loads are independent:** the shift, the base index, the region byte by
+  address on those, then the mask and the hot word by address on the byte. x86-64 keeps these
   loads in order and AArch64 does not, and nothing needs it. Any mix of the shift and base index is
   out of range or right (`c/mirror.rs`). A region byte is zero or its class, which does not change
   while a block of the region lives, and a zero is position 0, whose mask is zero, so a miss. A mask
