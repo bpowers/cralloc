@@ -2639,9 +2639,10 @@ mod lean_realloc {
 mod cache_domains {
     use super::*;
     use crate::Cralloc;
-    use crate::depot::Pool;
+    use crate::depot::{MAX_DOMAINS, Pool};
     use crate::front::{Real, Routines};
     use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
 
     unsafe extern "C" {
         fn sched_getaffinity(pid: i32, len: usize, mask: *mut u64) -> i32;
@@ -2650,6 +2651,14 @@ mod cache_domains {
 
     /// The CPU numbers the sets hold, up to this.
     const CPUS: usize = 1024;
+
+    /// The CPUs online.
+    fn online() -> Vec<usize> {
+        let text = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap();
+        let mut cpus = Vec::new();
+        assert!(crate::depot::domain::each_cpu(text.as_bytes(), |cpu| cpus.push(cpu)));
+        cpus
+    }
 
     /// The CPUs this thread may run on.
     fn allowed() -> Vec<usize> {
@@ -2701,21 +2710,18 @@ mod cache_domains {
         if !crate::fresh::is_child(name) {
             return crate::fresh::run(name);
         }
-        let l = layout(1024, 8);
-        let class = Class::of_layout(l).unwrap().small().unwrap();
-        let capacity = class.magazine().capacity();
-        let mut held = Vec::with_capacity(6 * capacity);
-        for _ in 0..6 * capacity {
-            // SAFETY: a valid layout of a non-zero size.
-            let block = unsafe { Cralloc.alloc(l) };
-            assert!(!block.is_null());
-            // SAFETY: the block holds a thousand bytes.
-            unsafe { block.write_bytes(0x5a, 1024) };
-            held.push(block);
-        }
+        // The first slow path finds the domains. Of another class, so that this CPU has nothing
+        // of the class under test loaded, whichever CPU it turns out to be.
+        let started = Instant::now();
+        let first_use = layout(64, 8);
+        // SAFETY: a valid layout of a non-zero size.
+        let block = unsafe { Cralloc.alloc(first_use) };
+        assert!(!block.is_null());
+        // SAFETY: allocated just above with that layout, freed once.
+        unsafe { Cralloc.dealloc(block, first_use) };
 
-        // The heap found what sysfs says, for each CPU this test may use.
-        let cpus = allowed();
+        // The heap found what sysfs says, for every CPU online.
+        let cpus = online();
         let heap = super::super::global::process().heap();
         let domain = |cpu: usize| heap.depot.domain_of(Real.slabs().cpu(cpu as i32));
         let mut sharers: BTreeMap<std::string::String, Vec<usize>> = BTreeMap::new();
@@ -2725,7 +2731,8 @@ mod cache_domains {
                 .or_default()
                 .push(cpu);
         }
-        if sharers.keys().all(std::string::String::is_empty) {
+        let nothing_shared = sharers.len() == cpus.len();
+        if sharers.keys().all(std::string::String::is_empty) || nothing_shared {
             std::eprintln!("this machine lists no shared cache: one domain");
             assert_eq!(heap.depot.domain_count(), 1);
             return;
@@ -2736,24 +2743,62 @@ mod cache_domains {
             }
         }
         let groups: Vec<&Vec<usize>> = sharers.values().collect();
-        for (i, a) in groups.iter().enumerate() {
-            for b in &groups[i + 1..] {
-                assert_ne!(domain(a[0]), domain(b[0]), "CPUs {a:?} and {b:?}");
+        assert_eq!(heap.depot.domain_count(), groups.len().min(MAX_DOMAINS));
+        if groups.len() <= MAX_DOMAINS {
+            for (i, a) in groups.iter().enumerate() {
+                for b in &groups[i + 1..] {
+                    assert_ne!(domain(a[0]), domain(b[0]), "CPUs {a:?} and {b:?}");
+                }
             }
         }
-        // Two CPUs of one domain and one of another, if this process may use them.
-        let Some(two) = groups.iter().find(|group| group.len() >= 2) else {
-            std::eprintln!("no domain of two CPUs among {cpus:?}");
+        // Two CPUs of one domain and one of another, if this process may use them: `scripts/heavy`
+        // keeps tests off the cores measurements use.
+        let allowed = allowed();
+        let usable: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| {
+                let usable = |cpu: &&usize| allowed.contains(cpu);
+                group.iter().filter(usable).copied().collect()
+            })
+            .collect();
+        let Some(two) = usable.iter().find(|group| group.len() >= 2) else {
+            std::eprintln!("no domain of two CPUs among {allowed:?}");
             return;
         };
-        let Some(other) = groups.iter().find(|group| group[0] != two[0]) else {
-            std::eprintln!("one domain among {cpus:?}");
+        let Some(other) = usable.iter().find(|group| {
+            group
+                .first()
+                .is_some_and(|&cpu| domain(cpu) != domain(two[0]))
+        }) else {
+            std::eprintln!("one domain among {allowed:?}");
             return;
         };
         let (first, second, third) = (two[0], two[1], other[0]);
         let (ours, theirs) = (Pool::Domain(domain(first)), Pool::Domain(domain(third)));
+        let l = layout(1024, 8);
+        let class = Class::of_layout(l).unwrap().small().unwrap();
+        let capacity = class.magazine().capacity();
+        // A stack that stays deep goes back at a look an interval later from any domain. A test held
+        // up that long, as heavy work is by a measurement, cannot say who touched what.
+        let sure = |holds: bool, what: &str| {
+            assert!(
+                holds || started.elapsed() > Duration::from_millis(500),
+                "{what}"
+            );
+        };
 
         // Frees on one CPU fill magazines that go to its domain's stack and no other's.
+        pin(third);
+        let held: Vec<*mut u8> = (0..6 * capacity)
+            .map(|_| {
+                // SAFETY: a valid layout of a non-zero size.
+                let block = unsafe { Cralloc.alloc(l) };
+                assert!(!block.is_null());
+                // SAFETY: the block holds a thousand bytes.
+                unsafe { block.write_bytes(0x5a, 1024) };
+                block
+            })
+            .collect();
         pin(first);
         let (before, others) = (touched(ours, class), touched(theirs, class));
         let freed: std::collections::BTreeSet<usize> = held.iter().map(|p| p.addr()).collect();
@@ -2761,15 +2806,13 @@ mod cache_domains {
             // SAFETY: allocated above with `l`, freed once.
             unsafe { Cralloc.dealloc(block, l) };
         }
-        assert_ne!(
-            touched(ours, class),
-            before,
-            "no magazine reached the domain's stack"
+        sure(
+            touched(ours, class) != before,
+            "no magazine reached the domain's stack",
         );
-        assert_eq!(
-            touched(theirs, class),
-            others,
-            "a magazine reached another domain's stack"
+        sure(
+            touched(theirs, class) == others,
+            "a magazine reached another domain's stack",
         );
 
         // Another CPU of that domain, with nothing of its own, takes one of them.
@@ -2777,14 +2820,13 @@ mod cache_domains {
         let before = touched(ours, class);
         // SAFETY: a valid layout of a non-zero size.
         let block = unsafe { Cralloc.alloc(l) };
-        assert_ne!(
-            touched(ours, class),
-            before,
-            "the CPU did not look in its domain's stack"
+        sure(
+            touched(ours, class) != before,
+            "the CPU did not look in its domain's stack",
         );
-        assert!(
+        sure(
             freed.contains(&block.addr()),
-            "not one of the blocks the domain freed"
+            "not one of the blocks the domain freed",
         );
         // SAFETY: allocated just above with `l`, freed once.
         unsafe { Cralloc.dealloc(block, l) };
@@ -2796,24 +2838,21 @@ mod cache_domains {
             // SAFETY: a valid layout of a non-zero size.
             .map(|_| unsafe { Cralloc.alloc(l) })
             .collect();
-        assert_eq!(
-            touched(ours, class),
-            before,
-            "a CPU took from another domain's stack"
+        sure(
+            touched(ours, class) == before,
+            "a CPU took from another domain's stack",
         );
         for &block in &elsewhere {
             // SAFETY: allocated just above with `l`, freed once.
             unsafe { Cralloc.dealloc(block, l) };
         }
-        assert_eq!(
-            touched(ours, class),
-            before,
-            "a CPU freed to another domain's stack"
+        sure(
+            touched(ours, class) == before,
+            "a CPU freed to another domain's stack",
         );
-        assert_ne!(
-            touched(theirs, class),
-            others,
-            "a CPU did not use its own domain's stack"
+        sure(
+            touched(theirs, class) != others,
+            "a CPU did not use its own domain's stack",
         );
     }
 }

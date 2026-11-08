@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Every check of lean/: the import discipline, the registration files, every
 # proof and golden test (warnings are errors), that the generated Rust is what
-# Lean emits, the size and alignment of its naked functions, and that the
+# Lean emits, the size and alignment of its naked functions, that the AArch64
+# printer prints what the model means, and that the
 # axiom audit still rejects a hidden axiom. When all pass, it records the
 # generated files' checksums for the merge gate (scripts/generated-check).
 # Needs `lake` on PATH (elan installs it in ~/.elan/bin). Pass the output
@@ -21,6 +22,8 @@ lake env leanchecker Cralloc
 lake env lean --run Emit.lean --check "$@"
 # Each naked function's bytes and alignment, assembled (needs llvm-mc).
 python3 scripts/check_sizes.py "$@"
+# The AArch64 printer's encodings, and the model against a processor where one is at hand.
+python3 scripts/check_aarch64.py
 python3 scripts/audit_negative.py
 # The negative test leaves the self-test built from the files it edited.
 lake build --log-level=warning

@@ -370,8 +370,8 @@ hold relative to entry (so a retry's compose with them), the contract's
 `abort` holds, and every
 state the thread may resume in after the abort (`Target.rely`,
 `Contract.env`) satisfies the precondition. The abort handler jumps back to
-the arm, the function's first instruction (`Rust.checkRseq`), so that is a
-run of the function from the new state: a retry, which the first conjunct
+the arm, the first instruction of `c` (`Rust.checkRseq`), so that is a
+run of `c` from the new state: a retry, which the first conjunct
 of `Verified` covers (`Restarts`, `Verified.restarts`). True of code without
 a sequence. A sequence followed by code (a `jump`) is checked the same way:
 the code after it runs outside the sequence and is never aborted. -/
@@ -546,6 +546,9 @@ structure Api where
   function under each symbol into a macro of the group's, which only a crate
   that invokes the macro expands (`Rust.exportsFile`). -/
   exports : List (String × String) := []
+  /-- Whether an inline function returns `bool`, that its result is not zero,
+  rather than the result (`Rust.inlineFunction`). -/
+  retNonzero : Bool := false
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -557,6 +560,40 @@ def Api.doc (api : Api) (notes : List String := []) : String :=
 holds, where the calling convention `A` passes them. -/
 def ArgsKept {M : ISA} (A : Abi M) (sig : Sig) (s s' : M.State) : Prop :=
   ∀ vals, A.args ((sig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals → vals s' = vals s
+
+/-! ## Setup: what a routine runs once
+
+The operating system resumes an aborted thread at the sequence's arm. On a
+target whose routines keep what the sequence needs in registers (AArch64, where
+the arm is one store), instructions before the arm are run once and not on a
+retry: `Artifact.setup`. So there are two entry states to speak of: the
+function's, of which the contract's precondition is stated, and an attempt's,
+which also has the registers set up.
+
+`Verified` and everything in it are about attempts, whether the first or a
+retry, and need not change: `code` is what follows `setup`, and its contract is
+`attempt`, the function's with a further precondition, of what the setup leaves
+in registers, which a retry must prove again from the registers the abort kept
+(`RseqOk`): so a body that writes one of those registers cannot be verified.
+What a run of the whole function adds is `SetupOk`: from every entry state, the
+setup runs to a state where an attempt may start. A postcondition is relative
+to the state its last attempt started in, for a function with or without a
+setup; the setup changes neither memory nor the arguments. -/
+
+/-- `k'` is the contract of the attempts of a routine with the contract `k`, the
+setup `setup` and the clobbers `cl`. With no setup, `k` itself. With one, `k` with
+a further precondition, any at all: it is the proof's to choose, what `Verified`
+may rely on and the setup must establish. From every state satisfying `k`'s
+precondition the setup runs to a state `a` satisfying `k'`'s, without changing
+memory or the arguments, and keeping what the calling convention
+(`Target.abiPreserved`), or inline `asm!`, has the function keep. -/
+def SetupOk (T : Target) (k k' : Contract T.isa) (sig : Sig) (cl : List String)
+    (setup : List T.isa.Instr) : Prop :=
+  (setup = [] ∧ k' = k) ∨
+  ((∃ r : T.isa.State → Prop, k' = { k with pre := fun s => k.pre s ∧ r s }) ∧
+    ∀ s, k.pre s → ∃ a, execBlock T.isa setup s = some a ∧ k'.pre a ∧
+      T.abi.mem a = T.abi.mem s ∧ T.abiPreserved s a ∧ ArgsKept T.abi sig s a ∧
+      (T.inline = true → T.preservedExcept cl s a))
 
 /-- Proves `Artifact.restartsOk` for code without a restartable sequence, by
 default (`Proof/Framework/Registration.lean`; how it is proven is not
@@ -595,9 +632,17 @@ structure Artifact where
   rustConsts : List (String × IntTy × Nat) := []
   /-- `Api.exports`. -/
   exports : List (String × String) := []
+  /-- `Api.retNonzero`. -/
+  retNonzero : Bool := false
+  /-- Instructions the function runs once on entry, before `code`, which a
+  retry does not run again (see "Setup"). -/
+  setup : List target.isa.Instr := []
   code : Prog target.isa
   contract : Contract target.isa
-  verified : Verified target code contract
+  /-- The contract of an attempt of `code` (`SetupOk`): `contract`, unless there
+  is a setup. -/
+  attempt : Contract target.isa := contract
+  verified : Verified target code attempt
   /-- `Sig.contract`'s `writeArgs` and `stack` for `contract` (see `ofSig`). -/
   writeArgs : Bool := false
   stack : Nat := 0
@@ -650,7 +695,7 @@ structure Artifact where
   does it change one before any point a restartable sequence may be aborted
   at (`Code.abortStates`), so that the retry, from the registers the abort
   left, ends with them as they were when the block began. -/
-  clobbersOk : target.inline = true → ∀ s, contract.pre s →
+  clobbersOk : target.inline = true → ∀ s, attempt.pre s →
       (∀ s', Exec target.isa code s s' →
         target.preservedExcept (clobbers ++ (if sig.ret.isSome then [target.retReg] else [])) s s') ∧
       (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
@@ -663,17 +708,20 @@ structure Artifact where
   last attempt's return meets those obligations relative to the caller's
   entry, not only to the attempt's start (`Verified.restarts`). Code
   without a sequence is never aborted: its runs start at entry. -/
-  restartsOk : ∀ s s', contract.pre s → Restarts target code contract s s' →
+  restartsOk : ∀ s s', attempt.pre s → Restarts target code attempt s s' →
       target.abiPreserved s s' ∧ ArgsKept target.abi sig s s' ∧
       (target.inline = true → target.preservedExcept clobbers s s') := by
     restarts_ok
-  /-- States satisfying the precondition, one taking each way the code can
-  branch (`Code.outcomes`): data, so each is a concrete state the emitter
-  can evaluate. -/
+  /-- `setup` does what the attempts of `code` assume. -/
+  setupOk : SetupOk target contract attempt sig clobbers setup := by
+    exact .inl ⟨rfl, rfl⟩
+  /-- States satisfying an attempt's precondition, one taking each way the
+  code can branch (`Code.outcomes`): data, so each is a concrete state the
+  emitter can evaluate. -/
   witnesses : List target.isa.State
   /-- Some witness satisfies the precondition, and each outcome has one that
   takes it. -/
-  witnessOk : (∃ w ∈ witnesses, contract.pre w) ∧
-    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, contract.pre w ∧ Visits target.isa code w o.1 o.2
+  witnessOk : (∃ w ∈ witnesses, attempt.pre w) ∧
+    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, attempt.pre w ∧ Visits target.isa code w o.1 o.2
 
 end VG
