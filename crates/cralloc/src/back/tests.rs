@@ -159,6 +159,92 @@ fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     assert_eq!(rest[30], slots[199].wrapping_add(64));
 }
 
+/// A batch that climbs or descends its slots, across words, or that leaves off doing so part way,
+/// frees exactly its slots, however much of it goes by the stretch and however much by the slot.
+#[test]
+fn stretches_free_exactly_their_slots() {
+    type Shape = fn(&[*mut u8]) -> Vec<*mut u8>;
+    let shapes: [Shape; 7] = [
+        |s| s.to_vec(),
+        |s| s.iter().rev().copied().collect(),
+        // Starting and ending part way through words.
+        |s| s[5..300].to_vec(),
+        |s| s[5..300].iter().rev().copied().collect(),
+        // Too short for a stretch at each end of a word.
+        |s| s[60..70].to_vec(),
+        // A slot out of place in what would be a stretch: its ends agree and its middle does not.
+        |s| {
+            let mut batch = s[64..128].to_vec();
+            batch.swap(20, 21);
+            batch
+        },
+        // Upward, then downward, then neither.
+        |s| {
+            let mut batch = s[..100].to_vec();
+            batch.extend(s[100..200].iter().rev());
+            batch.extend(s[200..300].iter().step_by(2));
+            batch.extend(s[201..300].iter().step_by(2));
+            batch
+        },
+    ];
+    for shape in shapes {
+        for size in [8, 24, 256] {
+            let state = state::<Standard>();
+            let back = state.get_or_reserve().unwrap();
+            let class = small(size);
+            let slots = fill(&back, class, 300);
+            let batch = shape(&slots);
+            // SAFETY: the test holds these slots.
+            unsafe { back.launder(class, &batch) };
+            assert_eq!(back.retained(), batch.len() * size);
+            let mut expected = batch.clone();
+            expected.sort();
+            // Lowest first, and every one of them.
+            assert_eq!(fill(&back, class, batch.len()), expected);
+            assert_eq!(back.retained(), 0);
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_after_its_stretch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let mut batch = slots[..30].to_vec();
+    batch.push(slots[10]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+#[test]
+#[should_panic(expected = "not the start of a slot")]
+fn a_pointer_inside_a_slot_in_a_stretch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let mut batch = slots[..30].to_vec();
+    batch[20] = batch[20].wrapping_add(1);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// A stretch stops at the watermark, so a slot past it goes to the check that catches it.
+#[test]
+#[should_panic(expected = "never handed out")]
+fn a_stretch_past_the_watermark_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 40);
+    let batch: Vec<*mut u8> = (0..50).map(|i| slots[0].wrapping_add(i * 16)).collect();
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
 /// A fill bounded in claims takes what that many words hold and stops, short of what was
 /// asked when the words are sparse, without carving; a bound the bitmaps do not reach changes
 /// nothing, and a fill that finds the bitmaps empty still carves.
@@ -3559,6 +3645,37 @@ fn a_descending_fill_puts_the_lowest_address_on_top() {
     let mut few = [core::ptr::null_mut(); 3];
     assert_eq!(back.fill(class, &mut few[..]), 3);
     assert!(few.is_sorted());
+}
+
+/// A run of any length lands in its positions, lowest address on top, touching no others.
+#[test]
+fn a_descending_run_writes_exactly_its_positions() {
+    use super::{Descending, Sink};
+    use core::sync::atomic::AtomicPtr;
+    use core::sync::atomic::Ordering::Relaxed;
+    let stride = 24;
+    let first = core::ptr::without_provenance_mut::<u8>(4096);
+    for count in 0..9 {
+        for at in 0..3 {
+            let slots: Vec<AtomicPtr<u8>> = (0..12)
+                .map(|_| AtomicPtr::new(core::ptr::null_mut()))
+                .collect();
+            Descending(&slots).run(at, first, stride, count);
+            for (i, slot) in slots.iter().enumerate() {
+                let position = slots.len() - 1 - i;
+                let expected = if (at..at + count).contains(&position) {
+                    first.wrapping_byte_add((position - at) * stride)
+                } else {
+                    core::ptr::null_mut()
+                };
+                assert_eq!(
+                    slot.load(Relaxed),
+                    expected,
+                    "{count} from {at}, position {position}"
+                );
+            }
+        }
+    }
 }
 
 /// A staggered block moving to another staggered block, densely and sparsely: the contents

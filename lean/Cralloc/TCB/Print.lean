@@ -188,6 +188,11 @@ structure Printer (M : ISA) where
   (`Rust.checkRseq`): nothing there stops another thread running first, which `Exec` does
   not model. A word the dynamic linker fills before any code runs is not such memory. -/
   accessesMemory : M.Instr → Bool := fun _ => true
+  /-- Whether an instruction stores to memory, which a routine's setup may not do
+  (`Rust.checkRseq`). A setup runs before its sequence is armed, so another thread or a drainer may
+  write between a load and a store of what it read, and the store loses that write; the model of a
+  setup has no other thread, and sees memory unchanged (`SetupOk`). -/
+  storesMemory : M.Instr → Bool := fun _ => true
   /-- Whether an instruction names the routine's descriptor by its label, `3f`, which is
   this routine's only ahead of the descriptor (`Printer.rseqLines`); anywhere else it is
   the next one the assembler sees (`Rust.checkRseq`). -/

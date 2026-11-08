@@ -67,6 +67,23 @@ theorem eval_hs_cmp {w : Nat} (x y : BitVec w) :
     eval .hs (s.addFlags x (~~~y) true) = some (decide (y.toNat ≤ x.toNat)) := by
   rw [eval_hs, cf_cmp]
 
+/-- `b.hi` after a compare. -/
+theorem eval_hi_cmp {w : Nat} (x y : BitVec w) :
+    eval .hi (s.addFlags x (~~~y) true) = some (decide (y.toNat < x.toNat)) := by
+  rw [eval_hi, cf_cmp, zf_cmp]
+  congr 1
+  by_cases h : x = y
+  · subst h
+    simp
+  · have hne : x - y ≠ 0 := fun h' => h (by
+      have := BitVec.sub_add_cancel x y
+      rw [h'] at this
+      simpa using this.symm)
+    have hn : x.toNat ≠ y.toNat := fun h' => h (BitVec.eq_of_toNat_eq h')
+    rw [beq_eq_false_iff_ne.mpr hne]
+    simp only [Bool.not_false, Bool.and_true, decide_eq_decide]
+    omega
+
 /-- `b.eq` after a test. -/
 theorem eval_eq_tst {w : Nat} (r : BitVec w) : eval .eq (tstState s r) = some (r == 0) := rfl
 

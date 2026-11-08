@@ -20,7 +20,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     // SAFETY: PROVISIONAL-01; the caller's promise.
     unsafe {
         core::arch::asm!(
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             "mov x0, #0",
             "ldr w8, [x10, #4]",
             "cmp w8, #2, lsl #12",
@@ -32,7 +32,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
             "ldr x0, [x1, #-8]",
             "sub x1, x1, #8",
             "str x1, [x3, x8]",
-            a64_end_direct!(),
+            crate::cralloc_a64_end!(),
             in("x3") word,
             in("x2") mask,
             out("x0") ret,
@@ -60,7 +60,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     // SAFETY: PROVISIONAL-01; the caller's promise.
     unsafe {
         core::arch::asm!(
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             "mov x4, #0",
             "ldr w8, [x10, #4]",
             "cmp w8, #2, lsl #12",
@@ -73,7 +73,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
             "str x0, [x1]",
             "mov x4, x9",
             "str x9, [x3, x8]",
-            a64_end_direct!(),
+            crate::cralloc_a64_end!(),
             in("x0") p,
             in("x3") word,
             in("x2") mask,
@@ -95,7 +95,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
 /// # Safety
 ///
 /// As the x86-64 routine of this name, whose contract is `VG.Spec.Slab.cpuContract`.
-#[cfg(not(any(cralloc_a64_direct, target_env = "musl")))]
+#[cfg(not(target_env = "musl"))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;
@@ -110,32 +110,6 @@ pub(crate) unsafe fn current_cpu() -> u32 {
             "adrp x9, 8b",
             "ldr x9, [x9, :lo12:8b]",
             "ldr x9, [x9]",
-            "mrs x10, tpidr_el0",
-            "add x10, x10, x9",
-            "ldr w0, [x10, #4]",
-            lateout("x0") ret,
-            out("x9") _,
-            out("x10") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// [`current_cpu`] reading `__rseq_offset` directly (`text.rs`, `a64_arm_direct`).
-///
-/// # Safety
-///
-/// As above.
-#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
-#[inline(always)]
-pub(crate) unsafe fn current_cpu() -> u32 {
-    let ret: u32;
-    // SAFETY: PROVISIONAL-01; the caller's promise.
-    unsafe {
-        core::arch::asm!(
-            "adrp x9, __rseq_offset",
-            "ldr x9, [x9, :lo12:__rseq_offset]",
             "mrs x10, tpidr_el0",
             "add x10, x10, x9",
             "ldr w0, [x10, #4]",

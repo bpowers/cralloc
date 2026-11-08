@@ -116,48 +116,6 @@ macro_rules! cralloc_a64_end_bare {
     };
 }
 
-/// [`cralloc_a64_arm`] with `__rseq_offset` read directly, under the configuration
-/// `cralloc_a64_direct`, for comparing it on real jobs with the form that stays. A direct `adrp` to
-/// glibc's variable needs a copy of it in the executable, which GNU ld refuses to make in a PIE and
-/// `rust-lld` makes, so the `executable` feature cannot mean this here.
-#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
-macro_rules! a64_arm_direct {
-    () => {
-        concat!(
-            "adrp x11, 3f\n",
-            "add x11, x11, :lo12:3f\n",
-            "adrp x9, __rseq_offset\n",
-            "ldr x9, [x9, :lo12:__rseq_offset]\n",
-            "mrs x10, tpidr_el0\n",
-            "add x10, x10, x9\n",
-            "5:\n",
-            "str x11, [x10, #8]\n",
-            "6:\n",
-        )
-    };
-}
-
-#[cfg(all(cralloc_a64_direct, not(target_env = "musl")))]
-macro_rules! a64_end_direct {
-    () => {
-        $crate::cralloc_a64_end_bare!()
-    };
-}
-
-#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
-macro_rules! a64_arm_direct {
-    () => {
-        $crate::cralloc_a64_arm!()
-    };
-}
-
-#[cfg(any(not(cralloc_a64_direct), target_env = "musl"))]
-macro_rules! a64_end_direct {
-    () => {
-        $crate::cralloc_a64_end!()
-    };
-}
-
 /// The CPU number into x8, and to the miss if it has no slab.
 #[doc(hidden)]
 #[macro_export]

@@ -25,6 +25,10 @@ lib="$root/target/release/libcralloc_preload.so"
 work="$(mktemp -d "${TMPDIR:-/tmp}/preload-check.XXXXXX")"
 bin="$work/bin"
 mkdir -p "$bin"
+# A copy that stays as it is: each check compares a plain run with a preloaded one, and a commit to
+# the shared repository between the two would read as a difference.
+git clone -q --no-local "$repo" "$work/repo" || exit 1
+repo="$work/repo"
 failed=()
 selected=("$@")
 

@@ -226,6 +226,12 @@ something else. -/
 #guard refused (.addLo12 .x0 .x0 (.sym "S" (-2 ^ 31 - 1)))
 #guard refused (.ldr .x .x0 { base := .x1, off := .lo12 (.sym "S" (2 ^ 31)) })
 
+-- The crate's own area's distance from the thread pointer, which the linker writes.
+#guard lines (.addAreaHi .x10 .x10) == ["add x10, x10, :tprel_hi12:cralloc_rseq_area"]
+#guard lines (.addAreaLo .x10 .x10) == ["add x10, x10, :tprel_lo12_nc:cralloc_rseq_area"]
+#guard !refused (.addAreaHi .x10 .x10) && !refused (.addAreaLo .x10 .x10)
+#guard (Instr.notInBody (.addAreaHi .x10 .x10)).isSome && (Instr.notInBody (.addAreaLo .x10 .x10)).isSome
+
 /-! ## Restartable sequences
 
 A setup first, the arm at label 5, the sequence from 6 to 7, the descriptor at 3
