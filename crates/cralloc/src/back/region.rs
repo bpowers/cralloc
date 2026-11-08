@@ -38,8 +38,8 @@
 //!   clear them under what it may write (`settle_slot`, `cover`). The retained count of a free
 //!   large slot is its pages that are not clean (`charge`). So the pages a block's stagger passes
 //!   over stay clean, as they were: nothing wrote them. A tenant at the slot's start clears them
-//!   at its claim, and a slot advised for huge pages at `cover`, since a huge fault makes them
-//!   resident. Left to count as written, they would charge a free slot for up to half a megabyte
+//!   at its claim and when it grows back over them (`cover`), and a slot advised for huge pages at
+//!   `cover`, since a huge fault makes them resident. Left to count as written, they would charge a free slot for up to half a megabyte
 //!   that was never resident, against the floor, the cap and the hold.
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
@@ -620,10 +620,12 @@ pub(crate) fn mark_clean<H: Host>(host: &H, region: RegionId, slot: u32, from: u
 /// bit of a held slot true. Only a resize, a grown move or a claim of a slot that kept its
 /// advice calls it.
 ///
-/// From the first page a staggered block may write, since the claim of a tenant at the slot's
-/// start has cleared those below it already. From the slot's start in a slot advised for huge
-/// pages, since there a huge fault makes the pages below the block resident too.
-pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
+/// From the first page the tenant, `into` bytes into the slot, may write: below that it writes
+/// nothing, and the pages stay clean. A tenant at the slot's start may write them, and a shrink
+/// may have marked them clean again since its claim, so they are cleared by its real start and
+/// not by the slot's stagger. From the slot's start in a slot advised for huge pages, since there
+/// a huge fault makes the pages below the block resident too.
+pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32, into: usize) {
     let layout = host.layout();
     let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
         return;
@@ -632,7 +634,7 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
     let from = if now.huge {
         unit.start
     } else {
-        layout.first_page(slot, unit, layout.stagger(slot))
+        layout.first_page(slot, unit, into)
     };
     if end <= from {
         return;
