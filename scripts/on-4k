@@ -24,6 +24,9 @@ touch "$work/out"
   echo '#!/usr/bin/env bash'
   # The caller's environment, but for what names this session's bus and display.
   export -p | grep -Ev '^declare -x (DBUS_|DISPLAY=|WAYLAND_|XDG_|SSH_|TERM=|OLDPWD)' || true
+  # The VM's memory is the cap. Inside it the workspace's cargo runner has no cgroup to use and falls
+  # back to a limit on address space, under which the tests of the kernels' shapes pass over silently.
+  echo 'export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=env'
   printf 'cd %q\n' "$PWD"
   printf '%q ' "$@"
   printf '>> %q 2>&1\n' "$work/out"
