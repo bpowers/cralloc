@@ -124,9 +124,10 @@ fn fill_hands_out_distinct_aligned_writable_slots_in_address_order() {
 }
 
 /// With 8-byte slots the leaf bitmap of a region fills pages of its own, after the pages of the
-/// summary and clean bitmap, so it is committed only as carves need it. Freeing slots
-/// writes it; the simulator's memory is inaccessible until committed, so a write the carve did
-/// not commit for kills the test.
+/// summary and clean bitmap, so it is committed only as carves need it. Freeing slots writes it,
+/// so the word of every slot a carve hands out must be committed by then. The simulator is asked,
+/// and the write is not left to show it: a write to a page not committed faults only in guarded
+/// memory, and `Standard`'s is not guarded where the host's pages are larger than its own.
 #[test]
 fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let state = state::<Standard>();
@@ -134,6 +135,20 @@ fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let class = small(8);
     let slots = fill(&back, class, 3000);
     assert_eq!(slots.len(), 3000);
+    let host = back.host(class.class()).unwrap();
+    for &slot in &slots {
+        let location = back.space().locate(slot).unwrap();
+        let index = back
+            .space()
+            .plan()
+            .slot_at(location, class.class())
+            .unwrap();
+        let word = super::tree::word(&host, super::tree::Node::leaf(location.region, index / 64));
+        assert!(
+            state.os().is_writable(NonNull::from(word).cast(), 8),
+            "the leaf word of slot {index} is not committed"
+        );
+    }
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &slots) };
     assert_eq!(fill(&back, class, 3000).len(), 3000);
