@@ -105,8 +105,8 @@ and on reading what the compiler emits for `+sve,+sve2`.
 
 ## SYSCALL-03: `mrs` of the timer's registers and the thread pointer, on aarch64
 
-**Blocks.** `generic_timer`, of `cntvct_el0` and `cntfrq_el0`, and `thread_register`, of
-`tpidr_el0`.
+**Blocks.** `timer_register`, of `cntvct_el0` for `timer_count` and `cntfrq_el0` for `timer_rate`,
+and `thread_register`, of `tpidr_el0`.
 
 **Proof.** Each writes the one output register the compiler chose and nothing else, touches no memory
 or stack and leaves the flags alone, as `options(nomem, nostack, preserves_flags)` says.

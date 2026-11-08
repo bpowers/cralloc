@@ -7,11 +7,12 @@ Kani does not cover these blocks. It does cover the address arithmetic they depe
 **The `Space` invariant.** The `plan.size()` bytes at `base` are one reservation that `os` (the
 value the `Space` borrows) returned and that has not been unmapped, and `base` is aligned to the
 plan's region size, which is the size the reservation got (regions shrink, keeping their number,
-when the OS refuses the largest). A `Space` stores the plan's region shift and rebuilds the plan
-as `Plan::new(O::geometry(), shift)` (`Space::plan`); every plan it is built from is
-`O::geometry().plan(shift)`, which is that same value, since `Os::geometry` is the same at every
-call in a process, so "the plan" below is one plan whichever way it is read. `LinuxOs` keeps that
-promise with a constant on x86-64, and on aarch64 with the page shift it finds once and stores
+when the OS refuses the largest). A `Space` stores the plan's region shift and `O::found()`, read
+when the `Space` was made, and rebuilds the plan as `Plan::new(O::geometry_of(found), shift)`
+(`Space::plan`); every plan it is built from is `O::geometry().plan(shift)`, which is that same
+value, since `Os::geometry` is `geometry_of(found())` and the same at every call in a process, so
+"the plan" below is one plan whichever way it is read. `LinuxOs` keeps that promise with a constant
+on x86-64, where nothing is found, and on aarch64 with the page shift it finds once and stores
 (KERNEL-14): a stale read of the store finds the shift again and gets the same answer. Two threads
 could get different answers only by making the process's very first allocator calls at once, each
 under its own seccomp filter, one of which refuses `madvise`; the stores would then disagree and

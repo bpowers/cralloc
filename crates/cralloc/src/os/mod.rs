@@ -110,9 +110,23 @@ pub enum HugePages {
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
 pub unsafe trait Os: Sync {
-    /// The shape of the heap this OS hosts: the same at every call in a process. Slow paths may
-    /// read it often: where it is a constant it folds away, and elsewhere it is one load.
-    fn geometry() -> Geometry;
+    /// What a [`Space`](crate::space::Space) keeps of the geometry, so that the many looks at its
+    /// plan in one operation read nothing shared: nothing where the geometry is a constant, and
+    /// elsewhere what the OS found at run time, as a whole word.
+    type Found: Copy;
+
+    /// The part of the geometry the OS finds at run time: the same at every call in a process.
+    /// One load once it is known.
+    fn found() -> Self::Found;
+
+    /// The geometry, from what [`Os::found`] returned in this process: arithmetic, with no load.
+    fn geometry_of(found: Self::Found) -> Geometry;
+
+    /// The shape of the heap this OS hosts: the same at every call in a process.
+    #[inline(always)]
+    fn geometry() -> Geometry {
+        Self::geometry_of(Self::found())
+    }
 
     /// Reserves `len` bytes of inaccessible address space aligned to `align`. `len` is a
     /// non-zero multiple of the page size and `align` a power of two no smaller than a page.

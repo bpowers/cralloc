@@ -484,8 +484,21 @@ pub(crate) const fn extent_of(
     size: usize,
     huge: bool,
 ) -> u32 {
+    extent_past(layout, slot, layout.stagger(slot), unit, size, huge)
+}
+
+/// [`extent_of`] for a caller that has the slot's stagger, `layout.stagger(slot)`: a claim needs
+/// the extent of two tenants, and a stagger by pages divides.
+const fn extent_past(
+    layout: &Layout,
+    slot: u32,
+    stagger: usize,
+    unit: Unit,
+    size: usize,
+    huge: bool,
+) -> u32 {
     let page = layout.page_size();
-    let written = layout.slot_bytes(slot) + layout.stagger(slot) + size;
+    let written = layout.slot_bytes(slot) + stagger + size;
     let end = written.div_ceil(page);
     let end = if end > unit.end as usize {
         unit.end
@@ -659,12 +672,13 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32, into: usize)
 pub(crate) const fn keep_from(
     layout: &Layout,
     slot: u32,
+    stagger: usize,
     unit: Unit,
     size: usize,
     last: Recorded,
 ) -> u32 {
-    let new = extent_of(layout, slot, unit, size, last.huge);
-    let old = extent_of(layout, slot, unit, last.size, last.huge);
+    let new = extent_past(layout, slot, stagger, unit, size, last.huge);
+    let old = extent_past(layout, slot, stagger, unit, last.size, last.huge);
     if new > old { new } else { old }
 }
 
@@ -715,10 +729,11 @@ pub(crate) fn settle_slot<H: Host>(
     // each word held before this claim cleared any of it, clear those under the block, and find
     // the pages past what the claim keeps that are not clean. `keep` is at or past `end`, so
     // the bits cleared and the slack found never overlap.
-    let end = extent_of(layout, slot, unit, size, false);
+    let stagger = layout.stagger(slot);
+    let end = extent_past(layout, slot, stagger, unit, size, false);
     let first = layout.first_page(slot, unit, into);
     let keep = match last {
-        Some(last) => keep_from(layout, slot, unit, size, last),
+        Some(last) => keep_from(layout, slot, stagger, unit, size, last),
         None => unit.end,
     };
     let mut clean = 0usize;
