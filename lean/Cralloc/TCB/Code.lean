@@ -57,9 +57,10 @@ points the thread's `rseq_cs` field at the sequence's descriptor (which
 start to just past its last step, the commit. If the thread is preempted,
 migrated or signalled with its instruction pointer inside `body`, the
 operating system aborts the sequence: the thread resumes at the abort
-handler, which jumps back to `arm`. `body` may leave early by an exit
-(`Step.exit`): to code after the sequence, or to an external target, such
-as a slow path that is a function of its own (`ExecExit`).
+handler, which jumps back to `arm`, with the registers it was interrupted
+with. What runs before `arm` does not run again (`Artifact.setup`). `body` may
+leave early by an exit (`Step.exit`): to code after the sequence, or to an
+external target, such as a slow path that is a function of its own (`ExecExit`).
 
 `Exec` describes the run that is not aborted, which the operating system
 guarantees nothing else interferes with. Where an abort may happen, before

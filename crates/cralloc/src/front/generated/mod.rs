@@ -5,6 +5,14 @@
 //! whose machine code has been proven correct and memory safe against its
 //! contract.
 
+#[cfg(all(target_arch = "aarch64", target_endian = "little", target_pointer_width = "64"))]
+#[rustfmt::skip]
+pub(crate) mod aarch64;
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little", target_pointer_width = "64"))]
+#[rustfmt::skip]
+pub(crate) mod aarch64_inline;
+
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[rustfmt::skip]
 pub(crate) mod x86_64;

@@ -66,9 +66,45 @@ module's docstring names its options. The program links without PIE, since `adrp
 
 ```
 cd aarch64/reach && ../../../../scripts/heavy ./check.sh      # about a minute
+./bodies.py ../../../../target/release/libcralloc_preload.so  # no adrp in a sequence, no b out of one
 cd aarch64/stale && cc -O2 -fPIC -shared -ffixed-x18 probe.c -o probe.so -ldl
 LD_PRELOAD=$PWD/probe.so PROGRAM ...                          # the summary goes to stderr
 ```
+
+The real allocator against the incumbents, the check that the fast path inlines, and the C entry
+points through the preload library (`scripts/heavy cargo build --release -p cralloc-preload` first):
+
+```
+cd rust-alloc && ./run_aarch64.sh build && ./run_aarch64.sh run     # GlobalAlloc, fat LTO
+cd fastpath && ../../../scripts/heavy ./check.py
+cd centry && ../../../scripts/heavy ./build.sh
+RF_CPU=8 ../../../scripts/measure ./compare.sh pair:32 burst:32:32 mixed:1:512 calloc:32 churn
+```
+
+`run_aarch64.sh` builds what the benchmark suite builds, one binary per allocator; `RF_ROUNDS`,
+`RA_PAD` with `BUILD_TAG` for placements, and `RF_FILTER` are its knobs.
+
+Whether real jobs feel the hop, `aarch64/hopjob/`. `variant.py` rewrites the inlined routines:
+`chainK` puts K more cycles on the hop and nothing else, `freeK` puts the same instructions off every
+chain, so that the two are one placement and their difference is what the hop alone costs, `kept`
+keeps the slab's address in `x18` at the sites whose class the compiler knows, and `area` reads the
+rseq area in a block the compiler may hoist. All of it happens in a scratch copy of the repository
+(COPY, outside any checkout), so the checkout stays as it is:
+
+```
+cd aarch64/hopjob
+./build.sh COPY plain free2 chain2 free6 chain6 kept      # the suite's workloads and the loops
+./build.sh COPY plain@32 kept@32 ...                      # the same at bench-alloc's placements
+./apps.sh COPY 'boa ruff' plain kept free6 chain6         # programs of the apps suite
+./loops.sh COPY plain free2 chain2                        # check: chainK adds 2K to a tight pair
+./jobs.sh COPY OUT.jsonl 'tree depth=20,json 32Mi' 5 plain free2 chain2
+./analyze.py OUT.jsonl --calls 'tree depth=20=2,json 32Mi=0.224'    # calls per unit of the metric
+```
+
+`stale/probe.so` counts allocator calls for `--calls`. The direct read of `__rseq_offset`, which GNU
+ld refuses in a position-independent executable, stays under the configuration `cralloc_a64_direct`
+for a link by `rust-lld`, to compare on jobs; `build.sh COPY lld direct` makes both forms under that
+linker.
 
 ## kernels
 
