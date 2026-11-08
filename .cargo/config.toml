@@ -6,3 +6,21 @@ runner = "scripts/run-capped"
 
 [target.x86_64-unknown-linux-musl]
 runner = "scripts/run-capped"
+
+# The host's CPU is the baseline on aarch64 (apple-m1 here, neoverse-v2 on Graviton 4 and Grace):
+# atomics are inline LSE instructions, with no run-time dispatch, and acquire loads can use RCpc.
+# A program that builds the crate for the generic target still works, since the routines use only
+# the base instruction set and its slow paths call outlined atomics.
+[target.aarch64-unknown-linux-gnu]
+runner = "scripts/run-capped"
+rustflags = ["-Ctarget-cpu=native"]
+
+[target.aarch64-unknown-linux-musl]
+runner = "scripts/run-capped"
+rustflags = ["-Ctarget-cpu=native"]
+
+# A simulated heap is built on the stack before it is boxed, and in a debug build each call on the
+# way adds a copy. Its lines are twice as long on aarch64, which is more than the default 2 MiB of
+# a test's thread holds.
+[env]
+RUST_MIN_STACK = "8388608"

@@ -1,6 +1,6 @@
 # Safety ledger: `crates/cralloc/src/c/routines.rs`, and the exported C routines
 
-The generated C entry points (`front/generated/x86_64/centry.rs`): `c_malloc`, `c_calloc`,
+The generated C entry points (`front/generated/<target>/centry.rs`): `c_malloc`, `c_calloc`,
 `c_free` and `c_free_sized`. Lean proves each against its contract
 (`lean/Cralloc/Spec/CEntry.lean`) under any interruption; the obligations below are the
 generated `# Safety` sections, discharged once here for every call: the wrappers in
@@ -15,6 +15,7 @@ generated `# Safety` sections, discharged once here for every call: the wrappers
   table (`MASK_DISP` above `SLABS`), each routine's tables (`C_SIZES`, `C_CALLOC_SIZES` or `C_SIZED_SIZES` 2048
   bytes in; the mirror of the heap words at `SHIFT_DISP` above `SLABS`, and the region table at `REGION_DISP` above `SLABS`) do not overlap the return address or wrap around the end of the address space;
   `rseq_cs` overlaps none of the others; none but the slabs overlaps the slabs.
+- (P) On aarch64, `SLABS` starts on a boundary of 4096 bytes.
 - (I) For every class byte `k` below 256, the masks' table's entry `k` is zero or the mask of
   an allowed magazine size, and if it is not zero, every slab's word `8 k` is zero, a marker or
   a slot of a magazine of that size apart from all of the above, each slab's its own; every
@@ -40,6 +41,7 @@ values they read).
   static TLS, which holds the rseq area (glibc's, or on musl the crate's own), or the thread's
   stack. None is at the top of
   the address space.
+- (P): as (P) in `front/real-safety.md`.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
   class's, which `MagazineSize` keeps allowed, and the slab invariant holds of its words. The
   byte of a small class is the position of its hot word (`Field::index`), not its class index;

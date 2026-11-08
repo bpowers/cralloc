@@ -98,7 +98,8 @@ impl Cralloc {
     /// path, and keeps what it held when it went quiet until something calls this. The
     /// `background` feature's `Cralloc::start_background` calls it from a thread of its
     /// own; the `cralloc-tokio` crate from a task on a tokio runtime. It never waits, and any
-    /// thread may call it at any time.
+    /// thread may call it at any time. On a kernel whose huge pages are over 2 MiB, its purge
+    /// pass may split them, which takes 1 to 2 ms each ([`Cralloc::maintain_step`]).
     pub fn maintain() {
         opt_out();
         process().maintain();
@@ -109,6 +110,11 @@ impl Cralloc {
     /// microseconds to tens of microseconds. Returns whether the round has more steps; `false`
     /// at once when this interval's round is done. For a caller that must not hold its thread
     /// for a whole round, such as a task on an async runtime, which yields between steps.
+    ///
+    /// One kind of step takes longer. On a kernel whose huge pages are over 2 MiB and at most
+    /// 64 MiB (32 MiB, on pages of 16 KiB), a step of the purge pass may split one huge page, one a
+    /// step, and that holds the caller for 1 to 2 ms. It is the price of ever returning that
+    /// memory without the background thread, since no slow path splits one that large.
     pub fn maintain_step() -> bool {
         opt_out();
         process().maintain_step()

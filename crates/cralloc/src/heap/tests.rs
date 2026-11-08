@@ -5,8 +5,9 @@ use super::large::{HEADROOM, growth_rooms, shrink_moves_below_for};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::depot::siblings::{SIBLINGS, stride};
+use crate::lined::LINE;
 use crate::os::OsError;
-use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
+use crate::os::sim::{Call, Faults, PAGE_SCALE, SIM_THREADS, SimOs};
 use crate::space::Plan;
 
 /// The simulated shape: one with large classes natively, the small one Miri can afford.
@@ -18,6 +19,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
 use std::thread;
 use std::vec::Vec;
+
+/// A kibibyte as a test states it, on pages of 4 KiB (`PAGE_SCALE`).
+const KIB: usize = PAGE_SCALE << 10;
 
 fn layout(size: usize, align: usize) -> Layout {
     Layout::from_size_align(size, align).unwrap()
@@ -367,7 +371,10 @@ fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
     let sizes: Vec<usize> = if cfg!(miri) {
         [40].to_vec()
     } else {
-        (8..64).step_by(8).collect()
+        SmallClass::all()
+            .map(|class| class.size())
+            .filter(|&size| size < LINE)
+            .collect()
     };
     for size in sizes {
         let l = layout(size, 8);
@@ -381,12 +388,19 @@ fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
             .map(|_| unsafe { heap.alloc(l) })
             .collect();
         assert!(got.iter().all(|p| !p.is_null()));
+        // On long lines the smallest class's siblings are all its magazine holds, and the next
+        // magazine is dense.
         let siblings = SIBLINGS * stride(size).unwrap();
-        for pair in got[..=siblings].windows(2) {
+        let (apart, dense) = if siblings < capacity {
+            (siblings, siblings)
+        } else {
+            (capacity - 1, capacity)
+        };
+        for pair in got[..=apart].windows(2) {
             let (low, high) = (pair[0].min(pair[1]).addr(), pair[0].max(pair[1]).addr());
-            assert_ne!((low + size - 1) / 64, high / 64, "{size}: {pair:?}");
+            assert_ne!((low + size - 1) / LINE, high / LINE, "{size}: {pair:?}");
         }
-        for pair in got[siblings..].windows(2) {
+        for pair in got[dense..].windows(2) {
             assert_eq!(pair[1].addr() - pair[0].addr(), size, "{size}: {pair:?}");
         }
         for p in got {
@@ -845,15 +859,15 @@ fn a_block_resized_back_and_forth_across_its_slot_boundary_settles() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
-    use crate::back::policy::{STAGGER_ROOM, kept_outgrown};
+    use crate::back::policy::{STAGGER_LINES, kept_outgrown};
     // The block's charge must fit the bound for the slot to be kept.
-    const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 << 10));
+    const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 * KIB));
     use crate::os::HugePages;
     use crate::os::sim::Shape as _;
     let heap = SimHeap::<crate::os::sim::Native>::new();
     let geometry = crate::os::sim::Native::GEOMETRY;
     let huge = geometry.huge_page_size();
-    let grown = layout(80 << 10, 8);
+    let grown = layout(80 * KIB, 8);
     // SAFETY: valid layouts; each block is written within its size and freed once with the
     // layout it has.
     unsafe {
@@ -868,14 +882,14 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
             q
         };
         let advised = |q: *mut u8| heap.os().huge_pages(ptr::NonNull::new(q).unwrap());
-        let q = grow(40 << 10);
+        let q = grow(40 * KIB);
         let back = heap.heap.back().unwrap();
         assert_eq!(advised(q), Some(HugePages::Prefer));
         let slot = match back.lookup(q) {
             Some(crate::back::Kind::Slot(class)) => class.size(),
             other => panic!("{other:?}"),
         };
-        let most = (grown.size() + STAGGER_ROOM).next_multiple_of(huge);
+        let most = (grown.size() + STAGGER_LINES).next_multiple_of(huge);
         assert!(slot >= 2 * most, "a slot of {slot}");
         // Freed, it goes back whole and loses its advice.
         let before = back.retained_large();
@@ -887,7 +901,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
         );
         assert_eq!(advised(q), Some(HugePages::Avoid));
         // Outgrown, the same: no kept slot holds an advised range.
-        let q = grow(40 << 10);
+        let q = grow(40 * KIB);
         assert_eq!(advised(q), Some(HugePages::Prefer));
         let (before, counted) = (back.retained_large(), back.outgrown());
         let r = heap.realloc(q, grown, slot + 1);
@@ -900,7 +914,7 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
         // charged what the block may have written. (A trim first, so that the move's new slot
         // takes nothing out of the count.)
         back.trim();
-        let q = grow(16 << 10);
+        let q = grow(16 * KIB);
         assert_eq!(advised(q), Some(HugePages::Avoid));
         let (before, counted) = (back.retained_large(), back.outgrown());
         let r = heap.realloc(q, grown, slot + 1);
@@ -939,7 +953,7 @@ fn buffers_growing_into_reused_slots_leave_a_trail_within_the_bound() {
     let heap = SimHeap::<crate::os::sim::Native>::new();
     let bound = kept_outgrown(crate::os::sim::Native::GEOMETRY);
     const N: usize = 48;
-    let (start, end) = (16usize << 10, 432usize << 10);
+    let (start, end) = (16 * KIB, 432 * KIB);
     let mut trails = std::vec::Vec::new();
     for round in 0..3 {
         // SAFETY: valid layouts; each block is written within its size and freed once with the
@@ -1387,24 +1401,25 @@ fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
 #[test]
 fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
     let heap = SimHeap::<Shape>::new();
-    let page = 4 << 10;
-    let mut size = 40 << 10;
+    let page = 4 * KIB;
+    // Small enough that its slot, room for a stagger included, is outgrown below.
+    let mut size = 33 * KIB;
     // SAFETY: valid layouts; the block is freed once with the layout it has.
     unsafe {
         let mut p = heap.alloc(layout(size, 8));
         // Outgrow the slot once, into a block with headroom (which fits a region of every shape).
-        p = heap.realloc(p, layout(size, 8), 50 << 10);
-        size = 50 << 10;
+        p = heap.realloc(p, layout(size, 8), 50 * KIB);
+        size = 50 * KIB;
         for _ in 0..16 {
             let q = heap.realloc(p, layout(size, 8), size + page);
             assert_eq!(q, p, "growth within the headroom stays put at {size}");
             size += page;
         }
         // An over-aligned layout grows in place too.
-        let small = layout(8, 64 << 10);
+        let small = layout(8, 64 * KIB);
         let a = heap.alloc(small);
         assert_eq!(heap.realloc(a, small, 16), a);
-        heap.dealloc(a, layout(16, 64 << 10));
+        heap.dealloc(a, layout(16, 64 * KIB));
         heap.dealloc(p, layout(size, 8));
     }
 }
@@ -1440,11 +1455,11 @@ fn large_frees_find_the_class_from_the_address() {
     let heap = SimHeap::<Shape>::new();
     // A layout far smaller than the block still frees the whole slot, and a block moved into
     // a roomier slot by `realloc` is freed with the caller's layout.
-    let l = layout(40 << 10, 8);
+    let l = layout(33 * KIB, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
-        let q = heap.realloc(p, l, 50 << 10);
+        let q = heap.realloc(p, l, 50 * KIB);
         assert!(!q.is_null());
         let slot = match heap.heap.back().unwrap().lookup(q).unwrap() {
             crate::back::Kind::Slot(class) => class.size(),
@@ -1453,7 +1468,7 @@ fn large_frees_find_the_class_from_the_address() {
             }
         };
         let plan = heap.heap.back().unwrap().space().plan();
-        let room = growth_rooms(50 << 10, plan).next().unwrap();
+        let room = growth_rooms(50 * KIB, plan).next().unwrap();
         assert!(slot >= room, "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
@@ -1464,10 +1479,10 @@ fn large_frees_find_the_class_from_the_address() {
             .plan()
             .geometry()
             .page_size();
-        assert_eq!(heap.usable(q), Some((50usize << 10).next_multiple_of(page)));
-        heap.dealloc(q, layout(50 << 10, 8));
+        assert_eq!(heap.usable(q), Some((50 * KIB).next_multiple_of(page)));
+        heap.dealloc(q, layout(50 * KIB, 8));
     }
-    assert!(!Class::of_size(40 << 10).unwrap().is_small());
+    assert!(!Class::of_size(40 * KIB).unwrap().is_small());
 }
 
 /// Where a heap's parked objects are, by `inspect`.
@@ -1624,7 +1639,14 @@ fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
 #[cfg_attr(miri, ignore = "reads every simulated page dozens of times")]
 fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     let heap = SimHeap::<Shape>::new();
-    burst(&heap, if cfg!(miri) { 3000 } else { 100_000 });
+    burst(
+        &heap,
+        if cfg!(miri) {
+            3000
+        } else {
+            100_000 * PAGE_SCALE
+        },
+    );
     light_work(&heap);
     let quiet = resident(&heap);
     let purges = heap.os().calls(Call::Purge);
@@ -1814,7 +1836,10 @@ mod hold {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+/// Whole routes from a free to the next allocation, on real threads.
+mod ordering;
+
+#[cfg(cralloc_real)]
 mod process {
     use super::*;
     use crate::{Cralloc, SimCralloc};
@@ -2003,7 +2028,8 @@ mod process {
             assert_eq!(p.addr() % (1 << 33), 0);
             let usable = Cralloc::usable_size(p);
             Cralloc.dealloc(p, l);
-            assert_eq!(usable, Some(4096));
+            let page = <crate::os::linux::LinuxOs as crate::os::Os>::geometry().page_size();
+            assert_eq!(usable, Some(page));
         }
     }
 
@@ -2238,7 +2264,7 @@ mod lean_realloc {
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     mod process {
         use super::*;
         use crate::Cralloc;
@@ -2343,7 +2369,7 @@ mod lean_realloc {
         });
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn the_process_heap_moves_a_block_down_a_class_within_the_block_it_lands_in() {
         use crate::Cralloc;
@@ -2472,8 +2498,11 @@ mod lean_realloc {
             ((100, 8), (300, 8)),
             ((3000, 8), (40_000, 8)),
             ((100, MAX_SMALL_SIZE * 2), (200, 8)),
-            ((40_000, 8), (40_000, 1 << 16)),
-            ((40_000, 8), (300_000, 8)),
+            (
+                (40_000 * PAGE_SCALE, 8),
+                (40_000 * PAGE_SCALE, 1 << 16 << PAGE_SCALE.trailing_zeros()),
+            ),
+            ((40_000 * PAGE_SCALE, 8), (300_000 * PAGE_SCALE, 8)),
         ];
         for ((asked, from_align), (grown, to_align)) in cases {
             let (lo, ln) = (layout(asked, from_align), layout(grown, to_align));
@@ -2607,10 +2636,210 @@ mod lean_realloc {
             pairs(&SimHeap::<Shape>::new());
         }
 
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         #[test]
         fn the_process_heap_zeroes_what_a_grow_adds_and_keeps_what_a_shrink_leaves() {
             pairs(&crate::Cralloc);
         }
     }
 }
+
+/// The cache domains on the process's heap, on this machine's CPUs: what discovery found in sysfs
+/// is what the heap uses, and magazines stay in the domain that freed them. A line costs several
+/// times as much across such a boundary, so a discovery that parsed but went unused would show
+/// only as a slower program.
+#[cfg(cralloc_real)]
+mod cache_domains {
+    use super::*;
+    use crate::Cralloc;
+    use crate::depot::{MAX_DOMAINS, Pool};
+    use crate::front::{Real, Routines};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    /// The CPUs online.
+    fn online() -> Vec<usize> {
+        let text = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap();
+        let mut cpus = Vec::new();
+        assert!(crate::depot::domain::each_cpu(text.as_bytes(), |cpu| {
+            cpus.push(cpu);
+        }));
+        cpus
+    }
+
+    /// The list of CPUs that share CPU `cpu`'s last-level cache, as sysfs prints it, if any: the
+    /// highest cache index there is, or on x86-64 the L3. Not the crate's own constant, so that this
+    /// can find it wrong.
+    fn shared_list(cpu: usize) -> Option<std::string::String> {
+        let indexes = if cfg!(target_arch = "x86_64") {
+            3..=3
+        } else {
+            2..=15
+        };
+        indexes.rev().find_map(|index| {
+            let cache = std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index{index}");
+            std::fs::read_to_string(cache + "/shared_cpu_list").ok()
+        })
+    }
+
+    /// How many pushes and pops `pool`'s stack of `class` has had.
+    fn touched(pool: Pool, class: SmallClass) -> u32 {
+        let heap = super::super::global::process().heap();
+        heap.depot.full(pool, class).version()
+    }
+
+    #[test]
+    fn magazines_stay_in_the_domain_of_the_cpu_that_freed_them() {
+        let name =
+            "heap::tests::cache_domains::magazines_stay_in_the_domain_of_the_cpu_that_freed_them";
+        if !crate::fresh::is_child(name) {
+            return crate::fresh::run(name);
+        }
+        // The first slow path finds the domains. Of another class, so that this CPU has nothing
+        // of the class under test loaded, whichever CPU it turns out to be.
+        let started = Instant::now();
+        let first_use = layout(64, 8);
+        // SAFETY: a valid layout of a non-zero size.
+        let block = unsafe { Cralloc.alloc(first_use) };
+        assert!(!block.is_null());
+        // SAFETY: allocated just above with that layout, freed once.
+        unsafe { Cralloc.dealloc(block, first_use) };
+
+        // The heap found what sysfs says, for every CPU online.
+        let cpus = online();
+        let heap = super::super::global::process().heap();
+        let domain = |cpu: usize| heap.depot.domain_of(Real.slabs().cpu(cpu as i32));
+        let mut sharers: BTreeMap<std::string::String, Vec<usize>> = BTreeMap::new();
+        for &cpu in &cpus {
+            sharers
+                .entry(shared_list(cpu).unwrap_or_default())
+                .or_default()
+                .push(cpu);
+        }
+        let nothing_shared = sharers.len() == cpus.len();
+        if sharers.keys().all(std::string::String::is_empty) || nothing_shared {
+            std::eprintln!("this machine lists no shared cache: one domain");
+            assert_eq!(heap.depot.domain_count(), 1);
+            return;
+        }
+        for group in sharers.values() {
+            for &cpu in group {
+                assert_eq!(domain(cpu), domain(group[0]), "CPUs {group:?}");
+            }
+        }
+        let groups: Vec<&Vec<usize>> = sharers.values().collect();
+        assert_eq!(heap.depot.domain_count(), groups.len().min(MAX_DOMAINS));
+        if groups.len() <= MAX_DOMAINS {
+            for (i, a) in groups.iter().enumerate() {
+                for b in &groups[i + 1..] {
+                    assert_ne!(domain(a[0]), domain(b[0]), "CPUs {a:?} and {b:?}");
+                }
+            }
+        }
+        // Two CPUs of one domain and one of another, if this process may use them: `scripts/heavy`
+        // keeps tests off the cores measurements use.
+        let allowed = crate::fresh::allowed_cpus();
+        let usable: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| {
+                let usable = |cpu: &&usize| allowed.contains(cpu);
+                group.iter().filter(usable).copied().collect()
+            })
+            .collect();
+        let Some(two) = usable.iter().find(|group| group.len() >= 2) else {
+            std::eprintln!("no domain of two CPUs among {allowed:?}");
+            return;
+        };
+        let Some(other) = usable.iter().find(|group| {
+            group
+                .first()
+                .is_some_and(|&cpu| domain(cpu) != domain(two[0]))
+        }) else {
+            std::eprintln!("one domain among {allowed:?}");
+            return;
+        };
+        let (first, second, third) = (two[0], two[1], other[0]);
+        let (ours, theirs) = (Pool::Domain(domain(first)), Pool::Domain(domain(third)));
+        let l = layout(1024, 8);
+        let class = Class::of_layout(l).unwrap().small().unwrap();
+        let capacity = class.magazine().capacity();
+        // A stack that stays deep goes back at a look an interval later from any domain. A test held
+        // up that long, as heavy work is by a measurement, cannot say who touched what.
+        let sure = |holds: bool, what: &str| {
+            assert!(
+                holds || started.elapsed() > Duration::from_millis(500),
+                "{what}"
+            );
+        };
+
+        // Frees on one CPU fill magazines that go to its domain's stack and no other's.
+        crate::fresh::pin(third);
+        let held: Vec<*mut u8> = (0..6 * capacity)
+            .map(|_| {
+                // SAFETY: a valid layout of a non-zero size.
+                let block = unsafe { Cralloc.alloc(l) };
+                assert!(!block.is_null());
+                // SAFETY: the block holds a thousand bytes.
+                unsafe { block.write_bytes(0x5a, 1024) };
+                block
+            })
+            .collect();
+        crate::fresh::pin(first);
+        let (before, others) = (touched(ours, class), touched(theirs, class));
+        let freed: std::collections::BTreeSet<usize> = held.iter().map(|p| p.addr()).collect();
+        for &block in &held {
+            // SAFETY: allocated above with `l`, freed once.
+            unsafe { Cralloc.dealloc(block, l) };
+        }
+        sure(
+            touched(ours, class) != before,
+            "no magazine reached the domain's stack",
+        );
+        sure(
+            touched(theirs, class) == others,
+            "a magazine reached another domain's stack",
+        );
+
+        // Another CPU of that domain, with nothing of its own, takes one of them.
+        crate::fresh::pin(second);
+        let before = touched(ours, class);
+        // SAFETY: a valid layout of a non-zero size.
+        let block = unsafe { Cralloc.alloc(l) };
+        sure(
+            touched(ours, class) != before,
+            "the CPU did not look in its domain's stack",
+        );
+        sure(
+            freed.contains(&block.addr()),
+            "not one of the blocks the domain freed",
+        );
+        // SAFETY: allocated just above with `l`, freed once.
+        unsafe { Cralloc.dealloc(block, l) };
+
+        // A CPU of another domain leaves that stack alone, whatever it has to do instead.
+        crate::fresh::pin(third);
+        let (before, others) = (touched(ours, class), touched(theirs, class));
+        let elsewhere: Vec<*mut u8> = (0..2 * capacity)
+            // SAFETY: a valid layout of a non-zero size.
+            .map(|_| unsafe { Cralloc.alloc(l) })
+            .collect();
+        sure(
+            touched(ours, class) == before,
+            "a CPU took from another domain's stack",
+        );
+        for &block in &elsewhere {
+            // SAFETY: allocated just above with `l`, freed once.
+            unsafe { Cralloc.dealloc(block, l) };
+        }
+        sure(
+            touched(ours, class) == before,
+            "a CPU freed to another domain's stack",
+        );
+        sure(
+            touched(theirs, class) != others,
+            "a CPU did not use its own domain's stack",
+        );
+    }
+}
+/// Whole heaps on simulated kernels at their real size.
+mod kernels;

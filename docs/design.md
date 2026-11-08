@@ -103,22 +103,31 @@ indexes by CPU number instead (`docs/research/linux-rseq-contract.md`, "Why we d
 
 ### What the hardware says
 
-We measured candidate fast paths and the primitives around them on the reference machine, an AMD Zen
-5 (`docs/research/roofline.md`, `docs/research/hardware.md`). Four conclusions shaped the design.
+We measured candidate fast paths and the primitives around them on two machines, an AMD Zen 5
+(`docs/research/roofline.md`, `docs/research/hardware.md`) and an Apple M1 Max
+(`docs/research/firestorm.md`, `docs/research/machine-aarch64.md`). Five conclusions shaped the
+design.
 
-- **The fast path is nearly free.** An inlined allocate and free take a few cycles together. One
-  uncontended atomic instruction costs as much as several such pairs, a cache line moved between
-  cores many more, and one page fault several hundred. The design effort belongs in not faulting,
-  not moving cache lines between cores, and not executing an atomic instruction per object.
-- **A per-CPU cache is worth its price.** It costs a few cycles more than a thread-local one when
-  inlined and nothing when called, and buys caches bounded by the CPU count, no per-thread state to
-  create or tear down, and frees that are local on every thread.
-- **Inlining matters more than any other fast-path choice,** and it needs LTO.
-- **The last cycle or two depend on what a compiler does not control.** Narrow loads and absolute
-  addressing lose zero-delay store forwarding. The processor delivers a straight-line run of up to
-  12 micro-ops at full speed and about half speed beyond that, and a routine that leaves only its
-  last few instructions in a second 64-byte line pays a cycle. Assembly lets us choose the
+- **The fast path is nearly free.** An inlined allocate and free take few cycles together. One
+  uncontended atomic instruction that orders memory costs as much as one to several such pairs, a
+  cache line moved between cores many more, and one page fault hundreds. The design effort belongs
+  in not faulting, not moving cache lines between cores, and not executing an atomic instruction per
+  object.
+- **A per-CPU cache is worth its price.** It costs at most a few cycles more than a thread-local one
+  when inlined, nothing when called, and nothing either way on an Apple core, and it buys caches
+  bounded by the CPU count, no per-thread state to create or tear down, and frees that are local on
+  every thread.
+- **On Zen 5, inlining matters more than any other fast-path choice,** and it needs LTO.
+- **On Zen 5, the last cycle or two depend on what a compiler does not control.** Narrow loads and
+  absolute addressing lose zero-delay store forwarding. The processor delivers a straight-line run
+  of up to 12 micro-ops at full speed and about half speed beyond that, and a routine that leaves
+  only its last few instructions in a second 64-byte line pays a cycle. Assembly lets us choose the
   instructions, count the micro-ops, and for out-of-line code fix the size and alignment too.
+- **On an Apple core, one thing sets a tight pair:** forwarding the hot word from one call's commit
+  to the next call's load. It costs the same whatever the instructions around it, inlined or called,
+  and the front end has no such limits. Programs mostly do not wait on it, because their own work
+  runs beside it. So the routines there are free to take the shape Arm's server cores are expected
+  to want, and the effort goes into the slow paths.
 
 ## Goals
 
@@ -144,17 +153,20 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
    heap, so the fast path has no initialization check.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates, panics,
    unwinds or prints while serving a request.
-7. **One platform, done fully.** cralloc is developed, tested and measured on x86-64 with Linux 7.2,
-   Rust 1.99, and glibc 2.43, linked dynamically or statically, or musl. A thread without a
-   registered rseq area, as under valgrind, still works, slowly. cralloc never hands a request to
-   another allocator.
+7. **Two architectures, done fully.** cralloc is developed, tested and measured on x86-64 and aarch64
+   with Linux 7.2, Rust 1.99, and glibc 2.43, linked dynamically or statically, or musl. One current
+   CPU is the baseline on each, a Zen 5 and an Apple M1 Max, and nothing older needs to work well.
+   Arm's server cores (Neoverse V2) matter too, so where a choice costs nothing on the M1 it follows
+   what is known of them. A thread without a registered rseq area, as under valgrind, still works,
+   slowly. cralloc never hands a request to another allocator.
 
 ## Non-Goals
 
 - **Compaction or meshing.** Fragmentation is handled by size-class segregation and reuse policy.
 - **Speed without rseq.** That mode exists for correctness under tools such as valgrind. It reuses
   the path large objects take and is not tuned.
-- **Other architectures and operating systems.** The measurements and proofs are x86-64's.
+- **Other architectures and operating systems.** The measurements and proofs are x86-64's and
+  aarch64's.
 - **A musl shared library.** On musl the allocator supplies its own rseq area, which it can do in an
   executable. Statically linked musl executables are tested; dynamically linked ones are expected to
   work and are not tested.
@@ -191,16 +203,37 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
 - **Purge**: return the physical memory behind free objects to the OS.
 - **Retained memory**: free memory in the bitmaps that is still resident.
 - **Heartbeat**: the bounded maintenance a slow path runs when the bytes it moved pass a threshold.
-- **Interval**: 2^32 ticks of the CPU's cycle counter, about a second.
+- **Interval**: 2^32 ticks of a counter running at a few gigahertz, about a second.
+
+### What is fixed when
+
+Whatever a fast path touches is a constant at compile time on every target: the slabs' number and
+layout, the size classes, the magazines' shapes. So a routine holds them as immediates, and no
+machine pays to look them up.
+
+A kernel's page size is a constant only on x86-64. On aarch64 it is 4, 16 or 64 KiB, and a huge page,
+a page table's worth of pages, is 2, 32 or 512 MiB. No fast path needs either, so they are found
+once, at run time, by an `madvise` of no bytes, which needs neither a C library nor a file, and slow
+paths read the answer. An `ifunc` would suit a fast path that needed the page size. Ours does not,
+and inlined Rust cannot go through one.
+
+So that the heap's rules mean the same on every kernel, each is stated in what it is about. A rule
+about memory is in bytes. A bound on the kernel's work is in pages, whatever their size, since that
+is what the kernel charges for. A rule about the huge page itself counts huge pages, since what one
+costs when it is wrong is a fraction of what it holds.
+
+Words that must not share a line are kept apart by the largest unit of coherence on the architecture:
+64 bytes on x86-64, and 128 on aarch64, where Apple's chips use 64 within a cluster and 128 across,
+and no register or file says so.
 
 ### Address space
 
 At first use cralloc reserves 16 TiB of address space, inaccessible and uncommitted: about 3940
 regions of 4 GiB for objects, and the rest for metadata and magazines. If the process cannot have
 that much, as under an address-space limit or valgrind, the region size is halved until the
-reservation fits, so the number of regions stays the same. The floor is a 2 MiB region and a
-reservation of about 8 GiB; a process allowed less than that cannot start the allocator, and every
-allocation fails.
+reservation fits, so the number of regions stays the same. The floor, whatever the kernel's page
+size, is a 2 MiB region and a reservation of about 8 GiB; a process allowed less than that cannot
+start the allocator, and every allocation fails.
 
 A region is assigned to a class on demand and holds only objects of that class, at `region_base +
 origin + index * class_size`. A small class's origin is a whole number of pages, different for each
@@ -260,9 +293,9 @@ because a large object may sit in a slot bigger than it asked for.
 ### Front end: magazines under rseq
 
 Each CPU has a slab, and the slabs are a static array with an entry for every CPU number the OS can
-produce (8192 on x86-64). The address of a slab word is the CPU number shifted and added to the
-address of the class's word in slab 0, a link-time constant, with no pointer to load. Untouched
-slabs cost no memory. A routine compares the CPU number with the array length and takes the slow
+produce (8192, the most an x86-64 kernel can be built for and twice an aarch64 kernel's). The address
+of a slab word is the CPU number shifted and added to the address of the class's word in slab 0, a
+link-time constant, with no pointer to load. Untouched slabs cost no memory. A routine compares the CPU number with the array length and takes the slow
 path if it is out of range. That one compare keeps a thread with no rseq registration, which reads a
 negative number, away from every slab, and it means no value the OS writes there can index outside
 the slabs. A wrong value in range would put two threads on one slab, so that the number is right is
@@ -300,7 +333,8 @@ else refers to, with entries 1 to `s - 1` holding pointers to distinct free obje
 that appear nowhere else.
 
 A routine names no class. It is given the address of its class's word in slab 0, and the class's
-mask. Allocation has this shape (the exact instructions are chosen by measurement and may change):
+mask. On x86-64, allocation has this shape (the exact instructions are chosen by measurement and may
+change):
 
 ```asm
                                       ; rdi: SLABS + CLASS*8, esi: the class's mask
@@ -322,20 +356,29 @@ start:
 end:
 ```
 
+On aarch64 the steps are the same with more instructions, and with one difference: a routine forms
+the addresses of the thread's rseq area and of its descriptor once, in registers the sequence does
+not write, before it arms (`docs/research/firestorm.md`, "The recommended shape").
+
 If the thread is preempted, migrated or signalled anywhere between `start` and `end`, the OS resumes
-it at an abort handler that jumps back to the arming store. Nothing before the last instruction
-changes shared state, so an aborted run leaves no trace. Free is the mirror image: it stores the
-pointer into the free entry, which nothing can observe yet, and commits by storing the incremented
-word.
+it at an abort handler, which goes back to the routine's first instruction on x86-64 and to the
+arming store on aarch64. Nothing before the last instruction changes shared state, so an aborted run
+leaves no trace. Free is the mirror image: it stores the pointer into the free entry, which nothing
+can observe yet, and commits by storing the incremented word.
 
-When the class is a compile-time constant, the caller's computation of the two inputs folds to a
-`lea` and a `mov`. An executable can read `__rseq_offset` with one load instead of two, and a cargo
-feature selects that.
+When the class is a compile-time constant, the caller's computation of the two inputs folds to two
+or three instructions. On x86-64 an executable can read `__rseq_offset` with one load instead of two,
+and a cargo feature selects that. On aarch64 there is one form, because GNU ld gives a
+position-independent executable no copy of the variable to load, and the second load costs no job
+anything we can see. Keeping the slab's address in a scratch register between calls would let an
+Apple core forward the hot word for free, but it needs an unstable compiler feature and helps one kind
+of program, so it is left out (`docs/research/firestorm.md`, "Held, not built").
 
-The hot word is the last thing a call stores, and a load that shares a page offset with a store
-still in flight can be held until the store completes. So nothing a fast path loads on every call
-may share a page offset with a hot word (`docs/research/roofline.md`, "A load at the page offset of
-a store in flight can stall the whole loop"). The crate places its own tables clear of them, and the
+The hot word is the last thing a call stores, and on Zen 5 a load that shares a page offset with a
+store still in flight can be held until the store completes. So nothing a fast path loads on every
+call may share a page offset with a hot word (`docs/research/roofline.md`, "A load at the page offset
+of a store in flight can stall the whole loop"). An Apple core has no such hold, and Neoverse V2's is
+unknown, so the rule stands on every target. The crate places its own tables clear of them, and the
 build checks flag a binary whose linker did not.
 
 The routines follow rules that come from the measurements, of which the checks under "Assembly"
@@ -346,13 +389,28 @@ enforce the commit, the micro-op limits and the sizes:
 - a compare and its branch are adjacent, so they fuse into one micro-op;
 - the commit stores a value computed from the word the routine read, never a read-modify-write in
   place, because a drainer may exchange the word between the read and the commit;
-- an inlined routine is at most 13 micro-ops, one more than the processor delivers at full speed,
-  and inlined allocation costs its caller one more, a fused test for a miss;
-- an out-of-line routine starts on a 64-byte boundary, its hot path fits in the 24 micro-ops the
-  processor delivers in the time a call and return take regardless, and that hot path is at most 64
-  bytes, or between 76 and 128: crossing into a second line is free unless only the last few
-  instructions do, and a third line costs a cycle;
+- on x86-64, an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
+  speed, and inlined allocation costs its caller one more, a fused test for a miss;
+- on x86-64, an out-of-line routine starts on a 64-byte boundary, its hot path fits in the 24
+  micro-ops the processor delivers in the time a call and return take regardless, and that hot path
+  is at most 64 bytes, or between 76 and 128: crossing into a second line is free unless only the
+  last few instructions do, and a third line costs a cycle;
+- on aarch64, an out-of-line routine keeps only the 64-byte boundary, which costs an Apple core
+  nothing and Neoverse V2 may want;
 - the slow path is out of line.
+
+On aarch64 the architecture and the linker add rules, which the generator enforces, since each
+guards the abort that makes a sequence safe:
+
+- a sequence's body and arming store hold nothing a linker writes or could move, and neither do the
+  instructions just before the arm. rustc links every aarch64 program with a workaround for a
+  Cortex-A53 erratum, which can replace a load or store after an `adrp` with a branch to a copy out of
+  line, where a preemption does not abort the sequence. This is why a routine forms its addresses
+  before it arms;
+- arming is one store, and a routine's setup stores nothing;
+- a conditional branch stays within the routine, since it reaches only 1 MiB and no linker can extend
+  it. A routine sets its miss value first and branches to its own end;
+- nothing after the commit touches memory, since it would be outside the sequence.
 
 The pop and the push are used in two settings. For Rust they are `asm!` blocks in `#[inline]`
 functions, which become part of `__rust_alloc` in the user's binary and, with LTO, of its callers.
@@ -430,12 +488,13 @@ refuses the `membarrier` registration, or the page wiped on fork, draining is of
 ### Depot
 
 The depot holds, per class, a stack of non-empty magazines for each cache domain (the CPUs that
-share a last-level cache) and one more shared by all of them, and per magazine size the same for
-empty magazines. A slow path that retires a magazine pushes it on its domain's stack while that
-holds less than a cap, else on the shared stack. One that needs a magazine pops its domain's stack,
-else the shared one, else fills or makes one. The domains are read once from sysfs, on the process's
-first slow path, so that a program which has since entered a sandbox is not caught opening a file;
-where they cannot be read there is one domain.
+share a last-level cache: the highest the kernel lists, an L3 on most machines and a cluster's L2 on
+an Apple chip) and one more shared by all of them, and per magazine size the same for empty
+magazines. A slow path that retires a magazine pushes it on its domain's stack while that holds less
+than a cap, else on the shared stack. One that needs a magazine pops its domain's stack, else the
+shared one, else fills or makes one. The domains are read once from sysfs, on the process's first
+slow path, so that a program which has since entered a sandbox is not caught opening a file. Where
+they cannot be read, or where no two CPUs share that cache, there is one domain.
 
 A stack head is one 64-bit word: a 32-bit magazine number and a 32-bit version counter, updated by
 compare-and-swap. Magazine memory is never unmapped, so reading a stale link is harmless, and the
@@ -511,10 +570,12 @@ that only a CPU's own slow paths can run goes first at that CPU's next slow path
 paced: a magazine that a call's own exchange pushed past a shared depot stack's target is laundered
 on that call, so that the stack cannot gain on what arrives.
 
-Anything that should happen at a rate in time reads the CPU's cycle counter, which costs no system
-call, and acts once the counter has advanced by 2^32 ticks. "An interval" means that: about a second
-where the counter runs near 4 GHz, and between 0.7 and 4.3 seconds on any plausible machine. Every
-time given below stretches the same way.
+Anything that should happen at a rate in time reads a counter that costs no system call, and acts
+once it has advanced by 2^32 ticks. On x86-64 that is the CPU's cycle counter. On aarch64 it is the
+generic timer, whose rate differs a great deal between machines, shifted by the power of two that
+brings it nearest a few gigahertz. "An interval" means 2^32 such ticks: about a second where the
+counter runs near 4 GHz, between 0.7 and 4.3 seconds on any plausible x86-64 machine, and between 0.7
+and 1.4 on any aarch64 one. Every time given below stretches the same way.
 
 Intervals are counted, not computed from the clock. The count steps by one when a heartbeat finds
 that an interval has passed since the last step, however long ago that was, so a process that was
@@ -571,9 +632,11 @@ What a buffer holds shrinks on the clock, by the rules below.
 
 ### Returning memory and huge pages
 
-A huge-page fault delivers 512 pages for a fraction of the per-page price of small faults, and a
-page returned too early is faulted straight back. Against that, memory the program has stopped using
-must go back to the OS within seconds. So each place that holds memory the program is not using has
+A huge-page fault delivers a page table's worth of pages, 512 of 4 KiB or 2,048 of 16 KiB, for a
+fraction of the per-page price of small faults, while free blocks of that size last; without them it
+stalls in compaction or falls back to small pages (`docs/research/machine-aarch64.md`). A page
+returned too early is faulted straight back. Against that, memory the program has stopped using must
+go back to the OS within seconds. So each place that holds memory the program is not using has
 a rule that returns it, and the table at the end of this section lists them
 (`docs/research/memory.md` and `docs/research/large-blocks.md` have the evidence).
 
@@ -597,17 +660,19 @@ purge is a claim.
 
 **Purge in runs, and let short runs wait.** Each call to return memory costs a system call and a
 round of interrupts to the other CPUs, whatever its size, so a pass returns adjacent free pages
-together, up to a bound that also limits how long a claim is held. A single free page among live
-ones is the dearest memory to return and the likeliest to be refilled. So most passes take only runs
-of at least a few pages, and one pass in every few takes a run of any length. Growth over the cap,
-and `collect`, take any run.
+together, up to a bound that also limits how long a claim is held. A short run among live pages is
+the dearest memory to return and the likeliest to be refilled. So most passes take only runs of at
+least 16 KiB, and one pass in every few takes a run of any length. Growth over the cap, and
+`collect`, take any run.
 
 **A step on a request's slow path is bounded.** Every step a slow path takes, of the clocked pass,
 of the hold or of a growth payment, returns at most a fixed amount of memory, since a millisecond
 spent there once a second is a server's tail. A free large slot bigger than that goes back in
-pieces, from its top down, in whole huge pages where its class is that large. It counts as zero only
-once every page of it has gone. `collect` and `malloc_trim` are the program's own calls and are not
-bounded.
+pieces, from its top down, in whole huge pages where a huge page is 2 MiB and its class that large.
+It counts as zero only once every page of it has gone. A slow path splits only a huge page of 2 MiB.
+One of 32 MiB takes over a millisecond, so splitting it is left to the background thread and
+`collect`, and `maintain` takes one a step. `collect` and `malloc_trim` are the program's own calls
+and are not bounded.
 
 **Free large slots do not wait for the frontier.** A large class's region serves one size, so a
 program that frees blocks of many large sizes between phases holds them all for the two intervals
@@ -652,7 +717,7 @@ share of 1 in 64 the rate doubles in steps from one retirement in 32 to one in 4
 (`docs/research/memory.md`, "Refresh on evidence").
 
 **Huge pages only where objects are dense.** A class's first region starts with `MADV_NOHUGEPAGE`,
-so a lightly used class costs only the 4 KiB pages it touches. `MADV_HUGEPAGE`, "the advice" below,
+so a lightly used class costs only the small pages it touches. `MADV_HUGEPAGE`, "the advice" below,
 takes evidence of dense use, of which there are two kinds. A class of objects of at most a kilobyte
 that has carved enough for one huge page to be a small fraction of it has the rest of its region
 advised. And a large block that grows, by doubling or less and past the size of a huge page, with
@@ -660,18 +725,22 @@ the last piece it wrote at least half full, is being appended to, so the part of
 size it asked for is advised while it holds the block. A block that grows in place over a huge page
 it had only started has that page returned and its first bytes written back, so that the page faults
 whole. Small classes above a kilobyte never get the advice, because such a block is often touched in
-part and each part would cost 2 MiB. A large block allocated at its size in one call gets none
+part and each part would cost a huge page. A large block allocated at its size in one call gets none
 either, a limit we accept: a wrong guess holds many times the block's memory, and telling dense from
 sparse would put a second writer on a slot the design gives to its holder alone
 (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense";
 `docs/research/program-effects.md`, "TLB and huge pages").
 
+A plan uses no huge pages if one is larger than a region, or larger than the retained cap of 64 MiB,
+since returning it whole could not be held to the cap and its fault stalls for milliseconds. Its
+regions keep `MADV_NOHUGEPAGE`, so a kernel set to `always` does not map them anyway.
+
 **Split a huge page only where fills have stopped reaching.** Below a region's frontier, in its
-huge-page part, purging works only in whole 2 MiB units. That includes the unit holding the
-watermark, whose upper part the fault made resident: a purge first carves the rest of that unit and
-frees it. Above the frontier whole units are not enough. When a class's demand falls its short-lived
+huge-page part, purging works only in whole huge pages. That includes the one holding the watermark,
+whose upper part the fault made resident: a purge first carves the rest of that huge page and frees
+it. Above the frontier whole huge pages are not enough. When a class's demand falls its short-lived
 objects pack into the bottom of the region, and the top is left a few long-lived objects to a huge
-page, each holding 2 MiB (`docs/research/memory.md`, "When the size mix wanders, huge pages
+page, each holding a huge page (`docs/research/memory.md`, "When the size mix wanders, huge pages
 ratcheted"). So a step that may return memory treats the huge pages above the frontier as small
 pages. One wholly free goes back whole. One with a quarter of its pages or more free and resident is
 split, and its free runs are returned. A sample of a few pages, at places that move with every lap,
@@ -723,7 +792,9 @@ In summary:
 
 Large classes have no magazines. Allocation and free operate on the region bitmap directly, at the
 cost of a few atomic instructions, which is small next to the cost of touching the object. An object
-larger than a region takes a run of whole regions.
+larger than a region takes a run of whole regions. A large slot is a whole number of pages, because
+the back end purges, charges and reports a block's room by the pages from its slot's start, so on a
+kernel with large pages a class that is not a multiple of the page is not used.
 
 The current size of each large object is recorded out of band, one word per slot, written only when
 the object is allocated, resized or freed. A free leaves the size there for the slot's next claim,
@@ -732,11 +803,16 @@ size must not be the whole slot: a caller that fills what it is told it may use 
 times what it asked for.
 
 A large object does not start at the start of its slot. Slots of a class are all aligned alike, so
-objects that began there would put their cache lines in the same sets, and a program that walks many
-such buffers together would miss the cache on every access. An object whose alignment is at most a
-cache line starts a multiple of 64 bytes into its slot, chosen by the slot's index, and is given a
-page more room so that any such start fits. Nothing is stored: a block starts at its slot's start or
-at that offset, and any other pointer into the slot is not a block.
+objects that began there would put their cache lines in the same sets and, where slots are many pages
+apart, their pages in the same sets of the TLB, and a program that walks many such buffers together
+would miss both on every access. An object whose alignment is at most 64 bytes starts a multiple of
+64 bytes into its slot, chosen by the slot's index, and on aarch64, in a slot of sixteen pages or
+more, whole pages further: the index modulo an eighth of the slot's pages, at most 32. It is given
+room for any such start, 4 KiB on x86-64 and up to 4 KiB more than an eighth of the slot on aarch64.
+The room costs address space and at most a page of memory, where a stagger carries a block's end onto
+another page, since the pages below a block are never touched and are not charged to the slot. Nothing
+is stored: a block starts at its slot's start or at that offset, and any other pointer into the slot
+is not a block.
 
 `realloc` and `grow` succeed in place whenever the new size fits the slot and the caller's next
 `dealloc` will still find the right class: for a small object the new size maps to the same class,
@@ -756,7 +832,8 @@ once. One that shrinks to a small fraction of its slot moves instead, so that a 
 good by a tiny object. The fraction is half of what a block fills when it moves into a slot of that
 size with room, so a block resized back and forth across a class boundary settles in one slot.
 
-**Moving.** The copy goes in pieces, and each piece's pages are tested first. Zero pages are left
+**Moving.** The copy goes in pieces (whole huge pages for a block under advice), and each piece's
+pages are tested first. Zero pages are left
 out and the destination is purged only under them, so a block the program wrote sparsely stays
 sparse. Unless the old slot is kept, each piece's pages go back behind the copy, so the two copies
 together hold at most a piece more than the block. Moving the pages with `mremap` instead would copy
@@ -893,7 +970,9 @@ background thread takes.
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency crates,
 but it silently stops doing so when the crate that declares `#[global_allocator]` contains a private
 `#[used]` static or module-level assembly; declaring the allocator in a small crate of its own
-avoids that.
+avoids that. On aarch64 it should also name a CPU with the large-system atomics, so that a slow path's
+atomics are inline. A build for the generic target works: the routines use only the base instruction
+set, and its slow paths call outlined atomics.
 
 C may free, resize or measure anything Rust allocated. Memory obtained from the C entry points must
 be released through them, which Rust's own rules already require: its class may differ from the one
@@ -961,6 +1040,11 @@ These hold everywhere, and the proofs and tests lean on them.
 4. Between any two instructions of any slow path, shared state is valid and anything unreachable
    from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.
+6. Nothing relies on how a memory order compiles. A block's bytes and a magazine's contents pass
+   between owners by a release and an acquire, or, where a routine's plain store is one end, by the
+   kernel's barrier in a context switch or fence. A store and then a load that must not both miss are
+   sequentially consistent on both sides, or have the fence between them. A routine's loads come in
+   no order, so every mix of old and new values of what it reads must be safe.
 
 ### Components
 
@@ -984,6 +1068,7 @@ part of the API.
 | The twins | Kani, against the routines' specifications | Every state of one small slab, with an interruption before any one step |
 | The lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, the assignment of regions, the boundary of huge-page advice, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
 | The Rust that implements those protocols | Schedule explorers in the test code, which run it unchanged under every schedule within a bound | Bounded schedules, on small heaps |
+| The order of memory between threads, which the models above and the routines' proofs do not see | An argument from Rust's and Arm's memory models, litmus tests under Arm's model, Miri's weak-memory emulation, and tests on real threads on a weakly ordered CPU | Argued and tested |
 | The allocator as a whole | Model-based tests, Miri, fuzzing, and real programs under the preload library | Testing |
 | `unsafe` blocks none of the above reaches | Safety ledger | Written proof, adversarially reviewed |
 
@@ -1006,7 +1091,14 @@ where a test can reach it.
   aborts its sequence, and is negative while the thread has no registration. Nothing else is assumed
   about its value.
 - `membarrier` with the rseq command returns only after every sequence then in flight on the named
-  CPU has completed or been aborted.
+  CPU has completed or been aborted, and it orders memory between the caller and that CPU's threads:
+  what they stored before its barrier there, the caller's later loads see, and what the caller stored
+  before the call, their later loads see. Its manual promises only the first; the second is what the
+  kernel's source does, read at v7.2, and tests on the real kernel watch it. With one user of the
+  address space it returns having done neither, and the other threads' exits stand in.
+- A context switch is a full memory barrier: what a thread stored before it left a CPU, the next
+  thread on that CPU sees. The routines have no order of their own, and their proofs, in a sequential
+  model, say nothing about order.
 - glibc registers a thread's rseq area before the thread can call the allocator. On musl, where the
   area is ours, it reads a negative CPU number until registered, and the OS accepts one registration
   per thread.
@@ -1019,17 +1111,26 @@ where a test can reach it.
 - Of a thread's attempts at a sequence, one is at last left to finish. Only termination rests on
   this.
 - Fresh anonymous memory, and memory after `MADV_DONTNEED`, reads as zero.
-- The instruction model, the Rust compiler and assembler, and Lean's kernel.
+- The linker writes each relocation as the printers assume, and nothing rewrites the binary after it.
+  A post-link tool such as BOLT can move code out of a sequence's range, where a preemption does not
+  abort it.
+- The instruction model, the Rust compiler and assembler, the compiler's mapping of memory orders,
+  the architecture's memory model where Rust's is silent (a routine's plain store, and a block passed
+  with no order), and Lean's kernel.
 
 ### Assembly
 
-All assembly is generated from Lean; none is written by hand. A routine is a Lean term with a
-specification and a proof, and the generator prints it as Rust source that is checked in. A check
-fails if the checked-in assembly differs from what Lean generates, if any proof uses an axiom beyond
-the standard ones or does not replay through Lean's kernel, or if an out-of-line routine, once
-assembled, breaks the size and alignment rules under "Front end". The generator also refuses a
-routine whose commit is not a plain store or whose hot path is over its micro-op limit. The check is
-itself tested against forged proofs.
+All assembly is generated from Lean, and none is written by hand but in the OS interface: the
+system-call instruction and, on aarch64, the reads of the timer and the thread pointer. A routine is
+a Lean term with a specification and a proof, and the generator prints it as Rust source that is
+checked in. A check fails if the checked-in assembly differs from what Lean generates, if any proof
+uses an axiom beyond the standard ones or does not replay through Lean's kernel, or if an out-of-line
+routine, once assembled, breaks the size and alignment rules under "Front end". The generator also
+refuses a routine whose commit is not a plain store, whose hot path is over its micro-op limit on
+x86-64, or whose sequence breaks the rules for aarch64. On an aarch64 host a check runs every
+instruction form on the processor and compares it with the model. The checks are themselves tested
+against forged proofs. They guard against honest mistakes, not an author who runs code during a build
+(`lean/README.md`, "What the audits defend against").
 
 For each routine we prove four things. Run to completion, it performs its specified step on the
 slab. Stopped before any instruction, including the last, it has changed nothing the specification
@@ -1055,6 +1156,10 @@ TLC checks every interleaving of a few threads over a few magazines and objects,
 actors as the flaws these protocols can have need. A configuration that is expected to fail is kept
 as a test: it shows that the model can see a flaw, and that the rule which removes it is needed
 (`tla/README.md`).
+
+The models know only sequential consistency, and the CPUs we run on do not all give it. Why each model
+is still true of the code is argued in `docs/research/memory-ordering.md`, "What the models rest on".
+A CPU can hide a missing order, so a mutation test there shows which of the tests can see one.
 
 The other words that more than one thread writes have no model. A flaw in any of them can cost
 memory returned late or work done twice. It cannot cost a block: whatever those words decide, memory

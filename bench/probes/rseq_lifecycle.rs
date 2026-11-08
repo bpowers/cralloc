@@ -36,8 +36,14 @@ extern "C" {
     fn getauxval(t: u64) -> u64;
 }
 
+#[cfg(target_arch = "x86_64")]
 const SYS_RSEQ: i64 = 334;
+#[cfg(target_arch = "x86_64")]
 const SYS_MEMBARRIER: i64 = 324;
+#[cfg(target_arch = "aarch64")]
+const SYS_RSEQ: i64 = 293;
+#[cfg(target_arch = "aarch64")]
+const SYS_MEMBARRIER: i64 = 283;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: i64 = 1 << 7;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: i64 = 1 << 8;
 const RSEQ_FLAG_UNREGISTER: i64 = 1;
@@ -51,7 +57,14 @@ const AT_RSEQ_FEATURE_SIZE: u64 = 27;
 /// Bits: 0 valid, 1 registered, 8..40 cpu_id, 40..56 low 16 bits of mm_cid, 56 mm_cid >= 2^16.
 fn snapshot() -> u64 {
     let tp: usize;
-    unsafe { asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly)) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly))
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags))
+    };
     let area = (tp as isize + unsafe { __rseq_offset }) as *const u32;
     let len = unsafe { __rseq_size }.max(32) as i64;
     let registered = unsafe {

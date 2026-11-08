@@ -16,24 +16,29 @@
 //! The layout constants here must equal those the Lean specification gives the generated code
 //! (`generated/*/slab.rs`); a test compares them.
 
-#[cfg(all(target_env = "musl", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(all(target_env = "musl", cralloc_real))]
 mod area;
 #[cfg(test)]
 pub(crate) mod check;
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
+#[cfg(all(test, cralloc_real))]
 mod differential;
 // The generated routines and their wrapper, wherever assembly can run. The generated code names
 // its surroundings by path, so they are provided here: `SLABS` and `__rseq_offset`.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod generated;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 mod real;
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
+#[cfg(all(test, cralloc_real))]
 mod rseq_offset_check;
+#[cfg(all(cralloc_real, target_arch = "aarch64"))]
+use generated::{aarch64 as outlined, aarch64_inline as inlined};
+/// This target's routines: those that are called, and those that are inlined.
+#[cfg(all(cralloc_real, target_arch = "x86_64"))]
+use generated::{x86_64 as outlined, x86_64_inline as inlined};
 /// The generated C entry points' module, for the C layer.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub(crate) use generated::x86_64::centry as generated_centry;
+#[cfg(cralloc_real)]
+pub(crate) use outlined::centry as generated_centry;
 mod routines;
 mod slab;
 pub(crate) mod sync;
@@ -61,8 +66,9 @@ pub use twin::Twin;
 
 // SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); on
 // musl the word is the crate's own, generated with its area (`area`). The exported C routines
-// name it through this public path.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+// name it through this public path. aarch64's routines on musl have the offset in their
+// instructions, and no such word exists.
+#[cfg(all(cralloc_real, not(all(target_arch = "aarch64", target_env = "musl"))))]
 unsafe extern "C" {
     /// The offset of the thread's rseq area from the thread pointer, which the generated
     /// routines read: glibc's, or on musl, which has none, the crate's own word, under a name of
@@ -73,7 +79,7 @@ unsafe extern "C" {
     #[cfg_attr(target_env = "musl", link_name = "cralloc_rseq_offset")]
     pub safe static __rseq_offset: isize;
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use real::Real;
 
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -196,6 +202,10 @@ const _: () = {
     use crate::spec;
     assert!(MASK_DISP == spec::MASK_DISP);
     assert!(SHIFT_DISP == spec::SHIFT_DISP && BASE_DISP == spec::BASE_DISP);
+    // On aarch64 a routine forms `SLABS` from its page alone.
+    assert!(align_of::<Front>() >= 4096);
+    // On aarch64 a routine forms `SLABS` from its page alone.
+    assert!(align_of::<Front>() >= 4096);
     // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
     assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
     assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
@@ -211,13 +221,13 @@ const _: () = {
     assert!(SHIFT_DISP.is_multiple_of(32) && BASE_DISP + 8 <= SHIFT_DISP + 16);
     assert!((BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET);
     assert!(
-        REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES
+        REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::STORED_BYTES
     );
     assert!(size_of::<Front>() == SLAB_COUNT * SLAB_BYTES + 3 * SLAB_BYTES);
     assert!(offset_of!(Front, masks) % SLAB_BYTES == MASK_PAGE_OFFSET);
     assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);
-    // No mask shares a page offset with any field of a slab.
-    assert!(Slab::USED_BYTES <= MASK_PAGE_OFFSET);
+    // No mask shares a page offset with a field of a slab that a slow path keeps storing to.
+    assert!(Slab::STORED_BYTES <= MASK_PAGE_OFFSET);
     assert!(Slab::HOT_BYTES / 8 <= MASK_COUNT);
 };
 
@@ -394,7 +404,7 @@ mod tests {
             let entry = core::ptr::from_ref(&SLABS.masks[Field::hot(class).index()]).addr();
             assert_eq!(entry, word + MASK_DISP);
             // Not at a slab word's page offset.
-            assert!(entry % SLAB_BYTES >= Slab::USED_BYTES);
+            assert!(entry % SLAB_BYTES >= Slab::STORED_BYTES);
         }
     }
 

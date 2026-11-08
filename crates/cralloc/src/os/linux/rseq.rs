@@ -1,32 +1,41 @@
 //! The system calls that register a thread's rseq area, for a C library that registers none
-//! (musl): `rseq` to register and unregister, `arch_prctl` to find the thread pointer, and
-//! `rt_sigprocmask` to keep signal handlers out while a thread retires its area.
+//! (musl): `rseq` to register and unregister, on x86-64 `arch_prctl` to find the thread pointer,
+//! and `rt_sigprocmask` to keep signal handlers out while a thread retires its area.
 //!
 //! What to register, when, and what the area's `cpu_id` then means is `front::area`'s; this
 //! module only makes the calls. The ledger entry for the unsafe blocks here is
 //! `docs/safety/cralloc/os/linux/rseq-safety.md`.
 
-use super::syscall::{Reg, int, result, syscall};
+use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::OsError;
 use core::ptr::{self, NonNull};
 
-/// `rseq` and `arch_prctl` on x86-64 (`arch/x86/entry/syscalls/syscall_64.tbl`).
-const RSEQ: usize = 334;
+/// `arch_prctl` on x86-64 (`arch/x86/entry/syscalls/syscall_64.tbl`).
+#[cfg(target_arch = "x86_64")]
 const ARCH_PRCTL: usize = 158;
-const RT_SIGPROCMASK: usize = 14;
 /// `arch_prctl` code: read the FS base, the thread pointer (`asm/prctl.h`).
+#[cfg(target_arch = "x86_64")]
 const ARCH_GET_FS: usize = 0x1003;
 /// `rseq` flag: unregister (`RSEQ_FLAG_UNREGISTER`, `include/uapi/linux/rseq.h`).
 const RSEQ_FLAG_UNREGISTER: usize = 1;
 const SIG_SETMASK: usize = 2;
-/// The kernel's `sigset_t` is one 64-bit word on x86-64.
+/// The kernel's `sigset_t` is one 64-bit word on both.
 const SIGSET_SIZE: usize = 8;
 
 /// `EBUSY`: `rseq` was asked to register what the thread has registered already.
 pub(crate) const EBUSY: OsError = OsError::from_errno(16);
 
+/// The calling thread's thread pointer, from which `__rseq_offset` counts: `tpidr_el0`, which
+/// its static thread-local data follows after the 16 bytes the ABI keeps for the C library
+/// (AAELF64, "Thread Local Storage").
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn thread_pointer() -> Option<NonNull<u8>> {
+    NonNull::new(super::syscall::thread_register())
+}
+
 /// The calling thread's thread pointer: the FS base, at which its static thread-local data
 /// ends (System V AMD64 psABI, "Thread-Local Storage").
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn thread_pointer() -> Option<NonNull<u8>> {
     let mut base: *mut u8 = ptr::null_mut();
     let out: Reg = ptr::from_mut(&mut base).cast();
@@ -74,7 +83,7 @@ unsafe fn rseq(area: NonNull<u8>, len: usize, flags: usize, signature: u32) -> R
     // SAFETY: passed through from the callers (RSEQ-02, RSEQ-03).
     unsafe {
         syscall(
-            RSEQ,
+            nr::RSEQ,
             [
                 area.as_ptr(),
                 int(len),
@@ -105,7 +114,7 @@ fn set_mask(mask: u64) -> Option<u64> {
     // SAFETY: RSEQ-04.
     result(unsafe {
         syscall(
-            RT_SIGPROCMASK,
+            nr::RT_SIGPROCMASK,
             [int(SIG_SETMASK), new, out, int(SIGSET_SIZE), int(0), int(0)],
         )
     })

@@ -99,7 +99,7 @@ fn prepare_first<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     depot.background_choice(area.space().os());
     let page = area.generation_page();
     let space = area.space();
-    let len = O::GEOMETRY.page_size();
+    let len = O::geometry().page_size();
     if space.commit(page, len).is_err() {
         return false;
     }

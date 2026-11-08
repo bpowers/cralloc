@@ -313,7 +313,8 @@ impl Sampler {
 fn statm(pid: i32) -> Option<(u64, u64)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
     let mut f = s.split_whitespace().skip(1).map(|x| x.parse::<u64>().ok());
-    Some((f.next()?? * 4096, f.next()?? * 4096))
+    let page = bench_harness::mem::page_size();
+    Some((f.next()?? * page, f.next()?? * page))
 }
 
 /// CPU time and faults of a live process, from /proc/<pid>/stat.
