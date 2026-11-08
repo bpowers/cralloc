@@ -189,14 +189,28 @@ commit or the drain, and a magazine handle is only made for an address the commi
 
 ## The routines
 
-The routines hold plain `ldr`, `ldp` and `str` and no barrier (`front/provisional/`, read line by
-line against this section; `generated/x86_64` is the same in `mov`s). Any mix of old and new values
-has to be safe, since their loads have no order: the hot word, then the slot through an address
-dependency, and for the C entry points the shift and base index in one `ldp`, the region byte and
-the mask. For the hot word and the slot, the thread either wrote them, or follows the thread that
-did on its CPU, or follows the fence. A word another CPU wrote is a zero or a marker from a drain,
-and neither is dereferenced; or an old value put back by a drain that backed out, whose magazine
-this CPU's threads wrote. The C tables are constants, and the rest are above.
+**The proofs in Lean say nothing about memory order.** Their model is sequential and has no barrier
+instruction: a proof says what a routine's instructions do to memory taken in program order, one
+thread at a time and interrupted anywhere. It does not say what another CPU sees of them, or when.
+The routines hold plain `ldr`, `ldp` and `str` and no barrier (`front/provisional/`, read line by line
+against this section; `generated/x86_64` is the same in `mov`s), and these stand in for a proof:
+
+- **A slab word is written only on its own CPU,** by a routine, or by a drainer the fence orders
+  against that CPU. The next thread on the CPU has what the last one wrote by the context switch. A
+  word another CPU wrote is a zero or a marker from a drain, and neither is dereferenced; or an old
+  value put back by a drain that backed out, whose magazine this CPU's threads wrote.
+- **A magazine's entries are reached through an address dependency** on the hot word, so the load of
+  an entry stays behind the load of the word that named it.
+- **A push's entry and word stores can reorder,** and a pop's commit can pass its load of the entry.
+  Only the same CPU's next thread and a drainer after its fence read entries, and those have the
+  barrier between (see "The slots a routine wrote").
+- **The C entry points' loads are independent:** the shift and base index in one `ldp`, the region
+  byte by address on those, then the mask and the hot word by address on the byte. x86-64 keeps these
+  loads in order and AArch64 does not, and nothing needs it. Any mix of the shift and base index is
+  out of range or right (`c/mirror.rs`). A region byte is zero or its class, which does not change
+  while a block of the region lives, and a zero is position 0, whose mask is zero, so a miss. A mask
+  is zero, a miss, or its one value, and it says nothing about any other word. The size tables are
+  constants.
 
 The twins use relaxed loads and stores, as the routines' are. What orders them is the machine: a
 simulated thread's state word takes a read-modify-write at each step, which a fence and a thread

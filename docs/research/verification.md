@@ -13,7 +13,7 @@ and heavy testing.
 
 | Tool | What it establishes | What it cannot see |
 |---|---|---|
-| Lean, on the routines | every input, every interruption point, memory safety, clobbers, against the instruction and rseq models | the Rust slow paths, the kernel, the assembler |
+| Lean, on the routines | every input, every interruption point, memory safety, clobbers, against the instruction and rseq models | the Rust slow paths, the kernel, the assembler, and memory order: the model is sequential ([memory-ordering.md](memory-ordering.md), "The routines") |
 | Kani | arithmetic and packed words for every input; twins on every state of one small slab | concurrency, assembly, nested retry loops |
 | TLA+ with TLC | every interleaving of a protocol's model, a few threads and objects | the code, weak memory, flaws needing four or more views of a word |
 | Schedule explorers | the production Rust under every schedule within a bound, with forks, in scenarios that follow the models, on small heaps | weak memory, anything past the preemption bound |
