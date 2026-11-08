@@ -15,6 +15,12 @@
 //! rules request CPU [MiB]  each allocation and first write of 1 KiB blocks, carved past the class's
 //!                          huge-page threshold: how long the worst requests take, as the program
 //!                          sees it
+//! rules step CPU SLOT MiB clock|grow|rush|large single|bg
+//!                          a class of SLOT bytes carved and freed, then requests in another class
+//!                          while steps of returning memory reach its wholly free huge pages: how
+//!                          long the worst requests take. `single` wants CRALLOC_BACKGROUND=0 in
+//!                          the environment; `bg` starts the thread before pinning to CPU, so run
+//!                          it under `taskset` with other CPUs to spare
 //! ```
 //!
 //! For `split`, run under `strace -f -e trace=madvise,write` to see which thread calls
@@ -36,6 +42,7 @@ unsafe extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: isize) -> *mut u8;
     fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn clock_gettime(clock: i32, time: *mut [i64; 2]) -> i32;
 }
 
 fn page() -> usize {
@@ -388,6 +395,212 @@ fn request(cpu: usize, total: usize) {
     std::hint::black_box(&live);
 }
 
+/// Bytes resident, by the kernel's count, read without calling the heap: a look between timed
+/// requests must not take a step of the heap's maintenance that no timer sees.
+fn rss_quiet() -> usize {
+    use std::io::Read;
+    let mut buf = [0u8; 128];
+    let read = std::fs::File::open("/proc/self/statm").unwrap().read(&mut buf).unwrap();
+    let text = std::str::from_utf8(&buf[..read]).unwrap();
+    text.split_ascii_whitespace().nth(1).unwrap().parse::<usize>().unwrap() * page()
+}
+
+/// Nanoseconds this thread has spent on a CPU.
+fn on_cpu() -> u64 {
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+    let mut time = [0i64; 2];
+    // SAFETY: `time` is a valid timespec for the call to fill.
+    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut time) };
+    time[0] as u64 * 1_000_000_000 + time[1] as u64
+}
+
+/// How long requests took: a count for each power of two of nanoseconds, and each one over 20 us
+/// with when it ran, how far resident memory fell since the last such request, and how long the
+/// thread was off its CPU since then, which says that a request was preempted and not working.
+struct Times {
+    start: Instant,
+    by_log2: [u64; 48],
+    over: Vec<(u64, u64, isize, u64)>,
+    rss: usize,
+    looked: (Instant, u64),
+}
+
+impl Times {
+    fn new() -> Times {
+        Times {
+            start: Instant::now(),
+            by_log2: [0; 48],
+            over: Vec::with_capacity(1 << 18),
+            rss: rss_quiet(),
+            looked: (Instant::now(), on_cpu()),
+        }
+    }
+
+    #[inline]
+    fn time<T>(&mut self, request: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let out = request();
+        let ns = start.elapsed().as_nanos() as u64;
+        self.by_log2[(64 - ns.leading_zeros()) as usize] += 1;
+        if ns >= 20_000 && self.over.len() < self.over.capacity() {
+            // Off the CPU since the last look, a millisecond ago at most, up to the request's end.
+            let cpu = on_cpu();
+            let wall = (start + Duration::from_nanos(ns) - self.looked.0).as_nanos() as u64;
+            let off = wall.saturating_sub(cpu - self.looked.1);
+            let rss = rss_quiet();
+            let at = self.start.elapsed().as_millis() as u64;
+            self.over.push((ns, at, self.rss as isize - rss as isize, off));
+            self.rss = rss;
+            self.looked = (Instant::now(), on_cpu());
+        } else if (start - self.looked.0).as_millis() >= 1 {
+            self.looked = (Instant::now(), on_cpu());
+        }
+        out
+    }
+
+    fn report(mut self, huge: usize) {
+        let requests: u64 = self.by_log2.iter().sum();
+        let over = |us: u64| self.over.iter().filter(|o| o.0 >= us * 1000).count();
+        let left = self.over.iter().filter(|o| o.2 >= huge as isize / 2).count();
+        println!(
+            "# {requests} requests in {:?}: over 20 us {}, 100 us {}, 1 ms {}; {left} saw a huge page leave",
+            self.start.elapsed(),
+            over(20),
+            over(100),
+            over(1000)
+        );
+        for (log2, count) in self.by_log2.iter().enumerate().skip(11) {
+            if *count != 0 {
+                println!("# under {:9.1} us: {count}", (1u64 << log2) as f64 / 1e3);
+            }
+        }
+        let line = |(ns, at, fell, off): &(u64, u64, isize, u64)| {
+            println!(
+                "{:9.1} {at:7} {:9.1} {:9.1}",
+                *ns as f64 / 1e3,
+                *fell as f64 / MIB as f64,
+                *off as f64 / 1e3
+            );
+        };
+        println!("# those that saw a huge page leave: us at_ms resident_fell_MiB off_cpu_us");
+        self.over.iter().filter(|o| o.2 >= huge as isize / 2).for_each(line);
+        self.over.sort_unstable();
+        println!("# slowest:");
+        self.over.iter().rev().take(16).for_each(line);
+        self.over.sort_unstable_by_key(|o| o.0.saturating_sub(o.3));
+        println!("# slowest on the CPU:");
+        self.over.iter().rev().take(16).for_each(line);
+    }
+}
+
+/// `total` bytes of `slot`-byte blocks, written once and freed last to first, so that what stays
+/// parked in caches is the region's lowest; then requests in a class of their own.
+///
+/// `clock`: blocks of 8 KiB allocated and freed in swings past their caches, for 16 s, which keeps
+/// heartbeats running through the intervals the frontier makes the pass wait. `grow`: the same
+/// blocks kept and written, 256 MiB of them, which pays for growth over the cap at once. `rush`:
+/// `grow` unwritten, so that growth outruns a thread paying for it. `large`: blocks of 64 MiB
+/// unwritten, each of which owes more than a thread's limit in one carve.
+fn step(cpu: usize, slot: usize, total: usize, mode: &str, thread: &str) {
+    if thread == "bg" {
+        Cralloc::start_background().expect("a thread for the allocator");
+    }
+    pin(cpu);
+    let huge = page() * page() / 8;
+    println!("# step: CPU {cpu}, {slot}-byte slots, {} MiB, {mode}, {thread}", total / MIB);
+    println!("# free blocks by order: {}", free_blocks());
+    let layout = Layout::from_size_align(slot, slot.min(8)).unwrap();
+    let count = total / slot;
+    // The pointers lie outside the heap: on the heap they would be a class as large as this one.
+    let len = (count + 1) * size_of::<*mut u8>();
+    const PROT_RW: i32 = 3;
+    const PRIVATE_ANON: i32 = 0x22;
+    // SAFETY: a new private mapping of `len` bytes, which nothing else knows of.
+    let list = unsafe { mmap(std::ptr::null_mut(), len, PROT_RW, PRIVATE_ANON, -1, 0) };
+    assert!(list as isize != -1, "mmap");
+    let list = list.cast::<*mut u8>();
+    let started = Instant::now();
+    for i in 0..count {
+        // SAFETY: the layout's size is not zero, and `i` is inside the mapping.
+        unsafe {
+            let block = HEAP.alloc(layout);
+            assert!(!block.is_null());
+            block.write_volatile(1);
+            list.add(i).write(block);
+        }
+    }
+    let carved = seen().regions.iter().find(|r| r.0 == slot).map_or((0, None), |r| (r.1, r.2));
+    println!(
+        "# carved in {:?} to {:.1} MiB, {:.1} MiB into its huge page; huge from {:?} MiB; anon huge {:.1} MiB, RSS {:.1} MiB",
+        started.elapsed(),
+        mib(carved.0),
+        mib(carved.0 % huge),
+        carved.1.map(|f| f / MIB),
+        mib(anon_huge()),
+        mib(rss())
+    );
+    let started = Instant::now();
+    for i in (0..count).rev() {
+        // SAFETY: allocated above with this layout, and `i` is inside the mapping.
+        unsafe { HEAP.dealloc(list.add(i).read(), layout) };
+    }
+    // SAFETY: the mapping made above, not used again.
+    unsafe { munmap(list.cast(), len) };
+    println!(
+        "# freed in {:?}: retained {:.1} MiB, RSS {:.1} MiB; threads {}",
+        started.elapsed(),
+        mib(seen().retained),
+        mib(rss()),
+        std::fs::read_dir("/proc/self/task").unwrap().count()
+    );
+
+    let block = Layout::from_size_align(8 * KIB, 8).unwrap();
+    let mut live = Vec::with_capacity(1 << 16);
+    let mut times = Times::new();
+    match mode {
+        "clock" => {
+            let mut held = [std::ptr::null_mut(); 256];
+            while times.start.elapsed() < Duration::from_secs(16) {
+                for p in &mut held {
+                    // SAFETY: the layout's size is not zero.
+                    *p = times.time(|| unsafe { HEAP.alloc(block) });
+                }
+                for &p in held.iter().rev() {
+                    // SAFETY: allocated just above with this layout.
+                    times.time(|| unsafe { HEAP.dealloc(p, block) });
+                }
+            }
+        }
+        "grow" | "rush" => {
+            for _ in 0..256 * MIB / block.size() {
+                // SAFETY: the layout's size is not zero.
+                let p = times.time(|| unsafe { HEAP.alloc(block) });
+                if mode == "grow" {
+                    // SAFETY: the block is this thread's, and at least a byte.
+                    unsafe { p.write_volatile(1) };
+                }
+                live.push(p);
+            }
+        }
+        "large" => {
+            let large = Layout::from_size_align(64 * MIB, 8).unwrap();
+            for _ in 0..64 {
+                // SAFETY: the layout's size is not zero.
+                live.push(times.time(|| unsafe { HEAP.alloc(large) }));
+            }
+        }
+        _ => panic!("no mode {mode}"),
+    }
+    times.report(huge);
+    println!(
+        "# at the end: retained {:.1} MiB, RSS {:.1} MiB, anon huge {:.1} MiB",
+        mib(seen().retained),
+        mib(rss()),
+        mib(anon_huge())
+    );
+    std::hint::black_box(&live);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).map(String::as_str);
@@ -408,9 +621,16 @@ fn main() {
             arg(2).map_or(8, |c| c.parse().unwrap()),
             arg(3).map_or(768, |c| c.parse().unwrap()) * MIB,
         ),
+        Some("step") => step(
+            arg(2).unwrap().parse().unwrap(),
+            arg(3).unwrap().parse().unwrap(),
+            arg(4).unwrap().parse::<usize>().unwrap() * MIB,
+            arg(5).unwrap(),
+            arg(6).unwrap(),
+        ),
         _ => {
             eprintln!(
-                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n] | request CPU [MiB]"
+                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n] | request CPU [MiB] | step CPU SLOT MiB clock|grow|rush|large single|bg"
             );
             std::process::exit(2);
         }
