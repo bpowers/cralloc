@@ -49,6 +49,28 @@ theorem read_writeW_self64 (m : Mem) (a : Addr) (v : BitVec 64) :
 /-- The 8-byte region at `a` holds `a`'s word. -/
 theorem contains8 (a : Addr) : (⟨a, 8⟩ : Region).Contains a 8 := Region.contains_self a 8
 
+theorem testBit_4088 (i : Nat) : (4088 : Nat).testBit i = decide (3 ≤ i ∧ i < 12) := by
+  by_cases h : i < 12
+  · have : ∀ j < 12, (4088 : Nat).testBit j = decide (3 ≤ j ∧ j < 12) := by decide
+    exact this i h
+  · rw [Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (by decide : 4088 < 2 ^ 12)
+      (Nat.pow_le_pow_right (by decide) (by omega)))]
+    simp [h]
+
+/-- A number's bits of 4088: it rounded down to a multiple of 8, below 4096. -/
+theorem and_4088 (x : Nat) : x &&& 4088 = 8 * (x % 4096 / 8) := by
+  have h : 8 * (x % 4096 / 8) = (x % 2 ^ 12) >>> 3 <<< 3 := by
+    rw [Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow]; omega
+  rw [h]
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_and, testBit_4088, Nat.testBit_shiftLeft, Nat.testBit_shiftRight,
+    Nat.testBit_mod_two_pow]
+  by_cases h3 : 3 ≤ i
+  · rw [show 3 + (i - 3) = i by omega]
+    by_cases h12 : i < 12 <;> simp [h3, h12]
+  · simp [h3]
+
 /-- Two words written, in two regions. -/
 theorem frame_two (m : Mem) (a b : Addr) (v w : BitVec 64) :
     Frame [⟨a, 8⟩, ⟨b, 8⟩] m ((m.writeW a v).writeW b w) :=

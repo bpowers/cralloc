@@ -19,32 +19,6 @@ namespace VG.Proof.Slab.X86_64.Cpu
 
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
-/-! ## The precondition, unfolded -/
-
-theorem pre_iff {M : ISA} (A : Abi M) {s : M.State} {vals : M.State → List (BitVec 64)}
-    (hv : A.args ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals)
-    (hb : Sig.bufs cpuSig.params (vals s) = [])
-    (ha : A.argArea ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) s = []) :
-    (cpuContract A).pre s ↔
-      A.wf ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) 0 s ∧
-      A.rd s = ((cpuRegions A s).filter (!·.2)).map (·.1) ∧
-      A.wr s = ((cpuRegions A s).filter (·.2)).map (·.1) ∧
-      (∀ x ∈ cpuRegions A s, x.1.base.toNat + x.1.len ≤ 2 ^ A.ptrBits) ∧
-      (∀ x ∈ cpuRegions A s, ∀ r ∈ A.reserved 0 s, x.1.Disjoint r) ∧
-      A.tp.isSome ∧ A.sym.isSome := by
-  simp only [cpuContract, Sig.contract, Abi.withExtra, hv, hb, ha, List.map_nil, List.append_nil,
-    List.filter_nil, List.Pairwise.nil, List.not_mem_nil, false_implies, implies_true, true_and,
-    Curry.apply_const]
-  constructor
-  · rintro ⟨⟨hwf, hd1, hd2, hnw, -, hres, -, -⟩, hrd, hwr, hpre⟩
-    exact ⟨hwf, Proof.Slab.take_drop_eq hrd hd1, Proof.Slab.take_drop_eq hwr hd2, hnw, hres, hpre⟩
-  · rintro ⟨hwf, hrd, hwr, hnw, hres, hpre⟩
-    have hp : (cpuRegions A s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) := by
-      simp [cpuRegions]
-    simp only [hrd, hwr, Nat.sub_self, List.take_zero, List.drop_zero, List.not_mem_nil,
-      false_implies, implies_true, and_true, true_and]
-    exact ⟨⟨hwf, hnw, hp, hres⟩, hpre⟩
-
 theorem hv : abi.args ((cpuSig.words 64).map (·.bits 64)) = some fun _ => [] := rfl
 
 /-! ## The run -/
@@ -83,7 +57,7 @@ theorem hvA : A.args ((cpuSig.words A.ptrBits).map (·.bits A.ptrBits)) = some f
   rw [hA.args, hA.ptrBits]; exact hv
 
 theorem rd_of (hs : (cpuContract A).pre s) : s.rd = [⟨s.syms RS, 8⟩, ⟨area s + 4, 4⟩] := by
-  have h := ((pre_iff A (hvA hA) rfl (by rw [hA.argArea, hA.ptrBits]; rfl)).mp hs).2.1
+  have h := ((cpu_pre_iff A (hvA hA) rfl (by rw [hA.argArea, hA.ptrBits]; rfl)).mp hs).2.1
   rw [hA.rd] at h
   rw [h]
   simp [cpuRegions, view_rsVar hA, view_cpuField hA]
@@ -184,7 +158,7 @@ theorem pre_wit {A : Abi isa} (hA : X86 A)
     (hres : ((cpuRegions A wit).all fun x => (A.reserved 0 wit).all fun q => Region.sep x.1 q) = true)
     (hnw : ((cpuRegions A wit).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true) :
     (cpuContract A).pre wit := by
-  refine (pre_iff A (hvA hA) rfl (by rw [hA.argArea, hA.ptrBits]; rfl)).mpr
+  refine (cpu_pre_iff A (hvA hA) rfl (by rw [hA.argArea, hA.ptrBits]; rfl)).mpr
     ⟨by rw [hA.wf, hA.ptrBits]; simp [abi, cpuSig, Sig.words], by rw [hA.rd]; exact hrd,
       by rw [hA.wr]; simp [cpuRegions, wit], by rw [hA.ptrBits]; exact nowrap_of_check hnw,
       fun x hx q hq => ?_, by rw [hA.tp]; rfl, by rw [hA.sym]; rfl⟩

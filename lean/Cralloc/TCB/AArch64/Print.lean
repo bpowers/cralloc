@@ -221,6 +221,59 @@ def Instr.unencodable (i : Instr) : Option String :=
   | .adrp d t | .addLo12 d _ t => check t.ok s!"the address {repr t} into {d.x}"
   | _ => none
 
+/-! ## What a restartable sequence may hold
+
+`--fix-cortex-a53-843419`, which rustc passes on every AArch64 link, works around
+Cortex-A53 erratum 843419: where an `adrp` lands at page offset 0xff8 or 0xffc and a load or
+store follows, then within one more instruction a load or store through its register with
+an unsigned immediate, the linker puts that last instruction in a stub out of line and
+branches to it. In a sequence's body the stub is outside the range an abort covers, so a
+preemption there does not abort it. Rather than recognize the pattern and its variants,
+which depend on where the function lands, a body has no `adrp` at all, and nothing else a
+linker writes: what it needs is formed in the setup, where a retry keeps the registers. An
+`adrp` at the end of the setup could still reach into the sequence, so none is among its
+last `moveReach` instructions. -/
+
+/-- A memory operand whose offset the linker writes. -/
+def MemOp.linked (m : MemOp) : Bool :=
+  match m.off with
+  | .lo12 _ => true
+  | _ => false
+
+/-- A memory operand whose immediate is not a multiple of the access's size. Through a register, an
+address's alignment is what the proof of the routine says it is. -/
+def MemOp.misaligned (wd : Width) (m : MemOp) : Bool :=
+  match m.off with
+  | .imm d => d % (wd.bytes : Int) != 0
+  | _ => false
+
+/-- Why an instruction may not be a step of a sequence's body, or `none`. -/
+def Instr.notInBody : Instr → Option String
+  | .adrp .. | .addLo12 .. => some "an instruction the linker writes, which it may also move"
+  | .movGot .. => some "`movGot`, one step of the model and two instructions"
+  | .stpz .. => some "`stp`, two stores in one step of the model"
+  | .ldrWord .. => some "a read of the word after its descriptor, which is for its setup"
+  | .str wd _ m =>
+    if m.linked then some "a store whose offset the linker writes"
+    else if m.misaligned wd then some "a misaligned store, which may not be one access"
+    else none
+  | .ldr _ _ m => if m.linked then some "a load whose offset the linker writes" else none
+  | _ => none
+
+/-- Whether an instruction accesses memory another thread can change. `ldrWord` and `movGot` read
+words no program writes (`TCB/AArch64/Isa.lean`). -/
+def Instr.accessesMemory : Instr → Bool
+  | .ldr .. | .str .. | .stpz .. => true
+  | .add .. | .sub .. | .and .. | .orr .. | .mov .. | .cmp .. | .tst .. | .lsl .. | .lsr ..
+  | .lslv .. | .lsrv .. | .mul .. | .umulh .. | .adrp .. | .addLo12 .. | .mrsTp _ | .ldrWord ..
+  | .movGot .. => false
+
+/-- Whether an instruction names the descriptor by its label. -/
+def Instr.namesDesc : Instr → Bool
+  | .adrp _ .desc | .addLo12 _ _ .desc => true
+  | .ldr _ _ { off := .lo12 .desc, .. } | .str _ _ { off := .lo12 .desc, .. } => true
+  | _ => false
+
 def printer : Printer isa where
   instr := Instr.lines
   branch := Cond.branch
@@ -258,5 +311,14 @@ def printer : Printer isa where
   coldOpen := [".subsection 1"]
   coldClose := [".subsection 0"]
   descWord | .ldrWord _ _ n => some n | _ => none
+  bodyRefuses := Instr.notInBody
+  accessesMemory := Instr.accessesMemory
+  namesDesc := Instr.namesDesc
+  /- An abort returns to the arm alone, so that a retry keeps what the setup formed. -/
+  armOneStore := true
+  /- The erratum's last instruction is at most three after the `adrp`, and `movGot` starts with
+  one. -/
+  movesAfter | .adrp .. | .movGot .. => true | _ => false
+  moveReach := 3
 
 end VG.AArch64

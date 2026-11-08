@@ -11,9 +11,12 @@ target, the code and its proof, the stack it uses, the constant tables it
 reads, the CPU features it needs, the cargo feature that selects it, and any
 notes on it and the suffix of its name. Everything else comes from the `Api` (`Spec/`): the Rust module, name,
 signature and documentation, `writeArgs`, and the contract on the target,
-which the proof is of. So of a registration, a reviewer reads `suffix`,
-`notes` and `features` (which the emitter checks against the code); the
-kernel checks the rest.
+which the proof is of. So of a registration, a reviewer reads which `Api` and
+which `Target` it names, and `suffix`, `notes`, `cfg` and `features` (which the
+emitter checks against the code). The audit has it that those names are the only
+choices: nothing outside `TCB/` builds a `Target`, or an `ISA`, `Printer` or `Abi` to
+make one of, or an `Artifact`, and nothing outside `Spec/` an `Api` (`VG.builtOutside`).
+The kernel checks the rest.
 -/
 
 @[expose] public section
@@ -65,7 +68,7 @@ structure Registration (api : Api) (target : Target) where
         api.writeArgs stack x := by
     of_sig
   /-- `Artifact.spSafe`. -/
-  spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
+  spSafe : (Code.seq (.block setup) code).all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
   /-- `Artifact.cfg`. -/

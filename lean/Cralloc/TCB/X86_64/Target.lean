@@ -212,7 +212,6 @@ def ownRseqArea : OwnArea where
     ".quad cralloc_rseq_area@tpoff",
     ".popsection"]
   consts := [
-    ("RSEQ_SIGNATURE", .u32, rseqSignature),
     ("RSEQ_AREA_LEN", .usize, ownAreaLen),
     ("RSEQ_AREA_ALIGN", .usize, ownAreaAlign),
     ("RSEQ_AREA_PAGE_OFFSET", .usize, ownAreaPageOffset),
@@ -266,6 +265,7 @@ abbrev target : Target where
   armed := armed
   rely := rely
   ownArea := some ownRseqArea
+  consts := [("RSEQ_SIGNATURE_X86_64", .u32, rseqSignature)]
 
 /-- The inline target: the same model, printer and argument registers, with
 the obligations of `asm!` in place of a call's and the red zone reserved

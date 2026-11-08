@@ -177,6 +177,30 @@ structure Printer (M : ISA) where
   routine's descriptor, if it is such a load (`Rust.checkDescWord`). The printer
   places the word there (`Printer.rseqLines`). -/
   descWord : M.Instr → Option String := fun _ => none
+  /-- Why an instruction may not be in a restartable sequence's arm or a step of its
+  body, if so (`Rust.checkRseq`). The model has one state before each step, where an
+  abort may come, and the range of addresses it covers is the sequence's as the assembler
+  laid it out. So a step must be one instruction that stays where it was printed, with at
+  most one store, which a misaligned one may not be. -/
+  bodyRefuses : M.Instr → Option String := fun _ => none
+  /-- Whether an instruction reads or writes memory another thread can change, and so may
+  not run outside a restartable sequence, after its commit or in an exit's code
+  (`Rust.checkRseq`): nothing there stops another thread running first, which `Exec` does
+  not model. A word the dynamic linker fills before any code runs is not such memory. -/
+  accessesMemory : M.Instr → Bool := fun _ => true
+  /-- Whether an instruction names the routine's descriptor by its label, `3f`, which is
+  this routine's only ahead of the descriptor (`Printer.rseqLines`); anywhere else it is
+  the next one the assembler sees (`Rust.checkRseq`). -/
+  namesDesc : M.Instr → Bool := fun _ => false
+  /-- Whether a sequence's arm must be exactly one store (`Rust.checkRseq`): on a target
+  whose abort returns to it alone (`Artifact.setup`), so that nothing is read there,
+  outside the range an abort covers, and then relied on. -/
+  armOneStore : Bool := false
+  /-- Whether, after an instruction, a linker may move a later one out of line, up to
+  `moveReach` instructions on. Such an instruction may not be so near a sequence that
+  what moves is in it (`Rust.checkRseq`). -/
+  movesAfter : M.Instr → Bool := fun _ => false
+  moveReach : Nat := 0
   /-- Text that, in a line of a function, means it may move the stack pointer
   or the return address, so that it gets no unwind information
   (`Rust.unwindLines`). -/

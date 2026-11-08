@@ -36,6 +36,10 @@ found (`scripts/witnesses/`), and checks that the check rejects each:
   emitter audits in its own process (`Emit.lean`), so it must still report
   the axiom.
 
+And it adds a registration file that brings its own target, printer, `Api` and
+artifact (`FORGED`), whose proofs all go through and which would emit other
+code than was proven, and checks that the audit refuses each.
+
 Run it from anywhere after `lake build`: it rebuilds the few modules of the
 self-test that the edits change, and the next `lake build` rebuilds them from
 the restored files.
@@ -85,6 +89,53 @@ theorem vg_bad_thm : False := vg_bad
 end VG.Proof.Selftest.AuditPrivate
 """
 
+# A registration of the self-test's proved `add`, with a printer that writes `mov x0, #0` for it.
+FORGED = LEAN / "Cralloc" / "Artifacts" / "Selftest" / "AuditForged.lean"
+FORGED_NS = "VG.Artifacts.Selftest.AuditForged"
+FORGED_TEXT = f"""module
+
+public import Cralloc.Proof.Selftest.AArch64
+public import Cralloc.Proof.Framework.Registration
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace {FORGED_NS}
+
+def forgedPrinter : Printer VG.AArch64.isa :=
+  {{ VG.AArch64.printer with instr := fun _ => [.text "mov x0, #0"] }}
+
+abbrev forgedTarget : Target := {{ VG.AArch64.target with printer := forgedPrinter }}
+
+def forgedApi : Api := {{ Spec.Selftest.addApi with name := "vg_forged_add" }}
+
+def artifacts : List Artifact := [
+  forgedApi.artifact forgedTarget {{
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness }},
+  {{ Spec.Selftest.addApi with
+    name := "vg_forged_direct"
+    target := VG.AArch64.target
+    doc := Spec.Selftest.addApi.summary
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness }}]
+
+end {FORGED_NS}
+"""
+
+# What the audit must say of it: each definition, and what only the trusted files may build.
+FORGED_REFUSALS = [(f"{FORGED_NS}.forgedPrinter", "VG.Printer.mk"),
+                   (f"{FORGED_NS}.forgedTarget", "VG.Target.mk"),
+                   (f"{FORGED_NS}.forgedApi", "VG.Api.mk"),
+                   (f"{FORGED_NS}.artifacts", "VG.Artifact.mk")]
+
 
 def is_module(text: str) -> bool:
     return any(l.strip() == "module" for l in text.split("\n")[:5])
@@ -128,7 +179,8 @@ def inject_private_import(text: str) -> str:
 # Each audit command, and an argument to give it in the scratch module.
 AUDITS = [("#assert_standard_axioms", "VG.standardAxioms"),
           ("#assert_no_compiler_overrides", "VG.standardAxioms"),
-          ("#assert_spec_origin", "")]
+          ("#assert_spec_origin", ""),
+          ("#assert_built_inside", "")]
 
 
 def audits_refused(tmp: str) -> bool:
@@ -149,8 +201,8 @@ def audits_refused(tmp: str) -> bool:
     return ok
 
 
-def emit_check(edits: dict, added: pathlib.Path) -> str | None:
-    """Writes `edits` (file: new text) and `added` (with `PRIVATE_TEXT`), runs
+def emit_check(edits: dict, added: pathlib.Path, added_text: str = PRIVATE_TEXT) -> str | None:
+    """Writes `edits` (file: new text) and `added` (with `added_text`), runs
     `Emit.lean --check`, restores the files and deletes `added` (and its
     build), and returns the output if it failed, else `None`."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -158,7 +210,7 @@ def emit_check(edits: dict, added: pathlib.Path) -> str | None:
         for p, copy in saved.items():
             shutil.copy2(p, copy)
         try:
-            added.write_text(PRIVATE_TEXT)
+            added.write_text(added_text)
             for p, text in edits.items():
                 p.write_text(text)
             r = subprocess.run(["lake", "env", "lean", "--run", "Emit.lean", "--check"],
@@ -194,6 +246,21 @@ def rejected(out: str | None) -> bool:
     return ok
 
 
+def forged_registration() -> bool:
+    """Whether the audit refuses the registration file `FORGED`, for each thing it builds."""
+    out = emit_check({}, FORGED, FORGED_TEXT) or ""
+    ok = True
+    for name, ctor in FORGED_REFUSALS:
+        if f"`{name}` builds a `{ctor}`" in out:
+            print(f"the audit rejects `{ctor}` outside the trusted files: `{name}`")
+        else:
+            print(f"Emit.lean --check did not reject `{name}`, which builds a `{ctor}`", file=sys.stderr)
+            ok = False
+    if not ok:
+        print(out, file=sys.stderr)
+    return ok
+
+
 WITNESSES = LEAN / "scripts" / "witnesses"
 
 
@@ -226,8 +293,9 @@ def main() -> int:
     for f in (MODULE, PROOF):
         if not is_module(f.read_text()):
             raise SystemExit(f"{f} is not a module: the test needs one")
-    if PRIVATE.exists():
-        raise SystemExit(f"{PRIVATE} exists: the test adds it")
+    for f in (PRIVATE, FORGED):
+        if f.exists():
+            raise SystemExit(f"{f} exists: the test adds it")
     with tempfile.TemporaryDirectory() as tmp:
         refused = audits_refused(tmp)
     if refused:
@@ -238,11 +306,13 @@ def main() -> int:
                     "leanchecker found a problem")
     hijack = forged("audit_macro_hijack", ["lake", "env", "lean", "--run", "Emit.lean", "--check"],
                     "non-standard axiom: VG.Proof.Selftest.X86_64.vg_helper")
+    built = forged_registration()
     if (subprocess.run(["git", "diff", "--quiet", "--", str(MODULE), str(PROOF)]).returncode != 0
-            or PRIVATE.exists()):
-        print(f"{MODULE} or {PROOF} was not restored, or {PRIVATE} not deleted", file=sys.stderr)
+            or PRIVATE.exists() or FORGED.exists()):
+        print(f"{MODULE} or {PROOF} was not restored, or {PRIVATE} or {FORGED} not deleted",
+              file=sys.stderr)
         return 1
-    return 0 if rejected(out) and refused and kernel and hijack else 1
+    return 0 if rejected(out) and refused and kernel and hijack and built else 1
 
 
 if __name__ == "__main__":

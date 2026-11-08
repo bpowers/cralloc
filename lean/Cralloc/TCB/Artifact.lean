@@ -118,6 +118,9 @@ structure Target where
   /-- The rseq area the crate defines for a C library that registers none,
   if the target has one (`OwnArea`). -/
   ownArea : Option OwnArea := none
+  /-- Constants of the target's assembly that Rust code needs, emitted with the
+  specification's (`constants.rs`), each with a name no other target's has. -/
+  consts : List (String × IntTy × Nat) := []
 
 /-- The specification of one function. -/
 structure Contract (M : ISA) where
@@ -303,7 +306,9 @@ def Sig.layoutNote {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) : List S
 `s` and not aborted, while it is inside the sequence: from before its first
 step to before its commit, its last, and not after an exit is taken (which
 leaves the sequence) or after a step faults. These are the states in which
-the operating system may abort the sequence. -/
+the operating system may abort the sequence. A state before each step is all of
+them if each step is one instruction inside the sequence's range, which
+`Rust.checkRseq` requires of what the model has as one (`Printer.bodyRefuses`). -/
 def bodyPrefixes (M : ISA) : List (Step M.Instr M.Cond) → M.State → List M.State
   | [], _ => []
   | .instr i :: rest, s => s :: (match M.exec i s with
@@ -316,13 +321,14 @@ def bodyPrefixes (M : ISA) : List (Step M.Instr M.Cond) → M.State → List M.S
 /-- The states, of a run of `c` from `s`, in which a restartable sequence may
 be aborted: for `rseq arm body`, those of its body after `arm`
 (`bodyPrefixes`). The emitter allows a sequence only as the whole of a
-function's code, or followed by a `jump` (`Rust.checkRseq`), so there are no
-others. -/
+function's code, or followed by straight-line code with no memory access
+(`Rust.checkRseq`), so there are no others. -/
 def Code.abortStates (M : ISA) : Prog M → M.State → List M.State
   | .rseq arm body, s => match execBlock M arm s with
     | some s₁ => bodyPrefixes M body s₁
     | none => []
-  -- The code after the commit is outside the sequence: never aborted.
+  -- The code after the commit is outside the sequence: never aborted. It may be
+  -- preempted, which only its registers need survive (`Rust.tailCheck`).
   | .seq (.rseq arm body) _, s => match execBlock M arm s with
     | some s₁ => bodyPrefixes M body s₁
     | none => []
@@ -373,8 +379,9 @@ state the thread may resume in after the abort (`Target.rely`,
 the arm, the first instruction of `c` (`Rust.checkRseq`), so that is a
 run of `c` from the new state: a retry, which the first conjunct
 of `Verified` covers (`Restarts`, `Verified.restarts`). True of code without
-a sequence. A sequence followed by code (a `jump`) is checked the same way:
-the code after it runs outside the sequence and is never aborted. -/
+a sequence. A sequence followed by code is checked the same way: the code after
+it runs outside the sequence and is never aborted, and touches only registers
+(`Rust.tailCheck`). -/
 def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) : Prop :=
   match c with
   | .rseq arm _ =>
@@ -551,10 +558,11 @@ structure Api where
   retNonzero : Bool := false
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
-`notes`, then its `# Safety` section. -/
+`notes`, then its `# Safety` section, if it has anything to say there. -/
 def Api.doc (api : Api) (notes : List String := []) : String :=
-  api.summary ++ String.join (notes.map ("\n\n" ++ ·)) ++ "\n\n# Safety\n\n" ++
-    "\n".intercalate (api.safety.map ("* " ++ ·))
+  api.summary ++ String.join (notes.map ("\n\n" ++ ·)) ++
+    if api.safety.isEmpty then "" else
+      "\n\n# Safety\n\n" ++ "\n".intercalate (api.safety.map ("* " ++ ·))
 
 /-- `s'` holds the arguments of a function of signature `sig` that `s`
 holds, where the calling convention `A` passes them. -/
@@ -667,10 +675,11 @@ structure Artifact where
     first | exact True.intro | exact rfl
   /-- The code changes the stack pointer only by calls and returns and by
   the pushes and pops of frames, which are nested: no other instruction of
-  it, or of the functions it calls, writes it. So a call instruction or a
-  push only ever stores below the stack pointer on entry, where no Rust
-  object lies. -/
-  spSafe : code.all (fun i => !target.isa.writesSp i) = true := by decide +kernel
+  its setup, of it, or of the functions it calls, writes it. So a call
+  instruction or a push only ever stores below the stack pointer on entry,
+  where no Rust object lies. -/
+  spSafe : (Code.seq (.block setup) code).all (fun i => !target.isa.writesSp i) = true := by
+    decide +kernel
   /-- The CPU features beyond the target's baseline ISA that the code needs,
   by their Rust `target_feature` names: exactly those its instructions, and
   those of the functions it calls, require (`ISA.requires`). The emitter
