@@ -321,6 +321,12 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   cannot separate (3 to 10 of 15). This noise only adds, so a job's tail is its quietest run, and
   ranking tails takes a session with the machine otherwise idle. The log needs no root here:
   `perf record -C 2-9 --switch-events -e dummy`, with `perf_event_paranoid` at -1.
+- **`orders axum` and mini-redis have a tail of about 2 ms that is not this noise.** It shows in every
+  run under every allocator. In one logged run of `orders axum` at its fixed rate, the server has one
+  or two CPUs busy in 30% of milliseconds and three or four in the rest, with p99 1.8 ms; at 30% load
+  one CPU suffices and p99 is 26 us, and at saturation p99 is 368 us. So a backlog forms and clears
+  while its workers come and go. That points at the program's scheduling on four workers, which the
+  Ryzen's eight do not show, but no test has isolated it.
 
 ## Reusable techniques
 
