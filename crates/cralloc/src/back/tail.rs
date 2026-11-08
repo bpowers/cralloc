@@ -11,7 +11,7 @@
 //! and then takes the advice off over the huge pages it returned part of, so that khugepaged
 //! does not rebuild them. When claims reach above that boundary again, the background thread
 //! (or a heartbeat where there is none) puts the advice back up to the frontier and
-//! [`TAIL_HEADROOM_HUGE_PAGES`] beyond it. Below the frontier nothing changes.
+//! [`tail_headroom`] beyond it. Below the frontier nothing changes.
 //!
 //! **The word.** Each region has a [`Tail`] word, beside its frontier (`host::Tails`). It
 //! holds the boundary, in huge pages from the region's start (zero: none, the advice is as the
@@ -98,7 +98,7 @@
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
-use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES};
+use super::policy::{TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES, tail_headroom};
 use super::region;
 use super::tree::Host;
 use super::word::Word;
@@ -125,7 +125,7 @@ pub(crate) struct Tail {
 }
 
 /// Bits of a huge-page index in the word: a region of 2^20 huge pages, far more than a 4 GiB
-/// region of 2 MiB huge pages has.
+/// region of huge pages of 2 MiB or more has.
 const UNIT_BITS: u32 = 20;
 const UNIT_MASK: u64 = (1 << UNIT_BITS) - 1;
 const LOW_SHIFT: u32 = UNIT_BITS;
@@ -474,7 +474,7 @@ pub(crate) fn lower_moved<H: Host>(
 
 /// For the background thread, or a heartbeat where there is none: if a claim marked
 /// `region`, puts the advice back on from the boundary up to `frontier` (a page, the region's
-/// aged frontier) and [`TAIL_HEADROOM_HUGE_PAGES`] beyond it, or to the region's end if that
+/// aged frontier) and [`tail_headroom`] beyond it, or to the region's end if that
 /// reaches above `top`, the page past the region's watermark: above the watermark nothing has
 /// been touched, so advice there brings nothing back, and a class growing into fresh memory
 /// faults huge pages again. Clears the mark once the advice is on; a refused call keeps it,
@@ -538,7 +538,7 @@ pub(crate) fn raise_moved<H: Host>(
         give_back(word, marks, mine, next);
         return Moved::NONE;
     }
-    let wanted = frontier.div_ceil(hp) + TAIL_HEADROOM_HUGE_PAGES;
+    let wanted = frontier.div_ceil(hp) + tail_headroom(host.geometry());
     let to = if wanted >= top.div_ceil(hp) {
         end_unit
     } else {
@@ -572,8 +572,9 @@ pub(crate) fn raise_moved<H: Host>(
 /// The free pages of `unit` of `region` still resident, as the walk would return them
 /// (`region::purgeable_unit` page by page), and the words read: the walk's own count, which
 /// decides whether a huge page above the frontier is split (`policy::TAIL_SPLIT_SHARE`). It reads
-/// what a walk of the whole huge page reads: the leaf words of its slots, `2 MiB / size / 64`
-/// of them (32 for 1 KiB slots, 2048 for 16-byte ones), and a clean word for each page.
+/// what a walk of the whole huge page reads: the leaf words of its slots, `huge / size / 64`
+/// of them (for 2 MiB, 32 for 1 KiB slots and 2048 for 16-byte ones), and a clean word for each
+/// page.
 ///
 /// With `trust` false the clean bits are not believed, as in [`look`].
 pub(crate) fn free_resident<H: Host>(
