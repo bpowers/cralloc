@@ -109,10 +109,10 @@ scripts/        The checks: imports, registration files, the audit's negative te
    only bind: no theorems and no tactic proofs but the defaults
    (`scripts/check_registrations.py`).
 5. **Emit**: `Emit.lean` imports the registration files into its own
-   process, audits the lists they define (only the standard axioms, found by
-   walking the declarations; the compiled code it runs is what the kernel
-   checked; `VG.Spec` names come from `Spec/`), and evaluates and renders
-   those same lists. Nothing it audits or emits is elaborated in a file that
+   process, audits the lists they define before any of their code can run (only
+   the standard axioms, found by walking the declarations; no compiler override
+   remains after the build; `VG.Spec` names come from `Spec/`), and evaluates and
+   renders those same lists. Nothing it audits or emits is elaborated in a file that
    imports them, so their syntax cannot change it.
 
 The self-test (`Spec/Selftest*`, `Impl/Selftest/`, `Proof/Selftest/`,
@@ -165,12 +165,35 @@ restart needs cannot be verified. `Verified` is the same for both, about attempt
   which rustc asks of it on every AArch64 link. So the emitter refuses a restartable
   sequence with anything in its body that a linker writes or could move
   (`Rust.checkRseq`), and an `adrp` near enough before it.
+* That no tool rewrites the linked binary. One like BOLT can move code out of a sequence's range,
+  where a preemption does not abort it, and none has been tested on these routines.
 * The argument about memory order. The model is sequential: a run is one thread's, its
   memory accesses in order, and other threads appear only while it is aborted. That the
   routines are right under the processors' weaker orders is argued in
   `docs/research/memory-ordering.md`, not proved here.
 
 Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
+
+## What the audits defend against
+
+Honest mistakes, each of which would let every proof stand and emit something else. Modules of
+Lean's own (`Init`, `Std`, `Lean`) are exempt; every other is audited, whatever it is called. The
+emitter refuses:
+
+* an axiom, `sorry` or `native_decide` in anything an artifact depends on;
+* a declaration the kernel never saw (`debug.skipKernelTC`): `leanchecker` replays every module
+  under `Cralloc`, and the emitter loads no other but Lean's;
+* an override left on what the emitter runs (`implemented_by`, `extern`, `export`), a `csimp`
+  theorem, or an initializer in any module, before any of that module's code can run;
+* a contract or `Api` named as `Spec/`'s and declared elsewhere, and a target, printer, ABI, ISA,
+  artifact or `Api` built outside the files that may.
+
+They do not defend against an author who runs code during `lake build`. A `run_cmd` in a module can
+change what gets compiled, by setting `implemented_by` while a definition compiles and erasing it
+after, and no scan of the text closes that. So the emitter says what it knows, that no override
+remains after the build, and not that the compiled code is what the kernel checked. The real fix,
+comparing every emitted field with what the kernel reduces it to, is a project of its own. The threat
+here is a mistake, not a hostile author in this repository, who could as well edit `TCB/`.
 
 ## Rules
 
@@ -180,8 +203,9 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
   `leanchecker` replays every module through the kernel, which rejects a
   declaration elaborated without it (`debug.skipKernelTC`).
   `scripts/audit_negative.py` checks each of these against forgeries.
-* No initializers (`initialize`, `@[init]`) under `Cralloc/`: the emitter
-  imports the registration files and must run none of their code.
+* No initializers (`initialize`, `@[init]`) under `Cralloc/`: the emitter imports the registration
+  files to run them, and must run none of their code but that. It audits them first, on an import
+  that runs nothing.
 * Never set `maxHeartbeats` or another resource limit: a proof that hits one
   is too slow, so make it faster.
 * Changes to `TCB/` or `Spec/` are trust changes: keep them small, commit them
@@ -189,11 +213,12 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
   model by citing the Intel SDM or the Arm ARM. Never weaken a model or contract
   to make a proof go through.
 * The emitter runs compiled code, so nothing it runs may carry
-  `implemented_by`, `extern` or `export`, and nothing under `Cralloc/` may
+  `implemented_by`, `extern` or `export`, and no module but Lean's may
   declare a `csimp` theorem or an `initialize` (`TCB/Audit.lean`).
 * Only `TCB/` builds a `Target`, `ISA`, `Printer`, `Abi` or `Artifact`, and only `Spec/` an
   `Api`, which the audit checks of every definition (`TCB/Audit.lean`): a registration
   chooses among them, and cannot bring a printer of its own to go with its proof.
+* What an artifact depends on is under `Cralloc/` or is Lean's own (`VG.foreignModules`).
 * A routine whose proof goes through but which would run wrong, because the model is not
   the machine there, goes in `CrallocTest/Forgery/` once the emitter refuses it.
 * Never edit the generated files by hand.

@@ -17,22 +17,25 @@ the allocator compiles them. Run it from `lean/`:
 
 It first builds the registration files and what they import (`lake build`,
 which is quick when nothing changed), so that it never emits from stale
-proofs. Then, in this process, it imports them (`importModules`), audits
-the lists of artifacts they define, and evaluates and emits those same
-lists (`VG.Emit.run`). Nothing it runs is elaborated in an environment that
-imports them, so no syntax they define (a macro rewriting a command, say)
+proofs. Then, in this process, it imports them with no extension loaded, which runs none of
+their code, and audits the lists of artifacts they define; and only then imports them again to
+run them, and evaluates and emits those same lists (`VG.Emit.run`). Nothing it runs is elaborated
+in an environment that imports them, so no syntax they define (a macro rewriting a command, say)
 can change what is audited or emitted. The audits:
 
 * everything the lists depend on uses only Lean's standard axioms
   (`VG.axiomsOf`, which walks the declarations themselves);
-* the compiled code of the lists and of `VG.Emit.run` is what the kernel
-  checked (`VG.compilerOverrides`);
+* no override remains, after the build, on the lists and `VG.Emit.run`, and no module declares an
+  initializer (`VG.compilerOverrides`);
 * every `VG.Spec` definition is declared in `Spec/` (`VG.specOutsideSpec`);
-* every target is built in `TCB/` and every `Api` in `Spec/` (`VG.builtOutside`).
+* every target is built in `TCB/` and every `Api` in `Spec/` (`VG.builtOutside`);
+* every module loaded is Lean's or under `Cralloc` (`VG.foreignModules`).
 
 That each declaration was checked by the kernel at all (and not, say,
 skipped with `debug.skipKernelTC`) is checked separately, by replaying every
-module through the kernel (`leanchecker`, in `scripts/check.sh`).
+module under `Cralloc` through the kernel (`leanchecker`, in `scripts/check.sh`), and so every
+module loaded but Lean's. What this does not defend against is in `README.md`, "What the audits
+defend against".
 -/
 
 open Lean
@@ -45,7 +48,8 @@ def audit (env : Environment) (roots : List Name) : List String :=
   missing.map (s!"unknown constant: {·}") ++
   VG.compilerOverrides env (roots ++ [``VG.Emit.run]) ++
   (VG.specOutsideSpec env).map (fun (n, m) => s!"`{n}` is declared outside `Spec/`, in {m}") ++
-  (VG.builtOutside env).map fun (n, c, m) => s!"`{n}` builds a `{c}` outside what may, in {m}"
+  (VG.builtOutside env).map (fun (n, c, m) => s!"`{n}` builds a `{c}` outside what may, in {m}") ++
+  (VG.foreignModules env).map fun m => s!"`{m}` is loaded, and is neither Lean's nor under `Cralloc`"
 
 /-- The artifact lists `roots`, evaluated in `env`, in order. Each is a
 constant of type `List VG.Artifact` (`registrations` names them, and the
@@ -71,22 +75,24 @@ unsafe def main (args : List String) : IO UInt32 := do
   let code ← build.wait
   unless code == 0 do return code
   initSearchPath (← findSysroot)
-  -- Evaluating the lists needs the imported environment's extensions, whose
-  -- loading runs the imported modules' initializers. No module of this
-  -- project may declare one: `scripts/check_lean_imports.py` refuses the
-  -- syntax, and `audit` (`VG.compilerOverrides`) the declarations.
-  enableInitializersExecution
   let imports := ("Cralloc.TCB.Emit" :: mods).map fun m => ({ module := m.toName } : Import)
-  let env ← importModules imports.toArray {} (loadExts := true)
   let roots := mods.map fun m => (VG.Emit.listOf m).toName
-  let problems := audit env roots
+  -- The audit comes first, on an import with no extension loaded, which runs no code of what it
+  -- imports: an initializer it would refuse must not get to run before it.
+  let plain ← importModules imports.toArray {} (loadExts := false)
+  let problems := audit plain roots
   unless problems.isEmpty do
     for p in problems do IO.eprintln p
     IO.eprintln "the audit failed: nothing was emitted"
     return 1
-  IO.println s!"audited {roots.length} registration files: standard axioms only, the compiled \
-    code is what the kernel checked, every `VG.Spec` definition is from `Spec/`, and every \
-    target and `Api` is built where it may be"
+  IO.println s!"audited {roots.length} registration files: standard axioms only, no compiler \
+    override remains after the build, no initializer, every `VG.Spec` definition is from \
+    `Spec/`, every target and `Api` is built where it may be, and every module loaded is Lean's \
+    or under `Cralloc`"
+  -- Evaluating the lists needs the extensions, whose loading runs the modules' initializers, and
+  -- the audit found none but Lean's.
+  enableInitializersExecution
+  let env ← importModules imports.toArray {} (loadExts := true)
   match evalAll env roots with
   | .ok arts => VG.Emit.run arts args
   | .error e =>

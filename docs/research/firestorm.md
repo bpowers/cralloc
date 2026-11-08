@@ -253,17 +253,117 @@ placement; the RPC job's incumbents differ by less than placement moves them (`b
 | Hash map, 1 M | 272.5 | 275.6 | 284.2 | 320.3 | 309.8 |
 | Churn, 100 k live | 26.4 | 41.9 | 29.5 | 32.0 | 33.1 |
 
-mimalloc leads on JSON by 6.4%, all of it in the drop. There it retires about 30 fewer instructions a
-`free` (82 against 52 on the 8 MiB job, the walk included), and adding six costs 0.74 cycles a `free`,
-one eighth of a cycle each, so that drop is bound by width and the count matters. It is the one place
-in these jobs where it does. It also leads a tree's allocation and free by 7%, and gives back two
-thirds of that in the walk.
+mimalloc leads on JSON by 6.4%, and on a tree's allocation and free by 7%, of which it gives back two
+thirds in the walk ("What the slow paths take" has the first and closes most of the second).
 
 **Rejected: reading the rseq area in a block the compiler can share and hoist.** It takes six
 instructions off a pair and two loads off the way to the pointer, and it helps the loops where width
 binds (churn 18.56 against 19.51, mixed sizes 7.79 against 8.19). On jobs, at one placement, it does
 nothing to find: tree +0.3%, JSON +1.0%, B-tree −1.3%, hash −0.2%, churn +0.8%. And a function holding
 the area across a fiber's move to another thread would arm that thread's sequence.
+
+## What the slow paths take
+
+A job reaches the slow paths by moving more of its heap than the caches hold, and then every object
+goes through the back end once each way. The machine is not why, nor are the atomics. Percent of user
+cycles from one profile of each job, before the change below (`01da3d5`, 2026-11-07):
+
+| Job | Launder | Fill | The rest of the slow paths | Objects laundered |
+|---|---:|---:|---:|---|
+| Tree, depth 20 | 8.4 | 7.2 | 3.0 | 20.9 M of 21.0 M, 99.8% of magazines one run of slots |
+| JSON, 32 MiB | 3.9 | 2.5 | 2.4 | 17.7 M, 73% of them 8-byte, 2% of magazines one run |
+| Hash map, 1 M | 4.1 | 1.8 | 0.6 | 4.8 M, scattered |
+| B-tree map, 1 M | 1.2 | 0.9 | 0.5 | 5.4 M, scattered |
+| boa, the V8 suite | 0.1 | 0.1 | 1.0 | |
+| ruff, 4 threads | 0.1 | 0.0 | 0.1 | |
+
+- **Why a single-threaded tree reaches them.** A tree of 50 MiB against a class's 128 KiB of caches: no
+  magazine it frees can be kept, and none it needs can be found. That is 20,500 exchanges each way, one
+  in 1,022 calls. No constant changes this short of holding the tree. A larger magazine would only
+  thin the exchanges, and all of them together are 2.6% of the job.
+- **A slow path costs what it costs on Zen 5.** By the burst job, a burst that makes two against one that
+  makes none: 325 cycles a slow path at 8 bytes, 400 at 24, 430 at 64, 290 at 1 KiB, three rounds, up
+  to 80 run to run (`3f0875f`), against 271 and 352 at 8 and 64 bytes there. A dense launder here costs
+  about half a Zen 5's.
+- **The atomics are not it.** With every bitmap operation relaxed, which one thread can stand, a tree
+  gains 0.3%, a hash map's drop 2.7 cycles an entry (1.0% of that job, since each slot has its own OR), a
+  B-tree's 2.1 (0.3%), and JSON nothing to find. One thread's compare-and-swaps do not fail.
+  `dmb ish; ldset; dmb ish` costs 6.6 cycles against `ldsetal`'s 22, and with `cas` 7.0 against 21, so a
+  sequentially consistent word is cheaper here with fences. It is worth at most that 1%, and fences may
+  cost more on Neoverse V2, so it is not taken.
+
+**What did pay: a launder that keeps a magazine's order, and a fill with no chain.** Over five placements
+of each job, three rounds each, the mean change and the standard deviation over placements (`53f9b15`):
+
+| Job | Change | |
+|---|---:|---|
+| Tree, depth 20 | **−4.62% ±0.67** | 29.96 to 28.58 cycles a node: drop 12.62 to 11.42, build 12.08 to 11.88 |
+| JSON, 32 MiB | +0.49% ±0.86 | parse, which launders nothing, moves as much as drop |
+| B-tree map, 1 M | +0.30% ±0.43 | |
+| Hash map, 1 M | −0.09% ±0.26 | |
+| Churn, 100 k live | −0.25% ±1.48 | |
+| RPC log, 64 in flight | −0.15% ±0.64 | |
+
+So a tree now leads mimalloc, 28.6 against 29.2.
+
+- **The launder takes a word's slots at once when they step by one slot** (`stretch` in
+  `back/class.rs`). It checks the slot before and that each of the rest is a stride on, four at a time,
+  which takes 2.28 cycles and 14 instructions a slot to 1.3 and 8, a word's own work included. Upward
+  or downward. A batch
+  gives up after two looks in a row that find no stretch, which is why nothing else moves.
+- **A fill's loop had a chain of adds.** One pointer stepping a stride a slot holds the loop to a slot a
+  cycle, however it is unrolled, since the compiler folds an unrolled loop's offsets back into a chain.
+  Two pointers each stepping two strides take it to 0.72. The floor is 0.53: a core here sustains 16
+  bytes of stores a cycle over a magazine's 8 KiB by `str`, `stp` or `stp` of `q` registers alike (0.56,
+  0.55, 0.53), so nothing wider would help.
+- **A profile here piles on `mrs`,** a third of a function's samples or more, and as much in instructions
+  as in cycles, so that is where samples land and not where time goes. A chain beside `mrs` runs at its
+  own speed ("The floor and where the routines stand").
+
+**JSON's lead for mimalloc is its back end, not its `free`.** Cycles a byte from one profile of each,
+whose first three rows add up to the drop phase to within 0.05:
+
+| | cralloc | mimalloc |
+|---|---:|---:|
+| The program's drop and `free` together | 1.67 | 1.63 |
+| Launder | 0.42 | |
+| The rest of the free side's slow path | 0.19 | |
+| `malloc` | 0.68 | 0.80 |
+| Fill | 0.31 | |
+
+The routine is at par, and the job's "30 instructions a `free`" are 25 in the slow path and 5 in the
+routine, whose 33 at a run-time size are 13 to find the word and mask, 7 to arm, 12 of sequence and 1
+to test it. Width does bind that drop, at an eighth of a cycle an instruction, so five fewer would be
+worth 0.6% of the job, and the only ones on offer are a preset result and two `add #0` after `adrp`,
+which cost more to prove than they buy. The launder takes 17.7 M objects at 4.0 cycles each, mostly
+the 8-byte class's interleaved runs: by the samples 40% in the loop and 30% landing from mispredicted
+run ends. Taking those runs a slot at a time gives back what it saves (2.35 against 2.32 a byte).
+
+The parse comes out level, and not by accident of one row: the fill and the kernel's 0.21 cycles a byte
+(1.8% of the job, faults on 16 KiB pages, where 436 MiB of mimalloc's heap is 32 MiB pages) cost what
+the program's own code gains over cralloc's objects, about 0.35.
+
+**`vecgrow` and the B-tree are no longer behind mimalloc.** With the heap's rules in bytes (`be4412d`), five
+rounds at one placement: `vecgrow` of one 256 MiB vector 1.22 cycles an element against 3.16, of 64 vectors
+of 4 MiB 2.42 against 3.20, and a B-tree map 761 cycles an entry against 759. Neither depends on the rest
+of this section.
+
+**The huge-page switch counts huge pages, and they are 32 MiB here.** A class switches after 8, which is
+16 MiB on x86-64 and a 4 KiB kernel on aarch64, and 256 MiB on this 16 KiB kernel, so most classes here
+never switch. Switching after one, 32 MiB, on one placement and three rounds, with the peak from the
+kernel's high-water mark:
+
+| Job | Change | Peak, MiB |
+|---|---:|---|
+| JSON, 32 MiB | −2.3% | 382 and 382, 256 of it huge against 32 |
+| Tree, depth 20 | −1.0% | 52 to 65 |
+| B-tree map, 1 M | +0.2% | 126 to 146 |
+| Hash map, 1 M | +0.3% | 207 and 208 |
+| `vecgrow`, 256 MiB | −1.8%, its rounds spread 2.5% | 261 and 261 |
+
+The rule that set 8 was that the page above the watermark costs at most an eighth of the class, and at
+32 MiB that is what 8 gives, so it is not simply wrong here. Nothing was changed: it would suit this
+kernel only, and the machines this is for have 4 KiB pages.
 
 ## How a load gets a value a store just wrote
 
@@ -326,6 +426,29 @@ load of the first, 2.4 to 3.5 a pass; with the load feeding the store, 6.67 at o
 
 ## Held, not built: keeping the slab's address in a scratch register
 
+**Decided, with Bobby, 2026-11-07: left out.** cralloc builds on stable Rust, and this needs nightly.
+The reasoning that led to it is written down because each step is worth repeating on a new core, and
+because the idea will occur again to anyone who looks at this pair.
+
+1. **Nothing in the instructions sets the cost.** Sixteen variations of the routines cost 12.8 to 13.1
+   a pair at 3.2 instructions a cycle, on a core that can do 8. When selection stops mattering and
+   the core is far from its width, a dependency chain is binding: here two hops of 6 cycles.
+2. **The core can do better, so the limit is not the hardware's.** A thread-local floor runs the same
+   store-then-load at 4.5 a pair. A difference that large between two shapes of one operation is
+   a rule to find, not a cost to accept.
+3. **The rule is about the register, not the address.** The hop is free when the load and the store
+   use one base register with an immediate offset, and nothing writes that register between them. The
+   address staying the same is not enough. Zen 5 does not care which register holds it
+   (`roofline.md`), so this could not be read across.
+4. **So a per-CPU routine pays for what almost never happens.** It writes its base on every call, only
+   because the thread might have moved, and it almost never has.
+5. **So compare, do not write.** Compute the address as before, and leave the register alone if it
+   already holds it. Since the compare makes the value safe whatever it is, the register needs no
+   reservation, only the habit of surviving between calls, which a probe can measure (below).
+
+Step 5 is the whole of the idea, and it may apply elsewhere: a cost that comes from writing a value
+can sometimes be removed by testing that the value is already there.
+
 A routine computes the CPU's slab's address as before, but compares it with what a scratch register
 still holds and loads through that register, which is then not written. Memory safety rests on the
 compare, since the register can hold anything. A CPU number masked by `ubfiz` needs no branch of its
@@ -356,7 +479,11 @@ stable Rust, since `const` operands need a Rust constant and a `match` over the 
 table at run-time sites, so it takes the unstable `is_val_statically_known`. And Neoverse V2 has no
 reported renaming, where it would be three instructions for nothing. A clobbered register sends the
 call through `fix`: 13.05 when that is steady, and 14.13 when it clobbers at random on half the pairs
-(0.46 mispredicts).
+(0.46 mispredicts). It would also be a second proved form of the routines.
+
+**When to look again.** Only if a value known after inlining can reach `asm!` as an immediate on stable
+Rust, and programs shaped like the tree turn out to matter. Measure first whether the cores we care
+about rename at all: `bench/roofline/aarch64` shows it. A rejected form that needs no immediate is below.
 
 **How long a register survives.** A preloaded probe (`bench/roofline/aarch64/stale`) left a sentinel
 in four registers as each `malloc` or `free` returned and checked them at the next call. Percent of
@@ -530,9 +657,9 @@ costs a cycle: a miss's branch is not taken, and the 13.0 above includes the zer
 | GNU ld, not PIE | Yes |
 | `rust-lld`, PIE or not | Yes |
 
-Since the `executable` form links only with `rust-lld` or without PIE, and buys nothing in a pair
-(13.05 against 12.96) and 4 cycles a pair of lone calls, the default form should serve everywhere on
-aarch64.
+The `executable` form links only with `rust-lld` or without PIE and buys nothing in a pair (13.05
+against 12.96), 4 cycles a pair of lone calls, and nothing that resolved on the suite's jobs. So the
+crate has one form on aarch64.
 
 ## The C entry points
 
@@ -673,5 +800,3 @@ safe.
 - **What limits the taken-branch span:** why about 4,600 bytes, and what a call costs with the
   routine and its callers more than 4 KiB apart in the same loop, which the site sweep only
   approaches.
-- **Why mimalloc's `free` is cheaper in JSON's drop,** 1.59 cycles a byte against 2.30, the whole of
-  its lead on that job. The hop is a small part of it ("Whether real jobs feel the hop").

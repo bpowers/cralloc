@@ -51,21 +51,43 @@ inductive CfgAtom
 
 /-- An rseq area that the crate defines and registers itself, on a C library
 that registers none (musl). It is data, not code: nothing about it is
-proved. The routines read the area's offset from the thread pointer from a
-word, as they read glibc's `__rseq_offset`; the area's data defines that
-word, holding the offset as the linker computes it, so what the routines
-assume of the word holds by construction. Registering the area with the
-kernel is the crate's (Rust) business. -/
+proved. A routine finds the area's offset from the thread pointer as the target
+allows: in a word, as it reads glibc's `__rseq_offset`, which the area's data defines,
+holding the offset as the linker computes it, so what the routines assume of the word
+holds by construction; or in its own instructions, where no assembler can write the
+offset as data. Registering the area with the kernel is the crate's (Rust) business. -/
 structure OwnArea where
   /-- Compiled only where any of these holds (as `Artifact.cfg`). -/
   cfg : List CfgAtom
-  /-- The assembler lines that define the area and the word, emitted as one
+  /-- The assembler lines that define the area and any word, emitted as one
   `global_asm!` block in `<target>/area.rs`. -/
   lines : List String
   /-- The constants of its layout, emitted with the specification's
   (`constants.rs`), for the crate to register the area with and assert
   against. -/
   consts : List (String × IntTy × Nat)
+
+/-- The bytes the crate registers: the original `struct rseq`
+(`ORIG_RSEQ_SIZE`), which every kernel with rseq accepts. -/
+def ownAreaLen : Nat := 32
+
+/-- The alignment of the area's section: a page. -/
+def ownAreaAlign : Nat := 4096
+
+/-- Where the area sits in its page: past every slab word a routine stores
+to (the crate asserts it) and below the words the C routines read at page
+offset 1024. -/
+def ownAreaPageOffset : Nat := 768
+
+/-- `cpu_id` before registration: -1, as 32 bits. -/
+def ownAreaUnregistered : Nat := 0xffffffff
+
+/-- The constants of the area's layout, the same on every target. -/
+def ownAreaConsts : List (String × IntTy × Nat) := [
+  ("RSEQ_AREA_LEN", .usize, ownAreaLen),
+  ("RSEQ_AREA_ALIGN", .usize, ownAreaAlign),
+  ("RSEQ_AREA_PAGE_OFFSET", .usize, ownAreaPageOffset),
+  ("RSEQ_CPU_ID_UNREGISTERED", .u32, ownAreaUnregistered)]
 
 /-- A code-generation target: an ISA model, its printer, and its calling convention. -/
 structure Target where
@@ -535,8 +557,9 @@ structure Api where
   summary : String
   /-- The items of the `# Safety` section, but for those `Sig.validDoc` and
   `Sig.layoutDoc` give (what memory each buffer must be valid for, and where
-  it may be). -/
-  safety : List String
+  it may be), under the calling convention of the target it is for: `Api.artifact`
+  gives it that, so that no registration chooses what the section says. -/
+  safety : {M : ISA} → Abi M → List String
   /-- The operands its code names, by name (`Operand`). -/
   operands : List (String × Operand) := []
   /-- The const generic parameters of an inline function, as Rust writes
@@ -557,12 +580,12 @@ structure Api where
   rather than the result (`Rust.inlineFunction`). -/
   retNonzero : Bool := false
 
-/-- The documentation of `api` on a target: its summary, then the paragraphs
-`notes`, then its `# Safety` section, if it has anything to say there. -/
-def Api.doc (api : Api) (notes : List String := []) : String :=
+/-- The documentation of `api` on a target of the calling convention `A`: its summary, then the
+paragraphs `notes`, then its `# Safety` section, if it has anything to say there. -/
+def Api.doc {M : ISA} (api : Api) (A : Abi M) (notes : List String := []) : String :=
   api.summary ++ String.join (notes.map ("\n\n" ++ ·)) ++
-    if api.safety.isEmpty then "" else
-      "\n\n# Safety\n\n" ++ "\n".intercalate (api.safety.map ("* " ++ ·))
+    if (api.safety A).isEmpty then "" else
+      "\n\n# Safety\n\n" ++ "\n".intercalate ((api.safety A).map ("* " ++ ·))
 
 /-- `s'` holds the arguments of a function of signature `sig` that `s`
 holds, where the calling convention `A` passes them. -/
@@ -586,7 +609,9 @@ in registers, which a retry must prove again from the registers the abort kept
 What a run of the whole function adds is `SetupOk`: from every entry state, the
 setup runs to a state where an attempt may start. A postcondition is relative
 to the state its last attempt started in, for a function with or without a
-setup; the setup changes neither memory nor the arguments. -/
+setup; the setup changes neither memory nor the arguments. That it leaves memory as it found it
+says nothing of what other threads wrote meanwhile, which the model of a setup does not have, so
+the emitter also refuses a setup with any store (`Rust.seqShape`). -/
 
 /-- `k'` is the contract of the attempts of a routine with the contract `k`, the
 setup `setup` and the clobbers `cl`. With no setup, `k` itself. With one, `k` with

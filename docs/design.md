@@ -330,7 +330,9 @@ word.
 
 When the class is a compile-time constant, the caller's computation of the two inputs folds to a
 `lea` and a `mov`. An executable can read `__rseq_offset` with one load instead of two, and a cargo
-feature selects that.
+feature selects that. Keeping the slab's address in a scratch register between calls would let an
+Apple core forward the hot word for free, but it needs an unstable compiler feature and helps one kind
+of program, so it is left out (`docs/research/firestorm.md`, "Held, not built").
 
 The hot word is the last thing a call stores, and a load that shares a page offset with a store
 still in flight can be held until the store completes. So nothing a fast path loads on every call

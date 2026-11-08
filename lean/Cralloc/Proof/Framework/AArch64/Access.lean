@@ -85,6 +85,12 @@ theorem ea_lo12 (b : Reg) (t : Rel) :
 /-! ## Pages -/
 
 /-- A page and the low 12 bits make the address. -/
+theorem exec_addAreaHi {σ : State} {d n : Reg} :
+    exec (.addAreaHi d n) σ = some (σ.setReg d (σ.gpr n + page σ.areaOffset)) := rfl
+
+theorem exec_addAreaLo {σ : State} {d n : Reg} :
+    exec (.addAreaLo d n) σ = some (σ.setReg d (σ.gpr n + lo12 σ.areaOffset)) := rfl
+
 theorem page_add_lo12 (a : Addr) : page a + lo12 a = a := by
   apply BitVec.eq_of_toNat_eq
   have := a.isLt
