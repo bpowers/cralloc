@@ -192,7 +192,10 @@ macro_rules! cralloc_a64_c_masks {
 #[macro_export]
 macro_rules! cralloc_a64_c_regions {
     () => {
-        concat!($crate::cralloc_a64_c_masks!(), "add x12, x15, #1, lsl #12\n",)
+        concat!(
+            $crate::cralloc_a64_c_masks!(),
+            "add x12, x15, #1, lsl #12\n",
+        )
     };
 }
 

@@ -66,6 +66,7 @@ module's docstring names its options. The program links without PIE, since `adrp
 
 ```
 cd aarch64/reach && ../../../../scripts/heavy ./check.sh      # about a minute
+./bodies.py ../../../../target/release/libcralloc_preload.so  # no adrp in a sequence, no b out of one
 cd aarch64/stale && cc -O2 -fPIC -shared -ffixed-x18 probe.c -o probe.so -ldl
 LD_PRELOAD=$PWD/probe.so PROGRAM ...                          # the summary goes to stderr
 ```
@@ -85,9 +86,10 @@ RF_CPU=8 ../../../scripts/measure ./compare.sh pair:32 burst:32:32 mixed:1:512 c
 
 Whether real jobs feel the hop, `aarch64/hopjob/`. `variant.py` rewrites the inlined routines:
 `chainK` puts K more cycles on the hop and nothing else, `freeK` puts the same instructions off every
-chain, so that the two are one placement and their difference is what the hop alone costs, and `kept`
-keeps the slab's address in `x18` at the sites whose class the compiler knows. All of it happens in
-a scratch copy of the repository (COPY, outside any checkout), so the checkout stays as it is:
+chain, so that the two are one placement and their difference is what the hop alone costs, `kept`
+keeps the slab's address in `x18` at the sites whose class the compiler knows, and `area` reads the
+rseq area in a block the compiler may hoist. All of it happens in a scratch copy of the repository
+(COPY, outside any checkout), so the checkout stays as it is:
 
 ```
 cd aarch64/hopjob

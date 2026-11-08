@@ -316,10 +316,21 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
 /// arguments that are large alone can still multiply to nothing.
 #[test]
 fn calloc_goes_by_the_whole_product() {
-    for (n, size) in [(1 << 32, 1 << 32), ((1 << 60) + 1, 16), (16, (1 << 60) + 1), (usize::MAX, 2)] {
+    for (n, size) in [
+        (1 << 32, 1 << 32),
+        ((1 << 60) + 1, 16),
+        (16, (1 << 60) + 1),
+        (usize::MAX, 2),
+    ] {
         assert!(calloc(n, size).is_null(), "calloc({n}, {size})");
     }
-    for (n, size) in [(1 << 16, 0), (0, 1 << 16), (usize::MAX, 0), (0, usize::MAX), (1 << 17, 1)] {
+    for (n, size) in [
+        (1 << 16, 0),
+        (0, 1 << 16),
+        (usize::MAX, 0),
+        (0, usize::MAX),
+        (1 << 17, 1),
+    ] {
         let p = calloc(n, size);
         assert!(!p.is_null(), "calloc({n}, {size})");
         release(p);
