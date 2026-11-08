@@ -59,7 +59,10 @@ use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr::{self, NonNull};
 
 /// The page size, for `valloc` and `pvalloc`.
-const PAGE: usize = <LinuxOs as Os>::GEOMETRY.page_size();
+#[inline]
+fn page() -> usize {
+    LinuxOs::geometry().page_size()
+}
 
 /// C's `malloc`.
 #[inline]
@@ -299,13 +302,14 @@ pub extern "C" fn memalign(align: usize, size: usize) -> *mut c_void {
 
 /// The obsolete `valloc`: a page-aligned block.
 pub extern "C" fn valloc(size: usize) -> *mut c_void {
-    or_enomem(allocate(size, PAGE, false))
+    or_enomem(allocate(size, page(), false))
 }
 
 /// The obsolete `pvalloc`: a page-aligned block of whole pages.
 pub extern "C" fn pvalloc(size: usize) -> *mut c_void {
-    match size.checked_next_multiple_of(PAGE) {
-        Some(pages) => or_enomem(allocate(pages, PAGE, false)),
+    let page = page();
+    match size.checked_next_multiple_of(page) {
+        Some(pages) => or_enomem(allocate(pages, page, false)),
         None => {
             errno::set(ENOMEM);
             ptr::null_mut()
@@ -353,11 +357,31 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
     c_int::from(process::collect() > 0)
 }
 
+/// The C symbols of this target's routines.
+#[cfg(target_arch = "x86_64")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_exports_c {
+    () => {
+        $crate::cralloc_exports_c_x86_64!();
+    };
+}
+
+/// The C symbols of this target's routines.
+#[cfg(target_arch = "aarch64")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! cralloc_exports_c {
+    () => {
+        $crate::cralloc_exports_c_aarch64!();
+    };
+}
+
 /// Exports the C interface under its C names (`malloc`, `free` and the rest) from the crate
 /// that invokes it, for a program or shared library that wants cralloc as its C allocator.
 /// Invoke it once per program, at the item level. `malloc`, `free` and `free_sized` are the
-/// generated routines themselves (`front/generated/x86_64/exports.rs`, a copy of each under its C
-/// name), so a call reaches the routine with no jump in between; every other export is a call of
+/// generated routines themselves (`front/generated/x86_64/exports.rs` or its aarch64 counterpart,
+/// a copy of each under its C name), so a call reaches the routine with no jump in between; every other export is a call of
 /// the function of the same name in the crate's hidden `c` module, which inlines into it. What
 /// the functions promise beyond C and POSIX is in that module's documentation and in
 /// `docs/design.md`, "Interfaces".
@@ -375,7 +399,7 @@ macro_rules! export_c_abi {
     () => {
         // `malloc`, `calloc`, `free` and `free_sized`: the generated routines, defined in this
         // crate. Their unsafe code is generated, so its ledger entry is cited here: C-EXPORT-02.
-        $crate::cralloc_exports_c_x86_64!();
+        $crate::cralloc_exports_c!();
 
         const _: () = {
             use ::core::ffi::{c_int, c_void};

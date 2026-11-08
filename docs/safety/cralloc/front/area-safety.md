@@ -19,6 +19,15 @@ musl copies the initialized TLS image into every thread's block and sets the thr
 that a TLS symbol is at the thread pointer plus its `@tpoff` (`__copy_tls`), so
 `thread pointer + __rseq_offset` is the calling thread's area.
 
+On aarch64 the generated data is the area alone (`VG.AArch64.ownRseqArea`,
+`front/generated/aarch64/area.rs`), laid out alike, since no assembler for it can write the offset
+as data. The static thread-local data starts above the thread pointer there, at the 16 bytes the
+ABI keeps rounded up to the data's alignment, and the offset is in two `add`s the linker writes
+(`:tprel_hi12:`, `:tprel_lo12_nc:`; they do not link unless the offset is below 2^24), valid in an
+executable, the only kind of musl program the crate supports. The routines' contracts still name
+the offset as the word `__rseq_offset`: there it is a word of the model alone
+(`lean/Cralloc/TCB/AArch64/Isa.lean`), which no instruction loads.
+
 ## AREA-01: the declarations of `pthread_key_create`, `pthread_key_delete`, `pthread_setspecific`
 
 **Obligations.** The signatures are the C library's.
@@ -100,6 +109,13 @@ Residual: if a thread's first allocator call comes after its destructors' last r
 a detached such thread could die registered. In musl that needs an allocation from the exit path
 after the destructors (`__dl_thread_cleanup` frees a `dlerror` buffer only if the thread made
 one, which needs an allocation first and so a registration and a value earlier).
+
+## AREA-06: `area_offset` on aarch64, in `area`
+
+**Obligations.** None: the generated routine has no safety requirements, as its contract
+(`VG.Spec.Slab.areaOffsetContract`) says: it writes one register and touches no memory.
+
+**Proof.** Lean's. That the value it returns locates the calling thread's area is above.
 
 ## AREA-05: `unregister_at_exit`
 

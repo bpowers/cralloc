@@ -14,8 +14,9 @@
 //! ordinary, and a write to an uncommitted page is caught only later: such a page must still be
 //! zero when it is committed or purged, or the call panics.
 //!
-//! Known limits of the unguarded simulator (every shape under Miri and Kani, and [`Tiny`]
-//! natively), which accepts what Linux would refuse:
+//! Known limits of the unguarded simulator (every shape under Miri and Kani, [`Tiny`] natively,
+//! and natively any shape whose pages are smaller than the host's, as [`Standard`]'s are on a
+//! kernel with 16 KiB pages), which accepts what Linux would refuse:
 //!
 //! - a read of memory that was never committed;
 //! - a write to it that is undone before the page is committed, purged or unmapped;
@@ -43,7 +44,9 @@
 //! - `abort` panics, so a test can observe it.
 //!
 //! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
-//! [`Native`] for large classes, [`Tiny`] for Kani harnesses. Other crates may define their own.
+//! [`Native`] for large classes, [`Tiny`] for Kani harnesses, and [`Kernel4k`], [`Kernel16k`] and
+//! [`Kernel64k`] for the rules of a real kernel at their real size. Other crates may define their
+//! own.
 //!
 //! The simulator takes no locks: every piece of state is an atomic, and racing reservations
 //! claim pages by compare-and-swap.
@@ -75,21 +78,46 @@ pub trait Shape: 'static {
     const GEOMETRY: Geometry;
 }
 
+/// `log2` of the page of the [`Standard`] and [`Native`] shapes: 12, or what
+/// `CRALLOC_SIM_PAGE_SHIFT` said when the crate was built, 14 and 16 being the other pages an
+/// aarch64 kernel may have. Everything else in those shapes scales with it, so their proportions
+/// stay and a test written for them runs at any of the three: their sizes below are at 12.
+const PAGE_SHIFT: u32 = match option_env!("CRALLOC_SIM_PAGE_SHIFT") {
+    Some(shift) => match shift.as_bytes() {
+        [tens, ones] => ((*tens - b'0') * 10 + (*ones - b'0')) as u32,
+        _ => panic!("CRALLOC_SIM_PAGE_SHIFT is two digits"),
+    },
+    None => 12,
+};
+
+/// How many of the pages of 4 KiB that a test's sizes were written for fit a page of the [`Standard`]
+/// and [`Native`] shapes: what a test multiplies its sizes by to keep their proportion to a page.
+#[cfg(test)]
+pub const PAGE_SCALE: usize = 1 << (PAGE_SHIFT - 12);
+
 /// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
 /// (128 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions
 /// (2 MiB at the floor: 255 of the largest magazines, which hold 1,022 objects each, so that
 /// the tests that churn many threads through many classes never run out),
 /// 64 MiB of address space that the host commits only as it is touched.
 ///
-/// The pages are host pages, so natively the simulator's memory is guarded: touching a page the
-/// heap has not committed faults. A page is 1/64 of a region, so the free bitmap of the
+/// On a kernel with 4 KiB pages they are host pages, so natively the simulator's memory is
+/// guarded: touching a page the heap has not committed faults. A page is 1/64 of a region, so the free bitmap of the
 /// smallest class fills a page of its own and can be committed apart from the rest of the
 /// region's metadata. Large classes above 256 KiB do not fit a region; use [`Native`] to test
 /// large classes with many slots.
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 18, 17, 256, 16, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(
+        PAGE_SHIFT,
+        PAGE_SHIFT + 4,
+        PAGE_SHIFT + 6,
+        PAGE_SHIFT + 5,
+        256,
+        16,
+        MagazineSize::MAX,
+    );
 }
 
 /// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of
@@ -100,7 +128,15 @@ impl Shape for Standard {
 pub enum Native {}
 
 impl Shape for Native {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 20, 17, 256, 1, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(
+        PAGE_SHIFT,
+        PAGE_SHIFT + 4,
+        PAGE_SHIFT + 8,
+        PAGE_SHIFT + 5,
+        256,
+        1,
+        MagazineSize::MAX,
+    );
 }
 
 /// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, two object regions,
@@ -116,11 +152,52 @@ impl Shape for Tiny {
     const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
 }
 
+/// The shape of a real kernel with pages of 4 KiB and huge pages of 2 MiB, under a real kernel's
+/// rules: every byte a rule states is the byte it says, so that a test can see the retained cap
+/// act at 64 MiB. Regions of 256 MiB down to the 2 MiB floor, 8 GiB of address space that the
+/// host commits only as it is touched.
+pub enum Kernel4k {}
+
+impl Shape for Kernel4k {
+    const GEOMETRY: Geometry =
+        Geometry::new(12, 21, 28, 21, 32, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
+/// The shape of a real kernel with pages of 16 KiB and huge pages of 32 MiB, as [`Kernel4k`] is
+/// of its own: regions of 1 GiB, which hold enough huge pages for a class to reach the huge-page
+/// threshold of 256 MiB, down to the 2 MiB floor, where a huge page is larger than a region. A
+/// reservation made in less simulated memory ([`SimOs::with_capacity`]) gets such regions.
+pub enum Kernel16k {}
+
+impl Shape for Kernel16k {
+    const GEOMETRY: Geometry =
+        Geometry::new(14, 25, 30, 21, 32, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
+/// The shape of a real kernel with pages of 64 KiB and huge pages of 512 MiB, as [`Kernel4k`] is
+/// of its own: regions of 1 GiB, which a huge page fits in but which do not use one, since it is
+/// over the retained cap, down to the 2 MiB floor, where it does not fit either.
+pub enum Kernel64k {}
+
+impl Shape for Kernel64k {
+    const GEOMETRY: Geometry =
+        Geometry::new(16, 29, 30, 21, 16, 1, MagazineSize::MAX).with_kernel_rules();
+}
+
 /// Bytes of simulated memory that hold one reservation of a shape's largest plan, rounded up to
 /// the largest region size.
 pub const fn capacity_for<S: Shape>() -> usize {
     let plan = S::GEOMETRY.largest_plan();
     plan.size().next_multiple_of(plan.region_size())
+}
+
+/// Whether this process may have the address space a heap of `S` takes. A limit on address space,
+/// as `scripts/memlimit`'s fallback sets, refuses the kernels' shapes, and tests on them pass over.
+pub fn room_for<S: Shape>() -> bool {
+    memory::room_for(
+        capacity_for::<S>(),
+        S::GEOMETRY.largest_plan().region_size(),
+    )
 }
 
 /// The random generator's step (splitmix64's increment: the odd number nearest `2^64 / phi`).
@@ -179,13 +256,13 @@ struct Sleeps {
 pub enum SimTopology {
     /// No topology files, as in a sandbox or without sysfs: every read fails. The default.
     Missing,
-    /// L3s of `n` consecutive CPUs, listed as ranges (`0-3`).
+    /// Last-level caches of `n` consecutive CPUs, listed as ranges (`0-3`).
     Blocks(u32),
-    /// `n` L3s with CPU `c` in L3 `c % n`, listed one CPU at a time (`0,2,4`).
+    /// `n` last-level caches with CPU `c` in cache `c % n`, listed one CPU at a time (`0,2,4`).
     Stripes(u32),
-    /// The online list reads, but no CPU has an L3 file.
-    NoL3,
-    /// The L3 lists hold text that is not a CPU list.
+    /// The online list reads, but no CPU has a cache listed.
+    NoCaches,
+    /// The caches' lists hold text that is not a CPU list.
     Garbage,
 }
 
@@ -195,7 +272,7 @@ impl SimTopology {
             SimTopology::Missing => 0,
             SimTopology::Blocks(n) => 1 | (n as u64) << 8,
             SimTopology::Stripes(n) => 2 | (n as u64) << 8,
-            SimTopology::NoL3 => 3,
+            SimTopology::NoCaches => 3,
             SimTopology::Garbage => 4,
         }
     }
@@ -205,7 +282,7 @@ impl SimTopology {
         match word & 0xff {
             1 => SimTopology::Blocks(n.max(1)),
             2 => SimTopology::Stripes(n.max(1)),
-            3 => SimTopology::NoL3,
+            3 => SimTopology::NoCaches,
             4 => SimTopology::Garbage,
             _ => SimTopology::Missing,
         }
@@ -292,7 +369,7 @@ impl<S: Shape> SimOs<S> {
         let geometry = S::GEOMETRY;
         SimOs {
             // Guarded where each simulated page is whole host pages, so a stray access faults.
-            memory: Memory::new(bytes, region, geometry.page_size().is_multiple_of(4096)),
+            memory: Memory::new(bytes, region, geometry.page_size()),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
             fence_registered: AtomicBool::new(false),
@@ -629,6 +706,11 @@ impl<S: Shape> SimOs<S> {
         built
     }
 
+    /// Bytes whose last huge-page advice was for huge pages.
+    pub fn advised_bytes(&self) -> usize {
+        self.pages.count(RESERVED | HUGE) << self.page_shift()
+    }
+
     /// The huge-page advice last given for the page holding `at`, if any.
     pub fn huge_pages(&self, at: NonNull<u8>) -> Option<HugePages> {
         let (first, _) = self.covering(at, 1)?;
@@ -803,7 +885,10 @@ fn splitmix(state: &AtomicU64) -> u64 {
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
 //   construction except the formatting of a panic message.
 unsafe impl<S: Shape> Os for SimOs<S> {
-    const GEOMETRY: Geometry = S::GEOMETRY;
+    #[inline(always)]
+    fn geometry() -> Geometry {
+        S::GEOMETRY
+    }
 
     fn reserve(&self, len: usize, align: usize) -> Result<NonNull<u8>, OsError> {
         self.faults.enter(Call::Reserve)?;
@@ -963,6 +1048,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn fence_all(&self) -> Result<(), OsError> {
         if self.fence_registered() {
+            self.cpus.fence_all();
             self.sleeps.fences.fetch_add(1, Ordering::AcqRel);
             Ok(())
         } else {
@@ -1041,18 +1127,18 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         match (topology, which) {
             (SimTopology::Missing, _) => return None,
             (_, Topology::Online) => out.range(0, last),
-            (_, Topology::SharedL3(cpu)) if cpu > last => return None,
-            (SimTopology::NoL3, Topology::SharedL3(_)) => return None,
-            (SimTopology::Garbage, Topology::SharedL3(_)) => {
+            (_, Topology::SharedLastLevel(cpu)) if cpu > last => return None,
+            (SimTopology::NoCaches, Topology::SharedLastLevel(_)) => return None,
+            (SimTopology::Garbage, Topology::SharedLastLevel(_)) => {
                 for &b in b"0-x" {
                     out.byte(b);
                 }
             }
-            (SimTopology::Blocks(n), Topology::SharedL3(cpu)) => {
+            (SimTopology::Blocks(n), Topology::SharedLastLevel(cpu)) => {
                 let first = cpu / n * n;
                 out.range(first, (first + n - 1).min(last));
             }
-            (SimTopology::Stripes(n), Topology::SharedL3(cpu)) => {
+            (SimTopology::Stripes(n), Topology::SharedLastLevel(cpu)) => {
                 let mut other = cpu % n;
                 while other <= last {
                     out.range(other, other);
@@ -1098,11 +1184,11 @@ mod tests {
     type Sim = SimOs<Standard>;
 
     fn page() -> usize {
-        Sim::GEOMETRY.page_size()
+        Sim::geometry().page_size()
     }
 
     fn region() -> usize {
-        Sim::GEOMETRY.largest_plan().region_size()
+        Sim::geometry().largest_plan().region_size()
     }
 
     #[test]
@@ -1273,30 +1359,41 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     const GUARD_CHILD: &str = "CRALLOC_GUARD_CHILD";
+
+    /// A shape whose pages are whole host pages on every kernel.
+    #[cfg(cralloc_real)]
+    enum WholePages {}
+
+    #[cfg(cralloc_real)]
+    impl Shape for WholePages {
+        const GEOMETRY: Geometry = Geometry::new(16, 20, 22, 21, 256, 16, MagazineSize::MAX);
+    }
 
     /// Run on its own by `touching_uncommitted_guarded_memory_faults`; does nothing otherwise.
     /// Writes a page it reserved but never committed, and a page it committed, purged and
     /// unmapped, which must fault like the first.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn guard_child() {
         let Some(mode) = std::env::var_os(GUARD_CHILD) else {
             return;
         };
-        let os = Sim::with_capacity(region());
-        let base = os.reserve(2 * page(), region()).unwrap();
+        let page = WholePages::GEOMETRY.page_size();
+        let region = WholePages::GEOMETRY.largest_plan().region_size();
+        let os = SimOs::<WholePages>::with_capacity(region);
+        let base = os.reserve(2 * page, region).unwrap();
         let target = if mode == "unmapped" {
             // SAFETY: whole reserved pages that nothing else uses.
             unsafe {
-                os.commit(base, 2 * page()).unwrap();
+                os.commit(base, 2 * page).unwrap();
                 base.as_ptr().write(1);
-                os.unmap(base, 2 * page()).unwrap();
+                os.unmap(base, 2 * page).unwrap();
             }
             base
         } else {
-            base.map_addr(|a| a.saturating_add(page()))
+            base.map_addr(|a| a.saturating_add(page))
         };
         std::eprintln!("about to write");
         // SAFETY: deliberately breaks the rule, to see the fault.
@@ -1304,13 +1401,14 @@ mod tests {
         std::eprintln!("the write did not fault");
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[cfg(cralloc_real)]
     #[test]
     fn touching_uncommitted_guarded_memory_faults() {
         use std::os::unix::process::ExitStatusExt;
+        let region = WholePages::GEOMETRY.largest_plan().region_size();
         assert!(
-            Sim::new().memory.guarded(),
-            "the standard shape is guarded natively"
+            SimOs::<WholePages>::with_capacity(region).memory.guarded(),
+            "a shape of whole host pages is guarded natively"
         );
         for mode in ["never-committed", "unmapped"] {
             let output = std::process::Command::new("sh")

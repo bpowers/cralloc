@@ -18,7 +18,14 @@ extern "C" {
 
 fn main() {
     let tp: usize;
-    unsafe { asm!("mov {}, fs:0", out(reg) tp) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        asm!("mov {}, fs:0", out(reg) tp)
+    };
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        asm!("mrs {}, tpidr_el0", out(reg) tp)
+    };
     // struct rseq starts with { u32 cpu_id_start; u32 cpu_id; ... }.
     let rseq = (tp as isize + unsafe { __rseq_offset }) as *mut u32;
     let which = std::env::args().nth(1).unwrap_or_default();

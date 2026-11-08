@@ -261,6 +261,7 @@ fn the_fast_check_passes_exactly_the_slot_starts_below_the_limit() {
         inverse: odd_inverse(size >> shift),
         shift,
         limit,
+        stride: size as usize,
     };
     let offset: u64 = kani::any();
     let object = core::ptr::without_provenance::<u8>(base.wrapping_add(offset as usize));

@@ -13,8 +13,8 @@
 #   off       disable every deep state on those CPUs (needs root)
 #   on        enable them again (needs root)
 #   defaults  the default CPUs and the cut-off, as read from the runner's source
-#   CPUS      a list such as 0-3 or 0,2,8-11. The default is the servers' CPUs, SERVER_CPUS in
-#             bench/runner/src/suite.rs, read from there so that the two cannot drift apart.
+#   CPUS      a list such as 0-3 or 0,2,8-11. The default is the servers' CPUs, set `a` of
+#             scripts/cpusets.
 # A state is deep when the kernel declares an exit latency above DEEP_LATENCY_US
 # (bench/runner/src/cpuidle.rs, read from there too). The setting lasts until it is changed
 # back or the machine restarts. This script never calls sudo itself: without root, `off` and
@@ -24,26 +24,12 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 self="$here/$(basename "${BASH_SOURCE[0]}")"
-suite="$here/../bench/runner/src/suite.rs"
 cpuidle_rs="$here/../bench/runner/src/cpuidle.rs"
 root="${CRALLOC_CPUIDLE_ROOT:-/sys/devices/system/cpu}"
 
 die() {
   echo "deep-idle: $*" >&2
   exit 2
-}
-
-# The CPUs of `pub const NAME: [usize; N] = ...;` in suite.rs, as 0,1,2,3: its array, or the
-# array of the constant it names.
-const_cpus() {
-  local name="$1" depth="${2:-0}" rhs
-  [ "$depth" -lt 4 ] || die "cannot resolve $name in $suite"
-  rhs=$(sed -n "s/^pub const $name: \[usize; [0-9]*\] = \(.*\);$/\1/p" "$suite")
-  case "$rhs" in
-    \[*\]) echo "$rhs" | tr -d '[] ' ;;
-    [A-Z]*) const_cpus "$rhs" $((depth + 1)) ;;
-    *) die "cannot read $name from $suite" ;;
-  esac
 }
 
 deep_latency() {
@@ -71,7 +57,8 @@ states_of() {
 [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: scripts/deep-idle status|off|on|defaults [CPUS]"
 cmd="$1"
 cut=$(deep_latency)
-list="${2:-$(const_cpus SERVER_CPUS)}"
+servers=$("$here/cpusets" a)
+list="${2:-$servers}"
 [[ "$list" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "not a CPU list: $list"
 mapfile -t cpus < <(expand "$list")
 
@@ -124,7 +111,7 @@ set_deep() {
 case "$cmd" in
   status) status ;;
   defaults)
-    echo "cpus $(const_cpus SERVER_CPUS)"
+    echo "cpus $servers"
     echo "deep-latency-us $cut"
     ;;
   off | on)

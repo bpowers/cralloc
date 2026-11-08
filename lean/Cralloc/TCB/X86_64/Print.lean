@@ -214,6 +214,35 @@ def Instr.lines : Instr → List Line
   | .alu32 op d (.immP n) => [.ops [.text s!"{op.name} {d.name32}, ", .ref n]]
   | i => i.asm.map .text
 
+/-- Whether an instruction accesses memory another thread can change. `movGot` reads a word
+no program writes (`TCB/X86_64/Isa.lean`), and `lea` computes an address. -/
+def Instr.accessesMemory (i : Instr) : Bool :=
+  match i with
+  | .lea .. | .movGot .. => false
+  | .movSym .. | .push _ | .pop .. => true
+  | _ => !i.memOps.isEmpty
+
+/-- Whether an instruction stores to memory: a register's destination is never memory but in
+these, and a push's is the stack. -/
+def Instr.storesMemory : Instr → Bool
+  | .store .. | .store32 .. | .store8 .. | .push _ => true
+  | .mov .. | .alu .. | .inc _ | .dec _ | .mov32 .. | .alu32 .. | .shift32 .. | .bswap32 _
+  | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .movzx8 .. | .movzx16 .. | .cmp8 .. | .bswap _
+  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .movSym ..
+  | .leaRseqCs _ | .lea .. | .mul _ | .imul .. | .mulx .. | .adcx .. | .adox .. | .cmov .. | .pop ..
+  | .alloc _ | .free _ => false
+
+/-- Why an instruction may not be a step of a sequence's body, or `none`: a store whose
+displacement is not a multiple of its size, which may cross a cache line and not be one access
+(Intel SDM Vol. 3, "Guaranteed Atomic Operations"). A linker writes an x86-64 instruction's
+displacement in place, and moves nothing. -/
+def Instr.notInBody : Instr → Option String
+  | .store m _ =>
+    if m.disp % 8 != 0 then some "a misaligned store, which may not be one access" else none
+  | .store32 m _ =>
+    if m.disp % 4 != 0 then some "a misaligned store, which may not be one access" else none
+  | _ => none
+
 def printer : Printer isa where
   instr := Instr.lines
   branch c l := s!"j{c.name} {l}"
@@ -244,6 +273,10 @@ def printer : Printer isa where
   disassembler stays in step and a stray jump into them traps. -/
   rseqSig := some [".byte 0x0f, 0xb9, 0x3d", s!".long {hexLit rseqSignature}"]
   plainStore | .store .. => true | _ => false
+  bodyRefuses := Instr.notInBody
+  accessesMemory := Instr.accessesMemory
+  storesMemory := Instr.storesMemory
+  namesDesc | .leaRseqCs _ => true | _ => false
   /- A compare or a test and the conditional branch after it decode as one
   macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch
   Fusion"; Intel's "macro-fusion"). -/

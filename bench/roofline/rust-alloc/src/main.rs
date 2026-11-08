@@ -3,9 +3,10 @@
 //!   roofline-rust-alloc [label] [workload-prefix]
 //!
 //! The allocator is chosen at build time by cargo feature (see Cargo.toml). Single-thread
-//! workloads report user-space cycles and instructions per operation on CPU RF_CPU (default 2).
-//! The cross-thread workloads put the allocating thread on RF_CPU and the freeing thread on
-//! RF_CPU2 (default 3), and report the time each side spends working, per object. RF_BATCH
+//! workloads report user-space cycles and instructions per operation on CPU RF_CPU (default 2,
+//! and 8 on aarch64). The cross-thread workloads put the allocating thread on RF_CPU and the
+//! freeing thread on RF_CPU2 (default 3, and 9 on aarch64), and report the time each side spends
+//! working, per object. RF_BATCH
 //! (default 32) is the burst size and RF_PAIRS (default 3) the number of pairs in `x_cross_pairs`.
 //! RF_SINGLE_ONLY skips the cross-thread workloads. The second argument `sites` runs only the
 //! one-call functions `site_*`, kept for reading the code a call site gets.
@@ -37,7 +38,15 @@ const PAD: usize = parse_pad(match option_env!("RA_PAD") {
 #[inline(always)]
 fn pad_here() {
     // SAFETY: the block is `PAD` bytes of `nop`, which touch no register, flag or memory.
-    unsafe { core::arch::asm!(".skip {n}, 0x90", n = const PAD, options(nomem, nostack, preserves_flags)) }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!(".skip {n}, 0x90", n = const PAD, options(nomem, nostack, preserves_flags))
+    }
+    // SAFETY: as above, 4 bytes an instruction.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(".rept {n}", "nop", ".endr", n = const PAD / 4, options(nomem, nostack, preserves_flags))
+    }
 }
 
 #[cfg(any(feature = "floor_tls", feature = "floor_heap"))]
@@ -137,9 +146,14 @@ static A: cralloc::Cralloc = cralloc::Cralloc;
 #[cfg(feature = "slab")]
 #[global_allocator]
 static A: slab::Slab = slab::Slab;
+// Anything `bench-alloc` builds: what the benchmark suite runs as each incumbent.
+#[cfg(feature = "ba")]
+extern crate bench_alloc;
 
 extern "C" {
+    #[cfg(target_arch = "x86_64")]
     fn syscall(num: i64, ...) -> i64;
+    #[cfg(target_arch = "x86_64")]
     fn ioctl(fd: i32, req: u64, ...) -> i32;
     fn sched_setaffinity(pid: i32, sz: usize, mask: *const u64) -> i32;
 }
@@ -154,9 +168,41 @@ fn env(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// The CPU a single-thread workload runs on.
+fn first_cpu() -> usize {
+    env("RF_CPU", if cfg!(target_arch = "aarch64") { 8 } else { 2 })
+}
+
+#[cfg(target_arch = "aarch64")]
+#[path = "../../aarch64/src/perf.rs"]
+#[allow(dead_code)]
+mod perf;
+
+/// A user-space hardware counter for the calling thread: cycles (0) or instructions (1), on the
+/// PMU of the CPU the workload runs on, since a machine may have more than one.
+#[cfg(target_arch = "aarch64")]
+struct Counter(perf::Counter);
+
+#[cfg(target_arch = "aarch64")]
+impl Counter {
+    fn new(config: u64) -> Counter {
+        let pmu = perf::Pmu::of_cpu(first_cpu());
+        let event = if config == 0 { pmu.cycles } else { pmu.instructions };
+        Counter(perf::Counter::open(pmu.typ, event).expect("perf_event_open failed"))
+    }
+    fn start(&self) {
+        self.0.start()
+    }
+    fn stop(&mut self) -> u64 {
+        self.0.stop().expect("the counter was multiplexed")
+    }
+}
+
 /// A user-space hardware counter for the calling thread.
+#[cfg(target_arch = "x86_64")]
 struct Counter(std::fs::File);
 
+#[cfg(target_arch = "x86_64")]
 impl Counter {
     fn new(config: u64) -> Counter {
         use std::os::fd::FromRawFd;
@@ -410,7 +456,7 @@ fn churn(n: u64) -> u64 {
 }
 
 fn single_thread(label: &str, filter: &str) {
-    pin(env("RF_CPU", 2));
+    pin(first_cpu());
     let mut cyc = Counter::new(0);
     let mut ins = Counter::new(1);
     let n = 20_000_000u64;
@@ -471,8 +517,18 @@ struct Ring {
     free_ticks: Padded<AtomicU64>,
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tsc() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+/// The generic timer: about 42 ns a tick on Apple's cores, so a burst's cost is good only in sum.
+#[cfg(target_arch = "aarch64")]
+fn tsc() -> u64 {
+    let t: u64;
+    // SAFETY: reads a register user mode may read, with no other effect.
+    unsafe { core::arch::asm!("mrs {t}, cntvct_el0", t = out(reg) t, options(nomem, nostack)) };
+    t
 }
 
 /// Runs `objects` allocations of `layout` on this thread (pinned to `cpus.0`) and their frees on
@@ -640,7 +696,7 @@ fn produce_consume_local(cpu: usize, objects: usize, layout: Layout) -> (u64, u6
 
 fn cross_thread(label: &str, filter: &str) {
     BATCH_SIZE.store(env("RF_BATCH", 32), Relaxed);
-    let (a, b) = (env("RF_CPU", 2), env("RF_CPU2", 3));
+    let (a, b) = (first_cpu(), env("RF_CPU2", if cfg!(target_arch = "aarch64") { 9 } else { 3 }));
     let objects = 20_000_000usize / batch() * batch();
     // Time stamp counter ticks per nanosecond, measured over a short sleep.
     let (t0, c0) = (Instant::now(), tsc());
