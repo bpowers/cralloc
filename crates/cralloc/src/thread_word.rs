@@ -37,9 +37,9 @@
 //! level wakes a dormant one or, with a thread of the program's own as evidence, wants one; a
 //! Rust-interface slow path that leaves the word `WANTED` then creates the thread. The evidence
 //! is the C library's record that the program created a thread, except in a fork child, whose
-//! copy of that record says what its parent did: there it is a crossing made by a thread other
-//! than the child's first, so a child whose first thread frees the memory gets no thread by
-//! default. A hidden thread in a process that never created one is what the design promises
+//! copy of that record says what its parent did: there it is a look at the level by a thread
+//! other than the child's first, so a child whose first thread alone makes slow paths gets no
+//! thread by default. A hidden thread in a process that never created one is what the design promises
 //! not to do, and a fork child is the process likeliest to depend on having one thread. So a
 //! start refused for a passing reason is tried again about once an interval while the heap
 //! stays over the floor, never on every slow path. A C slow path never acts on `WANTED`; it
