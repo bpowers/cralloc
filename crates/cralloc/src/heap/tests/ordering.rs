@@ -42,12 +42,10 @@ type Owned = (u64, BTreeMap<usize, Seen>);
 
 /// A pipeline: producers allocate blocks and take their ledgers, and consumers take them again and
 /// free them, so that blocks go by magazines from the consumers back to the producers. `place` is
-/// [`spread`] or [`together`], and `take` takes a block's ledger. Returns what the count that catches
-/// a stale ledger needs.
-fn pipeline<H: GlobalAlloc + Sync, R>(
+/// [`spread`] or [`together`]. Returns what the count that catches a stale ledger needs.
+fn pipeline<H: GlobalAlloc + Sync>(
     heap: &H,
     place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
-    take: unsafe fn(*mut u8) -> R,
     pairs: usize,
     time: Duration,
     size: usize,
@@ -73,7 +71,7 @@ fn pipeline<H: GlobalAlloc + Sync, R>(
                 assert!(!p.is_null());
                 // SAFETY: this thread's block, of at least the ledger's size. What the block's last
                 // owner wrote has come only through the allocator.
-                unsafe { take(p) };
+                unsafe { own(p) };
                 owned += 1;
                 slot.store(p, Ordering::Release);
                 at = (at + 1) % ring.slots.len();
@@ -97,7 +95,7 @@ fn pipeline<H: GlobalAlloc + Sync, R>(
                 slot.store(ptr::null_mut(), Ordering::Relaxed);
                 at = (at + 1) % ring.slots.len();
                 // SAFETY: the producer gave the block up, through the ring.
-                unsafe { take(p) };
+                unsafe { own(p) };
                 owned += 1;
                 blocks.insert(p.addr(), Seen(p));
                 // SAFETY: allocated with this layout, freed once.
@@ -126,7 +124,7 @@ fn blocks_keep_their_last_owners_writes(time: Duration, drains: bool) {
     let heap = SimHeap::<crate::os::sim::Standard>::new();
     // A purge reads as zero, and the count would not add up.
     heap.os().set_faults(Call::Purge, Faults::ALWAYS);
-    let run = || pipeline(&heap, |n, f| spread(n, f), own, 2, time, 512);
+    let run = || pipeline(&heap, |n, f| spread(n, f), 2, time, 512);
     let owned = if drains {
         with_drains_running(&heap, run)
     } else {
@@ -158,15 +156,25 @@ fn blocks_keep_their_last_owners_writes_through_drains_fully() {
 }
 
 /// The real routines on the real kernel: plain loads and stores on the fast paths, and
-/// `membarrier` for the drains `collect` makes while the pipeline runs. The process's heap is every
-/// test's, and a purge can zero a free block, so the count at the end does not hold here; the
-/// ledgers' two words do.
+/// `membarrier` for the drains `collect` makes while the pipeline runs. A purge can zero a free
+/// block, so the count at the end does not hold here; the ledgers' two words do.
 #[cfg(cralloc_real)]
 mod process {
     use super::*;
     use crate::Cralloc;
-    use crate::stress::own_shared;
     use core::sync::atomic::AtomicU64;
+
+    /// Runs `body` in a process of its own, for the test at `name` in this module. Other tests of
+    /// the binary share the process's heap and leave what they like in its blocks, and these drain
+    /// every CPU's slab as fast as they can, which some of those would see.
+    fn alone(name: &str, body: impl FnOnce()) {
+        let path = std::format!("heap::tests::ordering::process::{name}");
+        if crate::fresh::is_child(&path) {
+            body();
+        } else {
+            crate::fresh::run(&path);
+        }
+    }
 
     fn on_the_real_routines(
         place: fn(usize, &(dyn Fn(usize) -> Owned + Sync)) -> std::vec::Vec<Owned>,
@@ -180,20 +188,30 @@ mod process {
                     thread::sleep(Duration::from_millis(1));
                 }
             });
-            let _ = pipeline(&Cralloc, place, own_shared, 2, time, 512);
+            let _ = pipeline(&Cralloc, place, 2, time, 512);
             stop.store(true, Ordering::SeqCst);
         });
     }
 
     #[test]
     fn blocks_keep_their_last_owners_writes_on_the_real_routines_quickly() {
-        on_the_real_routines(|n, f| spread(n, f), QUICK);
+        alone(
+            "blocks_keep_their_last_owners_writes_on_the_real_routines_quickly",
+            || {
+                on_the_real_routines(|n, f| spread(n, f), QUICK);
+            },
+        );
     }
 
     #[test]
     #[ignore = "slow: run with scripts/gate --all"]
     fn blocks_keep_their_last_owners_writes_on_the_real_routines_fully() {
-        on_the_real_routines(|n, f| spread(n, f), FULL);
+        alone(
+            "blocks_keep_their_last_owners_writes_on_the_real_routines_fully",
+            || {
+                on_the_real_routines(|n, f| spread(n, f), FULL);
+            },
+        );
     }
 
     /// The C entry points, as a `GlobalAlloc`: their frees find a block's class by the plain loads
@@ -215,33 +233,46 @@ mod process {
 
     #[test]
     fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_quickly() {
-        let _ = pipeline(
-            &CEntryPoints,
-            |n, f| spread(n, f),
-            own_shared,
-            2,
-            QUICK,
-            512,
+        alone(
+            "blocks_keep_their_last_owners_writes_through_the_c_entry_points_quickly",
+            || {
+                let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, QUICK, 512);
+            },
         );
     }
 
     #[test]
     #[ignore = "slow: run with scripts/gate --all"]
     fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_fully() {
-        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), own_shared, 2, FULL, 512);
+        alone(
+            "blocks_keep_their_last_owners_writes_through_the_c_entry_points_fully",
+            || {
+                let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, FULL, 512);
+            },
+        );
     }
 
     /// Threads taking turns on one CPU: a block's only way from a free to the next allocation is
     /// the routines' plain stores and loads, and the context switch between them.
     #[test]
     fn blocks_keep_their_last_owners_writes_on_one_cpu_quickly() {
-        on_the_real_routines(|n, f| together(n, f), QUICK);
+        alone(
+            "blocks_keep_their_last_owners_writes_on_one_cpu_quickly",
+            || {
+                on_the_real_routines(|n, f| together(n, f), QUICK);
+            },
+        );
     }
 
     #[test]
     #[ignore = "slow: run with scripts/gate --all"]
     fn blocks_keep_their_last_owners_writes_on_one_cpu_fully() {
-        on_the_real_routines(|n, f| together(n, f), FULL);
+        alone(
+            "blocks_keep_their_last_owners_writes_on_one_cpu_fully",
+            || {
+                on_the_real_routines(|n, f| together(n, f), FULL);
+            },
+        );
     }
 
     /// Threads run the fast paths as hard as they can while another drains their CPUs, one fence
@@ -299,12 +330,16 @@ mod process {
 
     #[test]
     fn a_drain_leaves_each_thread_its_own_blocks_quickly() {
-        a_drain_leaves_each_thread_its_own_blocks(QUICK);
+        alone("a_drain_leaves_each_thread_its_own_blocks_quickly", || {
+            a_drain_leaves_each_thread_its_own_blocks(QUICK);
+        });
     }
 
     #[test]
     #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_leaves_each_thread_its_own_blocks_fully() {
-        a_drain_leaves_each_thread_its_own_blocks(FULL);
+        alone("a_drain_leaves_each_thread_its_own_blocks_fully", || {
+            a_drain_leaves_each_thread_its_own_blocks(FULL);
+        });
     }
 }
