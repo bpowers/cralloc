@@ -698,7 +698,7 @@ impl<'a, O: Os> Back<'a, O> {
                 // so that this block, which has not grown, does not get huge pages.
                 region::unadvise(&host, region, slot);
                 // If the advice stayed, the block's extent is in whole huge pages.
-                region::cover(&host, region, slot);
+                region::cover(&host, region, slot, into);
             }
         }
         if let Some(slack) = slack {
@@ -800,7 +800,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
                     region::record(&host, region, slot, Recorded { size, ..before });
-                    region::cover(&host, region, slot);
+                    region::cover(&host, region, slot, into);
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -878,7 +878,7 @@ impl<'a, O: Os> Back<'a, O> {
                     // resize.
                     unsafe { self.unspill(&host, region, slot, ptr, into, old, size, advised) };
                 }
-                region::cover(&host, region, slot);
+                region::cover(&host, region, slot, into);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/cralloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -1170,6 +1170,10 @@ impl<'a, O: Os> Back<'a, O> {
         // part of a huge page would return nothing.
         let base = from.addr().get();
         let (mut done, mut all) = (0, true);
+        // How far from the slot's start the pages have gone back: the first piece goes from there,
+        // past the pages a stagger passes over, which an earlier tenant may have written, and a
+        // slot that goes back whole is taken to read as zero.
+        let mut given = 0;
         while done < len {
             let boundary = (base + done + 1).next_multiple_of(piece) - base;
             let step = (boundary - done).min(len - done);
@@ -1182,17 +1186,10 @@ impl<'a, O: Os> Back<'a, O> {
                 unsafe { self.copy_window(from, to, at, end, &mut dest) };
                 at = end;
             }
-            // Only pieces that reach a boundary go back here: the last may end inside a page. The
-            // first goes from the slot's start, past the pages a stagger passes over: an earlier
-            // tenant may have written them, and a slot that goes back whole is taken to read as
-            // zero.
+            // Only pieces that reach a boundary go back here: the last may end inside a page.
             if !keep && done + step == boundary {
-                let start = if PAGE_STAGGER && done == 0 {
-                    0
-                } else {
-                    (into + done) & !(page - 1)
-                };
-                all &= give_back(start, into + boundary);
+                all &= give_back(given, into + boundary);
+                given = into + boundary;
             }
             done += step;
             observe();
@@ -1200,8 +1197,7 @@ impl<'a, O: Os> Back<'a, O> {
         // The rest of an outgrown slot not kept, from the last piece boundary the copy reached
         // (or the slot's start).
         if host.is_some() && !keep && why == Move::Outgrown {
-            let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
-            all &= give_back(last, whole);
+            all &= give_back(given, whole);
         }
         let Some((host, region, index)) = host else {
             // `free_run` purges the whole of a run.
@@ -1440,7 +1436,7 @@ impl<'a, O: Os> Back<'a, O> {
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
             region::advise_grown(&host, region, index, into, len, now.size, dense);
-            region::cover(&host, region, index);
+            region::cover(&host, region, index, into);
         }
     }
 

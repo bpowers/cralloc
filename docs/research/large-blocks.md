@@ -360,8 +360,9 @@ turn"), and that costs address space and no memory, because the pages it passes 
 to 516 KiB of a slot lies below its block on a 16 KiB kernel. Those pages were never resident, but a
 free slot is charged the pages not marked clean, and the rule that cleared bits from the slot's start
 would have charged them, against the floor, the cap and the hold. So a claim clears from the block's
-first page, a carve marks those below clean, and only a tenant at the slot's start, or a slot under
-advice, whose huge fault does make them resident, clears them. A block aligned past 64 bytes starts
+first page, a carve marks those below clean, and only a tenant at the slot's start, at its claim and
+whenever it grows back over them, or a slot under advice, whose huge fault does make them resident,
+clears them. A block aligned past 64 bytes starts
 at the slot's start, and its extent still counts from the stagger, so it may be charged up to the
 stagger's pages it did not write; a slot whose tenants mix the two can hold that much resident
 below a staggered block until its free. A move that returns a slot whole returns those pages too,

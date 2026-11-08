@@ -21,8 +21,9 @@ real jobs feel the store-to-load hop on the hot word: variant.py COPY VARIANT
            only `is_val_statically_known` can tell a constant class on the way to an immediate. The
            write of x18 sits inside the sequence, so that a preemption there restarts it.
 
-Writes `crates/cralloc/src/front/provisional/aarch64_inline/slab.rs` and, for `kept`, `real.rs` and
-`lib.rs` in COPY, from the copies it keeps beside them.
+Writes `crates/cralloc/src/front/generated/aarch64_inline/slab.rs` and, for `kept`, `real.rs` and
+`lib.rs` in COPY, from the copies it keeps beside them. That file holds each routine's two forms,
+and COPY builds the one for glibc: a change to the text of both does not matter to the other.
 """
 import os
 import re
@@ -32,14 +33,14 @@ import sys
 copy, variant = sys.argv[1], sys.argv[2]
 crate = os.path.join(copy, "crates/cralloc/src")
 files = {name: os.path.join(crate, name) for name in
-         ("front/provisional/aarch64_inline/slab.rs", "front/real.rs", "lib.rs", "back/word.rs",
+         ("front/generated/aarch64_inline/slab.rs", "front/real.rs", "lib.rs", "back/word.rs",
           "back/class.rs", "back/policy.rs", "back/region.rs", "environment.rs")}
 text = {}
 for name, path in files.items():
     if not os.path.exists(path + ".orig"):
         shutil.copy(path, path + ".orig")
     text[name] = open(path + ".orig").read()
-inline = "front/provisional/aarch64_inline/slab.rs"
+inline = "front/generated/aarch64_inline/slab.rs"
 
 
 def alu(reg, kept, k):
@@ -48,14 +49,40 @@ def alu(reg, kept, k):
     for i in range(k):
         op = "add" if i % 2 == 0 else "sub"
         src = reg if kept else "x3"
-        lines.append(f'            "{op} {reg}, {src}, #8",\n')
+        lines.append(f"{op} {reg}, {src}, #8\\n")
     return "".join(lines)
 
 
-def sub(s, old, new):
-    assert s.count(old) == 1, old
+def sub(s, old, new, n=1):
+    assert s.count(old) == n, old
     return s.replace(old, new)
 
+
+# A routine's text around its sequence, in the form for glibc.
+ARM = r"""
+                        "adrp x11, 3f",
+                        "add x11, x11, :lo12:3f",
+                        "ldr x9, [x11, #32]",
+                        "ldr x9, [x9]",
+                        "mrs x10, tpidr_el0",
+                        "add x10, x10, x9",
+                        "5:",
+                        "str x11, [x10, #8]",
+                        "6:","""
+END = r"""
+                        "7:",
+                        ".pushsection __rseq_cs, \"aw\"",
+                        ".balign 32",
+                        "3:",
+                        ".long 0, 0",
+                        ".quad 6b, 7b - 6b, 4f",
+                        ".quad __rseq_offset",
+                        ".popsection",
+                        ".subsection 1",
+                        ".inst 0xd428bc00",
+                        "4:",
+                        "b 5b",
+                        ".subsection 0","""
 
 AREA = r"""
 #[inline(always)]
@@ -90,10 +117,10 @@ if m:
     s = text[inline]
     on_chain = kind == "chain"
     pop_reg, push_reg = ("x1", "x9") if on_chain else ("x12", "x12")
-    s = sub(s, '            "sub x1, x1, #8",\n            "str x1, [x3, x8]",\n',
-            '            "sub x1, x1, #8",\n' + alu(pop_reg, on_chain, k) + '            "str x1, [x3, x8]",\n')
-    s = sub(s, '            "mov x4, x9",\n            "str x9, [x3, x8]",\n',
-            '            "mov x4, x9",\n' + alu(push_reg, on_chain, k) + '            "str x9, [x3, x8]",\n')
+    s = sub(s, r"sub x1, x1, #8\nstr x1, [x3, x8]\n",
+            r"sub x1, x1, #8\n" + alu(pop_reg, on_chain, k) + r"str x1, [x3, x8]\n", 2)
+    s = sub(s, r"mov x4, x9\nstr x9, [x3, x8]\n",
+            r"mov x4, x9\n" + alu(push_reg, on_chain, k) + r"str x9, [x3, x8]\n", 2)
     s = s.replace('            out("x11") _,\n', '            out("x11") _,\n            out("x12") _,\n')
     text[inline] = s
 elif variant == "kept":
@@ -111,7 +138,7 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
                 $($p => unsafe {
                     core::arch::asm!(
                         "adrp x12, {SLABS}",
-                        crate::cralloc_a64_arm!(),
+                        ARM_TEXT
                         "mov x0, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
@@ -128,7 +155,7 @@ pub(crate) unsafe fn kept_pop(position: usize, word: usize, mask: usize) -> usiz
                         "ldr x0, [x1, #-8]",
                         "sub x1, x1, #8",
                         "str x1, [x18, #{w}]",
-                        crate::cralloc_a64_end!(),
+                        END_TEXT
                         SLABS = sym crate::front::SLABS,
                         w = const $p * 8,
                         in("x2") mask,
@@ -163,7 +190,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
                 $($p => unsafe {
                     core::arch::asm!(
                         "adrp x12, {SLABS}",
-                        crate::cralloc_a64_arm!(),
+                        ARM_TEXT
                         "mov x4, #0",
                         "ldr w8, [x10, #4]",
                         "cmp w8, #2, lsl #12",
@@ -181,7 +208,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
                         "str x0, [x1]",
                         "mov x4, x9",
                         "str x9, [x18, #{w}]",
-                        crate::cralloc_a64_end!(),
+                        END_TEXT
                         SLABS = sym crate::front::SLABS,
                         w = const $p * 8,
                         in("x0") p,
@@ -204,7 +231,7 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
     arms!(POSITIONS);
     pushed != 0
 }
-""".replace("POSITIONS", positions)
+""".replace("POSITIONS", positions).replace("ARM_TEXT", ARM).replace("END_TEXT", END)
     text[inline] += routines
     s = text["front/real.rs"]
     s = sub(s, "inline::slab_pop(SLABS.word(class), class.mask())",
@@ -219,15 +246,10 @@ elif variant == "area":
     s = text[inline]
     cut = s.index("pub(crate) unsafe fn current_cpu")
     head, tail = s[:cut], s[cut:]
-    assert head.count("crate::cralloc_a64_arm!(),") == 2 and head.count("crate::cralloc_a64_end!(),") == 2
-    head = head.replace("crate::cralloc_a64_arm!(),", '''"adrp x11, 3f",
-            "add x11, x11, :lo12:3f",
-            "5:",
-            "str x11, [x10, #8]",
-            "6:",''')
-    head = head.replace("crate::cralloc_a64_end!(),", "crate::cralloc_a64_end_bare!(),")
-    assert head.count('out("x10") _,') == 2
-    head = head.replace('out("x10") _,', 'in("x10") area(),')
+    head = sub(head, r"ldr x9, [x11, #32]\nldr x9, [x9]\nmrs x10, tpidr_el0\nadd x10, x10, x9\n", "", 2)
+    head = sub(head, r".quad {__rseq_offset}\n", "", 2)
+    head = sub(head, "            __rseq_offset = sym crate::front::__rseq_offset,\n", "", 2)
+    head = sub(head, 'out("x10") _,', 'in("x10") area(),', 4)
     text[inline] = head + tail + AREA
 elif variant == "relaxed":
     text["back/word.rs"] = text["back/word.rs"].replace("SeqCst", "Relaxed").replace("Release", "Relaxed")

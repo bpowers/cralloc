@@ -12,7 +12,8 @@ interleaved with everyone else's work; `docs/research/` records what each one fo
    the runner, the fixed RPC client, the load generator and the normal builds.
 3. Server jobs move by several percent with where the program's code lands, so each allocator
    runs at five placements. Under `scripts/heavy`, `pad-build.sh workloads` and `pad-build.sh
-   PROGRAM` build them (`cra jem tcm mim gli`, pads 0, 16, 32, 48, 64). Append `pad-entries.sh`'s
+   PROGRAM` build them (`cra jem tcm mim gli`, pads 0, 16, 32, 48, 64, or on aarch64 steps of 32 to
+   128). Append `pad-entries.sh`'s
    output to `bench/allocators.toml` for the sessions; it is local and never committed.
 4. Tails rank idle states unless deep idle is off: `scripts/deep-idle off` (root). `guard.sh`
    checks it before each session and stops the queue if it is on.
@@ -38,7 +39,7 @@ plan.sh DIR OUTDIR 1 servers "connect log" 00-16 cra,jem,tcm,mim,gli >> DIR/queu
 | Real servers | `plan.sh`: `router graphql`; `session.sh`: `servers-thread` jobs of SurrealDB and Qdrant, `--mem-cap 10G` or `12G` | `servers.py`, `heapsum.py` |
 | Long-run memory | `drift/` (below) | `drift/summary.py`, `drift/redis_summary.py` |
 | Batch programs | `session.sh`: `apps` job `datafusion tpch sf3 t4`, six rounds; `tpch.py OUT WORKDIR --rounds 4` under `scripts/measure --both-l3` | `benchrun report`; `tpch.py` prints its table as it runs |
-| Kernel suite, five to ten rounds | `session.sh`: `full`, two groups of jobs a session, every allocator | `compare.py` |
+| Kernel suite, five to ten rounds | `session.sh`: `full`, two groups of jobs a session, every allocator | `compare.py`, `groups.py` |
 
 `--only` takes `=NAME` for one job exactly. `benchrun list --suite NAME` prints a suite's jobs.
 `padsweep.py` combines sessions of `benchrun layout --layouts pads`, the runner's own pad builds.

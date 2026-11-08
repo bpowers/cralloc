@@ -214,7 +214,7 @@ commit or the drain, and a magazine handle is only made for an address the commi
 **The proofs in Lean say nothing about memory order.** Their model is sequential and has no barrier
 instruction: a proof says what a routine's instructions do to memory taken in program order, one
 thread at a time and interrupted anywhere. It does not say what another CPU sees of them, or when.
-The routines hold plain `ldr`, `ldrb` and `str` and no barrier (`front/provisional/` and
+The routines hold plain `ldr`, `ldrb` and `str` and no barrier (`front/generated/aarch64/` and
 `front/generated/aarch64_inline/`, read line by line against this section; `generated/x86_64` is the
 same in `mov`s), and these stand in for a proof:
 
@@ -297,7 +297,10 @@ the real routines and kernel. A ledger of two counters on lines apart in each bl
 owner that missed part of its last owner's writes, and a count of all takes one that missed all of
 them. Rounds of a few instructions try each store-then-load pattern. The pipeline's only way from a
 consumer to a producer is the allocator. They run a third of a second each in the gate, and twenty
-seconds with `--all`: 34 passed in 62 s at `91c2e7e`, 2026-11-07, on an M1 Max.
+seconds with `--all`: 34 passed in 62 s at `91c2e7e`, 2026-11-07, on an M1 Max. With LL/SC atomics
+forced (`-Ctarget-feature=-lse,-outline-atomics`), as a generic build without outlined atomics gets
+them, and no RCpc: all 36 passed in 269 s at `6bba437`, the crate's atomics `ldaxr`, `stlxr` and `ldar`
+in the binary.
 
 **Weakened on purpose, in a throwaway copy, this CPU shows only part of it, and Miri the rest.** Each
 row is one mutation against the tests that should see it, release builds, 4 s a test; Miri on 8 seeds
@@ -309,7 +312,7 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 | Every bitmap word relaxed | caught, by the summary test only | not run |
 | `LinuxOs::fence` does nothing | caught in 3 of 4 runs of 3 s (`a_drain_leaves_each_thread_its_own_blocks`: "a block two threads hold", or "a spare stack names something that is not a magazine"); not in 0.3 s, and not by `collect`'s drains in 4 s | cannot run |
 | A push's release, or all of a pop's acquires | not caught | caught |
-| A pop's first read of the head only | not caught | caught only by `a_pop_reads_the_link_its_top_magazines_pusher_wrote`, on seed 7 |
+| A pop's first read of the head only | not caught | caught only by `a_pop_reads_the_link_its_top_magazines_pusher_wrote`, within 16 seeds, which it passes unweakened |
 | A free's OR with no release, or a claim with no acquire | not caught | caught |
 | Summary words, hint or sleep to acquire and release | not caught | caught |
 | A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
@@ -367,8 +370,7 @@ leave out each barrier the fence's and parking's rows rest on. A transcription i
 - **The routines and Miri.** Miri sees the twins, whose order is the simulator's, and relaxing the
   simulator's barrier went unseen, so some other atomic of the simulator may order what the barrier
   should. So Miri does not show that the route through a routine holds. The real routines have only
-  the tests on real threads and the reading above, and those are provisional, by hand, until Lean
-  emits them.
+  the tests on real threads and the reading above.
 - **The kernel's barriers are read, not proved.** The no-interrupt paths have a litmus test in Arm's
   model and no test on the kernel that isolates them.
 - **The fork's cut** rests on Arm's rule for `tlbi` and `dsb`, as we read it.

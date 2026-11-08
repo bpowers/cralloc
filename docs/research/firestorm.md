@@ -646,8 +646,11 @@ costs a cycle: a miss's branch is not taken, and the 13.0 above includes the zer
 | `rust-lld`, PIE or not | Yes |
 
 The `executable` form links only with `rust-lld` or without PIE and buys nothing in a pair (13.05
-against 12.96), 4 cycles a pair of lone calls, and nothing that resolved on the suite's jobs. So the
-crate has one form on aarch64.
+against 12.96), 4 cycles a pair of lone calls, and nothing that resolved on the suite's jobs. Over five
+placements, two rounds each, both forms linked with `rust-lld`, the default form against `executable`,
+mean over placements: `churn live=100k` +1.0%, the Box tree -1.1%, `rpc log c64` +0.5%, `rpc echo c64`
++0.5%. Each pair of ranges overlaps, and `rpc log` was the only real server in the set (2026-11-07 at
+`4ed7804`). So the crate has one form on aarch64.
 
 ## The C entry points
 
