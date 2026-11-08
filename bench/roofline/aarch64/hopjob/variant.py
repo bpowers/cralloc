@@ -4,6 +4,8 @@ real jobs feel the store-to-load hop on the hot word: variant.py COPY VARIANT
 
   plain    the routines as they are; `lld` and `direct` are this too, and differ by how build.sh
            builds them
+  area     the thread's rseq area read by a block the compiler may share and hoist, so a routine
+           does not reload it: fewer instructions and two loads off the way to the pointer
   chainK   K more cycles on the hop: K ALU instructions between the new word and its commit, on the
            word's chain, and nothing else waits for them (K even)
   freeK    the same instructions, in the same bytes, on another register, off every chain: their
@@ -47,6 +49,32 @@ def sub(s, old, new):
     assert s.count(old) == 1, old
     return s.replace(old, new)
 
+
+AREA = r"""
+#[inline(always)]
+fn area() -> usize {
+    let area: usize;
+    // SAFETY: reads the thread pointer and a variable that does not change after startup.
+    unsafe {
+        core::arch::asm!(
+            ".pushsection .data.rel.ro.cralloc_got,\"aw\",%progbits",
+            ".balign 16",
+            "8:",
+            ".quad __rseq_offset",
+            ".popsection",
+            "adrp {t}, 8b",
+            "ldr {t}, [{t}, :lo12:8b]",
+            "ldr {t}, [{t}]",
+            "mrs {a}, tpidr_el0",
+            "add {a}, {a}, {t}",
+            a = out(reg) area,
+            t = out(reg) _,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+    }
+    area
+}
+"""
 
 m = re.fullmatch(r"(chain|free)(\d+)", variant)
 if m:
@@ -178,6 +206,20 @@ pub(crate) unsafe fn kept_push(position: usize, word: usize, mask: usize, p: usi
     s = text["lib.rs"]
     first = s.index("#![")
     text["lib.rs"] = s[:first] + "#![feature(core_intrinsics)]\n#![allow(internal_features)]\n" + s[first:]
+elif variant == "area":
+    s = text[inline]
+    cut = s.index("pub(crate) unsafe fn current_cpu")
+    head, tail = s[:cut], s[cut:]
+    assert head.count("a64_arm_direct!(),") == 2 and head.count("a64_end_direct!(),") == 2
+    head = head.replace("a64_arm_direct!(),", '''"adrp x11, 3f",
+            "add x11, x11, :lo12:3f",
+            "5:",
+            "str x11, [x10, #8]",
+            "6:",''')
+    head = head.replace("a64_end_direct!(),", "crate::cralloc_a64_end_bare!(),")
+    assert head.count('out("x10") _,') == 2
+    head = head.replace('out("x10") _,', 'in("x10") area(),')
+    text[inline] = head + tail + AREA
 elif variant not in ("plain", "lld", "direct"):
     sys.exit(f"unknown variant {variant}")
 

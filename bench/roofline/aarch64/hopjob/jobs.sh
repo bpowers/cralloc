@@ -16,7 +16,12 @@ rounds=$4
 shift 4
 common=$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)
 export BENCH_BASELINES=${BENCH_BASELINES:-$(dirname "$common")/bench/baselines/out}
-allocs=$(printf 'cralloc-%s,' "$@")
+export BENCH_APPS_DATA=${BENCH_APPS_DATA:-$(dirname "$common")/bench/apps/target}
+allocs=
+for v in "$@"; do
+  # =NAME is an allocator of the suite, which `benchrun build` built in COPY.
+  case $v in =*) allocs+="${v#=}," ;; *) allocs+="cralloc-$v," ;; esac
+done
 cd "$copy/bench"
-"$scripts/measure" --both-l3 target/runner/release/benchrun run --suite full --only "$only" \
+"$scripts/measure" --both-l3 target/runner/release/benchrun run --suite "${BENCH_SUITE:-full}" --only "$only" \
   --allocators "${allocs%,}" --rounds "$rounds" --out "$out"

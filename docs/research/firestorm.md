@@ -130,6 +130,55 @@ adds under 1. How long a lone call takes to produce its pointer is measured betw
 and push together add 40 cycles to a frame of 63, or 44 in the form through the GOT, about 20 a
 call.
 
+## The real allocator against the incumbents
+
+The crate's routines cost what the kernels said. Through `GlobalAlloc` with fat LTO, cycles per
+allocate and free, each allocator linked as `bench-alloc` links it, three interleaved rounds, the
+fastest (`f3e635c`, `bench/roofline/rust-alloc/run_aarch64.sh`). Spreads are under 0.3, but for
+mimalloc sized on the first row (+0.92):
+
+| Workload | cralloc | snmalloc | jemalloc | tcmalloc per-CPU | mimalloc sized | mimalloc | glibc | tcmalloc per-thread | Floor, heap | Floor, TLS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Pair, constant size | 13.01 | 9.49 | 13.31 | 15.42 | 15.17 | 18.14 | 19.00 | 40.03 | 8.99 | 4.49 |
+| `Box` | 13.37 | 10.36 | 13.46 | 16.27 | 15.18 | 17.47 | 21.66 | 40.70 | 8.92 | 5.24 |
+| Pair, run-time size | 13.30 | 9.65 | 13.28 | 15.52 | 15.34 | 17.74 | 19.03 | 40.03 | 9.02 | 8.93 |
+| Batch of 32 | 13.09 | 12.56 | 13.33 | 15.22 | 15.22 | 15.18 | 45.22 | 39.59 | 9.52 | 5.08 |
+| Batch, run-time size | 13.28 | 12.85 | 13.34 | 15.26 | 15.25 | 15.23 | 45.18 | 39.64 | 9.53 | 9.39 |
+| Pair, mixed sizes | 8.19 | 9.58 | 10.46 | 15.94 | 16.66 | 15.00 | 21.56 | 45.91 | 5.31 | 3.49 |
+| Batch, mixed sizes | 9.95 | 11.39 | 12.36 | 16.12 | 14.22 | 13.32 | 32.80 | 42.67 | 6.84 | 6.56 |
+| Churn over 10,000 live blocks | 19.51 | 20.89 | 26.21 | 25.22 | 36.24 | 35.03 | 36.09 | 48.48 | 13.50 | 12.41 |
+
+- **The fast path inlines.** `bench/roofline/fastpath/check.py` finds both sequences inside the loop
+  and no call: 54 instructions and 212 bytes at a constant size, 69 and 272 at a run-time size.
+- **The gaps from 13 are not placement.** Eight placements of each loop (`RA_PAD`, 16 to 128) move
+  every row by at most 0.04. `Box` adds 0.36 and a run-time size 0.29: the program's store and the
+  table's load, beside the hops.
+- **Mixed sizes fall below 13 because the words differ,** which leaves one hop a pair. There the
+  count binds: 62 instructions at 8 a cycle are 7.75 of the 8.19, and the two floors, at 25 and 19
+  instructions, show what the count costs. On churn no hop binds either, by the test below.
+- **snmalloc beats the tight pair by 3.5 cycles, by being a list:** the hop with no add, 4 cycles and
+  not 6. It is not renaming, since a run-time size costs it the same. Of everything here only the
+  thread-local floor renames: 4.49 at a constant size, which an immediate offset allows, and 8.93 at
+  a run-time size, which it does not. No incumbent qualifies. Lose the tight pair's shape and
+  snmalloc loses too, on mixed sizes and churn.
+
+From C, through the preload library and a direct call, cycles per allocate and free (`f3e635c`,
+`bench/roofline/centry/compare.sh`; churn at `9eb4705`). snmalloc has no preload library here:
+
+| Workload | cralloc | mimalloc | glibc | jemalloc | tcmalloc per-CPU | tcmalloc per-thread |
+|---|---:|---:|---:|---:|---:|---:|
+| `malloc(32)`, `free` | 21.99 | 17.71 | 17.14 | 32.89 | 31.53 | 39.60 |
+| `calloc(1, 32)`, `free` | 23.51 | 17.86 | 17.41 | 33.49 | 32.10 | 43.43 |
+| Batch of 32 | 13.44 | 15.33 | 46.53 | 14.93 | 16.87 | 44.20 |
+| Sizes 1 to 512 | 13.81 | 19.20 | 16.43 | 22.18 | 26.89 | 40.75 |
+| Churn over 10,000 live blocks | 15.57 | 33.31 | 31.66 | 25.75 | 21.07 | 46.35 |
+
+The PLT adds 0.1 to a pair, 1.5 to a batch and 1.1 to churn, and linking statically changes nothing
+past 0.2. A C pair is the one place an incumbent wins clearly: `free` finds the class through the
+pointer it was just handed, so the chain runs through the allocation ("The C entry points"). glibc
+and mimalloc pay about 4.5 cycles less for theirs; why was not traced. Only a program that frees what
+it just allocated pays this: on the batch, mixed sizes and churn cralloc leads.
+
 ## How a load gets a value a store just wrote
 
 Each cell is the loop `load; add 1; store` to one location, so 1.00 means the hop is free.
