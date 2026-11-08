@@ -175,16 +175,17 @@ mimalloc sized on the first row (+0.92):
   a run-time size, which it does not. No incumbent qualifies. Lose the tight pair's shape and
   snmalloc loses too, on mixed sizes and churn.
 
-From C, through the preload library and a direct call, cycles per allocate and free (`f3e635c`,
-`bench/roofline/centry/compare.sh`; churn at `9eb4705`). snmalloc has no preload library here:
+From C, through the preload library and a direct call, cycles per allocate and free
+(`bench/roofline/centry/compare.sh`, `a032091`, the incumbents at `f3e635c`). snmalloc has no preload
+library here:
 
 | Workload | cralloc | mimalloc | glibc | jemalloc | tcmalloc per-CPU | tcmalloc per-thread |
 |---|---:|---:|---:|---:|---:|---:|
-| `malloc(32)`, `free` | 21.99 | 17.71 | 17.14 | 32.89 | 31.53 | 39.60 |
-| `calloc(1, 32)`, `free` | 23.51 | 17.86 | 17.41 | 33.49 | 32.10 | 43.43 |
-| Batch of 32 | 13.44 | 15.33 | 46.53 | 14.93 | 16.87 | 44.20 |
-| Sizes 1 to 512 | 13.81 | 19.20 | 16.43 | 22.18 | 26.89 | 40.75 |
-| Churn over 10,000 live blocks | 15.57 | 33.31 | 31.66 | 25.75 | 21.07 | 46.35 |
+| `malloc(32)`, `free` | 22.00 | 17.71 | 17.14 | 32.89 | 31.53 | 39.60 |
+| `calloc(1, 32)`, `free` | 22.71 | 17.86 | 17.41 | 33.49 | 32.10 | 43.43 |
+| Batch of 32 | 13.53 | 15.33 | 46.53 | 14.93 | 16.87 | 44.20 |
+| Sizes 1 to 512 | 13.54 | 19.20 | 16.43 | 22.18 | 26.89 | 40.75 |
+| Churn over 10,000 live blocks | 15.68 | 33.31 | 31.66 | 25.75 | 21.07 | 46.35 |
 
 The PLT adds 0.1 to a pair, 1.5 to a batch and 1.1 to churn, and linking statically changes nothing
 past 0.2. A C pair is the one place an incumbent wins clearly: `free` finds the class through the
