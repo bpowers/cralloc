@@ -211,10 +211,11 @@ cannot be rebuilt under a session.
   either way). The runner takes the smaller, since real other work shows in both, and leaves
   out each CPU's `ksoftirqd`, which runs the server's own deferred network work. For a server
   it does this over every counted segment of the plan, and more than 0.1 CPUs of other work in
-  any one segment (0.3 on aarch64, where the clocks disagree by more) makes the run invalid; for any
-  other job, over the whole run, with a limit of 0.25 CPUs. Quiet server segments measure at most 0.06, quiet runs of the quick suite at
-  most 0.1; three seconds of one busy CPU, 0.55 to 0.97 in its segment. The results are
-  `interference.foreign_by_segment` and `interference.foreign_task_cpus`.
+  any one segment (0.3 on aarch64, where the clocks disagree by more) makes the run invalid;
+  for any other job, over the whole run, with a limit of 0.25 CPUs. Quiet server segments
+  measure at most 0.06, quiet runs of the quick suite at most 0.1; three seconds of one busy
+  CPU, 0.55 to 0.97 in its segment. The results are `interference.foreign_by_segment` and
+  `interference.foreign_task_cpus`.
 - **Control.** `mimalloc-ctl` is mimalloc under a second name and from its own build
   directory, run as if it were another allocator. The report compares it with mimalloc on
   every job, pairing runs from the same round, with a 95% bootstrap interval of the median
