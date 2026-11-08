@@ -535,8 +535,9 @@ structure Api where
   summary : String
   /-- The items of the `# Safety` section, but for those `Sig.validDoc` and
   `Sig.layoutDoc` give (what memory each buffer must be valid for, and where
-  it may be). -/
-  safety : List String
+  it may be), under the calling convention of the target it is for: `Api.artifact`
+  gives it that, so that no registration chooses what the section says. -/
+  safety : {M : ISA} → Abi M → List String
   /-- The operands its code names, by name (`Operand`). -/
   operands : List (String × Operand) := []
   /-- The const generic parameters of an inline function, as Rust writes
@@ -557,12 +558,12 @@ structure Api where
   rather than the result (`Rust.inlineFunction`). -/
   retNonzero : Bool := false
 
-/-- The documentation of `api` on a target: its summary, then the paragraphs
-`notes`, then its `# Safety` section, if it has anything to say there. -/
-def Api.doc (api : Api) (notes : List String := []) : String :=
+/-- The documentation of `api` on a target of the calling convention `A`: its summary, then the
+paragraphs `notes`, then its `# Safety` section, if it has anything to say there. -/
+def Api.doc {M : ISA} (api : Api) (A : Abi M) (notes : List String := []) : String :=
   api.summary ++ String.join (notes.map ("\n\n" ++ ·)) ++
-    if api.safety.isEmpty then "" else
-      "\n\n# Safety\n\n" ++ "\n".intercalate (api.safety.map ("* " ++ ·))
+    if (api.safety A).isEmpty then "" else
+      "\n\n# Safety\n\n" ++ "\n".intercalate ((api.safety A).map ("* " ++ ·))
 
 /-- `s'` holds the arguments of a function of signature `sig` that `s`
 holds, where the calling convention `A` passes them. -/

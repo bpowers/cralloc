@@ -22,7 +22,7 @@ namespace VG.Artifacts.Slab.AArch64
 open VG.Spec.Slab VG.Impl.Slab.AArch64 VG.Proof.Slab.AArch64
 
 def artifacts : List Artifact := [
-  (popInlineApi a64Docs).artifact VG.AArch64.inlineTarget {
+  popInlineApi.artifact VG.AArch64.inlineTarget {
     cfg := some ([.targetEnv "musl"], false)
     setup := setup
     code := popInline
@@ -34,7 +34,7 @@ def artifacts : List Artifact := [
     clobbersOk := fun _ _ hs => PopInline.clobbersOk hs
     witnesses := PopInline.witnesses
     witnessOk := PopInline.witnessOk },
-  (pushInlineRetApi a64Docs).artifact VG.AArch64.inlineTargetX4 {
+  pushInlineRetApi.artifact VG.AArch64.inlineTargetX4 {
     cfg := some ([.targetEnv "musl"], false)
     setup := setup
     code := pushInline
@@ -46,7 +46,7 @@ def artifacts : List Artifact := [
     clobbersOk := fun _ _ hs => PushInline.clobbersOk hs
     witnesses := PushInline.witnesses
     witnessOk := PushInline.witnessOk },
-  (casApi a64Docs).artifact VG.AArch64.target {
+  casApi.artifact VG.AArch64.target {
     cfg := some ([.targetEnv "musl"], false)
     setup := slowSetup
     code := cas
@@ -56,7 +56,7 @@ def artifacts : List Artifact := [
     setupOk := Cas.setupOk
     witnesses := Cas.witnesses
     witnessOk := Cas.witnessOk },
-  (stackPushApi a64Docs).artifact VG.AArch64.target {
+  stackPushApi.artifact VG.AArch64.target {
     cfg := some ([.targetEnv "musl"], false)
     setup := slowSetup
     code := stackPush
@@ -66,7 +66,7 @@ def artifacts : List Artifact := [
     setupOk := StackPush.setupOk
     witnesses := StackPush.witnesses
     witnessOk := StackPush.witnessOk },
-  (stackPopApi a64Docs).artifact VG.AArch64.target {
+  stackPopApi.artifact VG.AArch64.target {
     cfg := some ([.targetEnv "musl"], false)
     setup := slowSetup
     code := stackPop
@@ -76,7 +76,7 @@ def artifacts : List Artifact := [
     setupOk := StackPop.setupOk
     witnesses := StackPop.witnesses
     witnessOk := StackPop.witnessOk },
-  (currentCpuApi a64Docs).artifact VG.AArch64.inlineTarget {
+  currentCpuApi.artifact VG.AArch64.inlineTarget {
     cfg := some ([.targetEnv "musl"], false)
     code := currentCpu
     verified := Cpu.verified

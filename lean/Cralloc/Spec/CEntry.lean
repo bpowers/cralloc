@@ -547,11 +547,11 @@ def tablePath (n : String) : String := "crate::c::table::" ++ n
 
 /-- What every C routine requires: of the thread, of where things are, and
 of the invariant. -/
-def safety (tables : List String) (d : Docs := {}) : List String :=
-  let stack := match d.stack false with
+def safety (tables : List String) (d : Docs) : List String :=
+  let stack := match d.stack with
     | some st => s!"overlap {st} or wrap"
     | none => "wrap"
-  let magStack := match d.stack false with
+  let magStack := match d.stack with
     | some st => s!", {st},"
     | none => ""
   [registeredDoc] ++ d.slabs ++
@@ -592,7 +592,7 @@ def rustConsts : List (String × IntTy × Nat) :=
     ("MASK_DISP", .usize, MASK_DISP), ("MASK_COUNT", .usize, MASK_COUNT),
     ("SLAB_COUNT", .usize, SLAB_COUNT), ("SLAB_BYTES", .usize, SLAB_BYTES)]
 
-def mallocApi (d : Docs := {}) : Api where
+def mallocApi : Api where
   module := "centry"
   name := "c_malloc"
   sig := mallocSig
@@ -603,54 +603,47 @@ def mallocApi (d : Docs := {}) : Api where
     magazine has none to give. `malloc_slow` starts with the thread's `rseq_cs` still pointing \
     at this function's sequence, which it has left.\n\n\
     Contract: `VG.Spec.CEntry.mallocContract`."
-  safety := safety [s!"the {MALLOC_LEN} bytes {TABLE_OFF} bytes into `C_SIZES`"] d
+  safety A := safety [s!"the {MALLOC_LEN} bytes {TABLE_OFF} bytes into `C_SIZES`"] (Docs.of A)
   operands := operands (some SIZES) (slowPath "malloc_slow")
   rustConsts := rustConsts
   exports := [("c", "malloc")]
 
-/-- A free's `Api`: its name, mirror, slow path and the symbols it is exported as. -/
-def freeApiOf (name : String) (m : Mirror) (slow : String) (exports : List (String × String))
-    (d : Docs := {}) : Api where
+/-- C's `free`. -/
+def freeApi : Api where
   module := "centry"
-  name := name
+  name := "c_free"
   sig := freeSig
-  contracts := some fun A _ => freeContract A m
-  summary := s!"For {m.doc}: returns at once for null; otherwise pushes `ptr` on the calling \
+  contracts := some fun A _ => freeContract A .c
+  summary := s!"For {Mirror.c.doc}: returns at once for null; otherwise pushes `ptr` on the calling \
     thread's CPU's magazine of the class its region's byte names, the region index being \
-    `(ptr >> shift) - base_index` from the words of the mirror at {m.disp} bytes above `SLABS`, or tail-calls \
-    `{slow}(ptr)` if the index is not below 4096, the CPU number has no slab, the \
+    `(ptr >> shift) - base_index` from the words of the mirror at {Mirror.c.disp} bytes above `SLABS`, or tail-calls \
+    `{slowPath "free_slow"}(ptr)` if the index is not below 4096, the CPU number has no slab, the \
     class's mask is 0 or its magazine has no free slot to spare.\n\n\
     Contract: `VG.Spec.CEntry.freeContract`."
-  safety := safety (regionDoc m) d
-  operands := operands none slow
+  safety A := safety (regionDoc .c) (Docs.of A)
+  operands := operands none (slowPath "free_slow")
   rustConsts := rustConsts
-  exports := exports
+  exports := [("c", "free")]
 
-/-- A sized free's `Api`. -/
-def freeSizedApiOf (name : String) (m : Mirror) (slow : String)
-    (exports : List (String × String)) (d : Docs := {}) : Api where
+/-- C's `free_sized`. -/
+def freeSizedApi : Api where
   module := "centry"
-  name := name
+  name := "c_free_sized"
   sig := freeSizedSig
-  contracts := some fun A _ => freeSizedContract A m
-  summary := s!"For {m.doc}: the class `C_SIZED_SIZES[size % 65536]` is a prediction, which the class \
+  contracts := some fun A _ => freeSizedContract A .c
+  summary := s!"For {Mirror.c.doc}: the class `C_SIZED_SIZES[size % 65536]` is a prediction, which the class \
     byte of `ptr`'s region must match, the region found as the plain free with the same \
     mirror finds it; then pushes `ptr` on the calling thread's CPU's magazine of \
-    that class, or tail-calls `{slow}(ptr, size)` if the two disagree, the region index is not \
+    that class, or tail-calls `{slowPath "free_sized_slow"}(ptr, size)` if the two disagree, the region index is not \
     below 4096, the CPU number has no slab, the class's mask is 0 or its magazine has no free \
     slot to spare. A wrong size frees exactly what the plain free would.\n\n\
     Contract: `VG.Spec.CEntry.freeSizedContract`."
-  safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc m) d
-  operands := operands (some SIZED) slow
+  safety A := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc .c) (Docs.of A)
+  operands := operands (some SIZED) (slowPath "free_sized_slow")
   rustConsts := rustConsts
-  exports := exports
+  exports := [("c", "free_sized")]
 
-/-- C's `free` and `free_sized`. -/
-def freeApi (d : Docs := {}) : Api := freeApiOf "c_free" .c (slowPath "free_slow") [("c", "free")] d
-def freeSizedApi (d : Docs := {}) : Api :=
-  freeSizedApiOf "c_free_sized" .c (slowPath "free_sized_slow") [("c", "free_sized")] d
-
-def callocApi (d : Docs := {}) : Api where
+def callocApi : Api where
   module := "centry"
   name := "c_calloc"
   sig := callocSig
@@ -661,7 +654,7 @@ def callocApi (d : Docs := {}) : Api where
     returns it; otherwise, or if the CPU number has no slab, the class's mask is 0 or its \
     magazine has none to give, tail-calls `c::slow::calloc_slow_args(n, size)`.\n\n\
     Contract: `VG.Spec.CEntry.callocContract`."
-  safety := safety [s!"the {CALLOC_LEN} bytes {TABLE_OFF} bytes into `C_CALLOC_SIZES`"] d
+  safety A := safety [s!"the {CALLOC_LEN} bytes {TABLE_OFF} bytes into `C_CALLOC_SIZES`"] (Docs.of A)
   operands := operands (some CALLOC_SIZES) (slowPath "calloc_slow_args") ++
     [(ZERO, .sym (slowPath "calloc_zero_tail"))]
   rustConsts := rustConsts ++ [("CALLOC_MAX", .usize, CALLOC_MAX), ("CALLOC_LEN", .usize, CALLOC_LEN)]
