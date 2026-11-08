@@ -46,11 +46,10 @@ A clean bit must be true, since more than the retained count and the purge walk'
 it: the purge that leaves every page of a free slot clean sets the slot's zero bit
 (BACK-REGION-01, step 3). No zero bit is set by anything else here, and a claim takes a slot for
 zero only from its zero bit, which only a purge sets. So a claim never reports pages as zero that
-are not (`a_small_tenant_after_a_large_one_is_charged_what_is_resident`, and the random runs of
-`large_charge`, which read every page after every step). Those runs use a shape that staggers by
-lines alone; what a stagger by pages does to the bits has directed tests in `back::tests::kernels`
-(`the_pages_a_stagger_passes_over_stay_clean`,
-`a_block_at_its_slots_start_grows_back_over_clean_pages`).
+are not (`a_small_tenant_after_a_large_one_is_charged_what_is_resident`; the random runs of
+`large_charge`, which read every page after every step, on blocks staggered by lines alone and by
+pages too; and `large_charge::one_slot`, which puts one slot through every history on each kernel's
+pages).
 
 **Proof.**
 
