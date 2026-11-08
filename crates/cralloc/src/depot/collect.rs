@@ -39,7 +39,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             .depot
             .common
             .cpus
-            .load(core::sync::atomic::Ordering::Relaxed);
+            .load(core::sync::atomic::Ordering::Acquire);
         for index in 0..count {
             if let Some(cpu) = self.routines.slabs().cpu(index as i32)
                 && Some(cpu) != me
