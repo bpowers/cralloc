@@ -13,7 +13,9 @@ generated `# Safety` sections, discharged once here for every call: the wrappers
   a negative `cpu_id` and stays unregistered.
 - (L) `SLABS` (the slabs), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks'
   table (`MASK_DISP` above `SLABS`), each routine's tables (`C_SIZES`, `C_CALLOC_SIZES` or `C_SIZED_SIZES` 2048
-  bytes in; the mirror of the heap words at `SHIFT_DISP` above `SLABS`, and the region table at `REGION_DISP` above `SLABS`) do not overlap the return address or wrap around the end of the address space;
+  bytes in; the mirror of the heap words at `SHIFT_DISP` above `SLABS`, and the region table at
+  `REGION_DISP` above `SLABS`) do not wrap around the end of the address space, or overlap the
+  return address on x86-64, where a call leaves it on the stack;
   `rseq_cs` overlaps none of the others; none but the slabs overlaps the slabs.
 - (P) On aarch64, `SLABS` starts on a boundary of 4096 bytes.
 - (I) For every class byte `k` below 256, the masks' table's entry `k` is zero or the mask of
@@ -39,7 +41,8 @@ values they read).
   `TABLE_OFF` and `SIZED_LEN` from `crate::spec`, which the Lean emitter writes, and asserts
   `MALLOC_LEN` and `CALLOC_LEN`). Distinct statics do not overlap, and none overlaps the thread's
   static TLS, which holds the rseq area (glibc's, or on musl the crate's own), or the thread's
-  stack. None is at the top of
+  stack. On aarch64 on musl there is no `__rseq_offset` word: the routines have the offset in
+  their instructions. None is at the top of
   the address space.
 - (P): as (P) in `front/real-safety.md`.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
@@ -47,7 +50,8 @@ values they read).
   byte of a small class is the position of its hot word (`Field::index`), not its class index;
   the tables and the mirror hold that byte (`c::table::word_byte`). For any other byte the
   entry is zero: `publish_masks` writes `MASK_TABLE`, which is zero for every position
-  that is not a small class's hot word (`front::tests`), and nothing else writes the table. A zero
+  that is not a small class's hot word (the Kani harness
+  `every_mask_entry_is_its_classs_mask_or_zero`), and nothing else writes the table. A zero
   mask carries no obligation on the words.
 
 ## What the routines' results mean
@@ -64,8 +68,10 @@ frees:
   to `slow::calloc_zero_tail`, which zeroes it (SLOW-04 in `slow-safety.md`).
 - `c_free` and `c_free_sized` push the pointer to the class named by the region's byte in the
   copy beside the slabs (the sized free only when its prediction agrees), the region found
-  from the mirror of the heap's words beside the slabs, which is zero or the heap's own words
-  (`c/mirror.rs`); zero sends every pointer to the slow path. That byte is zero or
+  from the mirror of the heap's words beside the slabs. The routine's loads come in no order, so
+  it may find each of those words zero or new, and the byte zero or new, in any mix. For a block of
+  the heap, every mix but both words new gives an index out of range, and the slow path, and both
+  new gives its region's entry (`c/mirror.rs`, with a test of every mix). That byte is zero or
   the region's true class (`c/mirror.rs`): it is written only after a small block of the region
   has been handed out to C, and the back end never takes a region holding blocks from its
   class. By the free's contract the pointer is a block of the heap the caller owns and gives
@@ -75,6 +81,13 @@ frees:
   decides from the back end's own table. A pointer into the middle of a small block is outside
   the contract; the routine pushes it as a block of its region's class, and it is caught only
   if it reaches the bitmaps before being handed out again (docs/design.md, "Interfaces").
+- Null is in the free's contract too, C23's `free_sized` included. `c_free` returns at once for
+  it. `c_free_sized` has no such test and goes by the index: out of range with the base index
+  new, and entry 0 of the region table with it zero, whatever the shift. Entry 0 is no region's
+  and is never written (`c/mirror.rs`), so the byte is zero: the prediction differs from it, or is
+  zero too and has a zero mask, and the routine leaves for the slow path, which does nothing for
+  null. So no routine puts null on a magazine, as (S) in `front/real-safety.md` asks
+  (`a_sized_free_of_null_pushes_nothing_whatever_it_reads_of_the_words`).
 - On a miss each routine tail-calls its slow path (`malloc_slow`, `calloc_slow_args`, `free_slow`,
   `free_sized_slow`) with its
   arguments as they arrived, which completes the call from scratch.
@@ -88,4 +101,4 @@ contract. Pointers cross the assembly as integers: `free` exposes the block's pr
 every object address lies in the heap's reservation, whose provenance the heap exposes when it
 starts.
 
-Reviewed: a09c36e
+Reviewed: 5a8ade1
