@@ -14,7 +14,7 @@ say so where they are made.
 a block is the non-null pointer of a slot or run (HEAP-01). The new size is looked up by
 itself (`SmallClass::of_nonzero`), with no `Layout`, so a size that breaks `realloc`'s rule
 builds nothing invalid: it has no small class, and the general path checks it with
-`Layout::from_size_align` and returns null, as before.
+`Layout::from_size_align` and returns null.
 
 ## HEAP-07: the copy and the push in `Bound::resize_small`
 
@@ -72,11 +72,10 @@ grant.ptr.as_ptr().add(old.size()).write_bytes(0, grant.len - old.size())
 **What it is for.** `Allocator::grow_zeroed` as stabilised in Rust 1.100: after the call,
 bytes `0..old.size()` hold what the old block held, and bytes `old.size()..len` are zero,
 where `len` is the length returned, which may be more than `new.size()`. The block the caller
-was given may be longer than `old.size()` (a small class's slack, a large block's size rounded
-up to a page, or a fitting layout smaller than the length returned), and the caller may have
-written all of it. So a byte past `old.size()` is known to be zero only if the block moved
-into memory known to read as zero. The earlier, unstable wording let the old block's slack be
-kept; the stable one does not.
+was given may be longer than `old.size()` (a small class's slack, a large block's size carried
+to the end of the page it ends in, or a fitting layout smaller than the length returned), and
+the caller may have written all of it. So a byte past `old.size()` is known to be zero only if
+the block moved into memory known to read as zero.
 
 **Preconditions.** `[grant.ptr + old.size(), grant.ptr + grant.len)` is valid for writes and
 nobody else uses it.
@@ -108,13 +107,12 @@ nobody else uses it.
   starts there.
 - *Large, in place* (`resize_large_in_place`): the caller's own block, `len` the usable size
   after `Back::resize_in_place` recorded the new size, `zeroed` false. That range lies inside
-  the slot or run and is committed: the block's start plus the new size fits `Back::room`,
-  and a large slot's size and a run's length are multiples of the page, so the size rounded up
-  to a page fits too (large classes are `q << e` with `2^e` at least 8 KiB, pages are at most
-  4 KiB wherever a large class's slot fits, runs are whole regions). A grow purges nothing
-  (`resize_in_place` returns pages only when a block shrinks), and purged memory would stay
-  writable and read as zero anyway. The clear covers `old.size()` to the old usable size,
-  which the caller may have written, and the pages past it, which an earlier tenant may have.
+  the slot or run and is committed: the new size fits `Back::room` from where the block starts,
+  and the slot or run ends on a page boundary (L1 to L3 in `heap/large-safety.md`). A grow may
+  return one huge page, having copied the bytes of the block in it aside and back
+  (`Back::unspill`, BACK-CLASS-05), and purged memory stays writable and reads as zero. The
+  clear covers `old.size()` to the old usable size, which the caller may have written, and the
+  pages past it, which an earlier tenant may have, and the copy `unspill` left in the new room.
 - *Moved by the general resize* (to or from a large block, to a new alignment, or after a
   lean pop that missed): the grant is a block just allocated for `new` (or for a layout with
   headroom), this thread's alone, `len` its usable size, and the copy or `move_large` wrote
@@ -123,8 +121,9 @@ nobody else uses it.
   purges only whole pages of the destination under the copied range; nothing needs clearing
   and none is done. Otherwise the clear covers `[old.size(), len)`.
 
-In every path the bytes `0..old.size()` are the old block's: in place they were never
-written, and moved they were copied before the clear, which starts at `old.size()`.
+In every path the bytes `0..old.size()` are the old block's: in place they are as they were,
+`unspill` having put back what it moved before it returned, and moved they were copied before
+the clear, which starts at `old.size()`.
 
 ## HEAP-09: `self.realloc_other(ptr, old, new_size)` in `Bound::realloc`
 
@@ -164,4 +163,4 @@ that the caller gives the block up only if the resize succeeds; `new` has a non-
 In `grow_kept` and `shrink_block` the lean path ran first; as in HEAP-09, it either was not
 taken or returned `None` having changed nothing.
 
-Reviewed: a09c36e
+Reviewed: 5a8ade1

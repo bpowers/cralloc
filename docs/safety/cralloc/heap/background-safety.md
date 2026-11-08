@@ -8,8 +8,8 @@ The background thread's creation through the C library (feature `background`).
 argument types and return type, and the `link` attribute names a library that defines them.
 
 **Proof.** The C prototypes (POSIX and glibc's `pthread.h`, `signal.h`) against the Rust
-declarations, on x86-64 System V, where every pointer is 8 bytes in a general register and
-`int` is `c_int`:
+declarations, on x86-64 System V and AAPCS64, where every pointer is 8 bytes in a general
+register and `int` is `c_int`:
 
 - `int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *)`:
   `pthread_t` is `unsigned long` in glibc and a pointer in musl, 8 bytes either way, so
@@ -21,10 +21,14 @@ declarations, on x86-64 System V, where every pointer is 8 bytes in a general re
 - `int sigfillset(sigset_t *)` and `int pthread_sigmask(int, const sigset_t *, sigset_t *)`:
   `SigSet` is `#[repr(C)]` over `[u64; 16]`, 128 bytes aligned to 8, which is `sigset_t` in
   glibc (`unsigned long __val[16]`) and musl alike. `SIG_BLOCK` is 0 and `SIG_SETMASK` 2 on
-  Linux x86-64.
+  Linux on both architectures (`asm-generic/signal-defs.h`).
 - `int sigaltstack(const stack_t *, stack_t *)`: `SignalStack` is `#[repr(C)]` `{ *mut
-  c_void, c_int, usize }`, which is x86-64's `stack_t` `{ void *ss_sp; int ss_flags; size_t
-  ss_size; }` with the same padding after the int. `SS_ONSTACK` is 1.
+  c_void, c_int, usize }`, which is `stack_t` `{ void *ss_sp; int ss_flags; size_t ss_size; }` on
+  both architectures (`asm-generic/signal.h`, the layout the system call takes), with the same
+  padding after the int. `SS_ONSTACK` is 1.
+
+On glibc on aarch64 a C program compiled against the headers reports these sizes, offsets and
+values (*measured*).
 
 `#[link(name = "c")]` adds `-lc`. glibc 2.34 and later define every one of these in
 `libc.so.6`, and musl's `libc.so` too. A Rust program that links `std` links the C library
@@ -33,17 +37,14 @@ feature's documentation says.
 
 ## BACKGROUND-02: `choice`, which reads the environment without the C library
 
-There is no `unsafe` here; the entry records why the read needs none, since it replaced one
-that was not sound.
+There is no `unsafe` here; the entry records why the read needs none. A `getenv` from a slow
+path would not be sound: C lets another thread's `setenv` or `putenv` replace the environment
+meanwhile, and musl frees the old array and strings when it does, and a program cannot order its
+own `setenv` against a `getenv` an allocator makes behind it.
 
-**What was wrong.** `choice` called `getenv` from a slow path, in any thread, at any time. C
-lets another thread's `setenv` or `putenv` replace the environment meanwhile, and musl frees
-the old array and strings when it does, so the read could be a use after free. A program can
-order its own `getenv` against its own `setenv`, but not one an allocator makes behind it.
-
-**What it does now.** `crate::environment` reads `/proc/self/environ` with the crate's own
-system calls (`LinuxOs::environment`, whose open, reads and close are KERNEL-10) into a
-buffer on the stack, and keeps the answer in one word of the depot (`Common::switch`).
+`crate::environment` reads `/proc/self/environ` with the crate's own system calls
+(`LinuxOs::environment`, whose open, reads and close are KERNEL-10) into a buffer on the stack,
+and keeps the answer in one word of the depot (`Common::switch`).
 
 - The kernel's copy is the memory between the process's `env_start` and `env_end`, read
   through the kernel, so no pointer into the C library's `environ` array is followed, and a
@@ -86,42 +87,43 @@ returns or unwinds; its stack holds its deepest frames.
   The new thread inherits the mask in force when it is created; the caller's own mask is put
   back with `SIG_SETMASK` whatever `create` returned.
 - I4. `run` calls `Bound::run_thread`, which loops for ever and does not unwind: every call in
-  it is the allocator's, which does not panic while serving (the crate's rule), and the
-  library is built with `panic = "abort"` where it matters (the preload library); a Rust
-  program's unwinding panic cannot start in allocator code.
+  it is the allocator's, which does not panic while serving (the crate's rule), and `run` is
+  `extern "C"`, which aborts the process rather than let a panic out of it.
 - I5. `pthread_detach` is called only after `create` returned 0, with the identifier it
   stored. The thread names itself at its start with the crate's own `prctl` (KERNEL-13),
   which opens no file: the C library's `pthread_setname_np` on another thread opens
   `/proc/self/task/<tid>/comm`, which a sandbox entered after start may forbid.
-- I8. `errno` is put back after the calls: `spawn` saves it first (ERRNO-02) and restores it
+- I6. `errno` is put back after the calls: `spawn` saves it first (ERRNO-02) and restores it
   whatever the calls did, so the allocation or free that started the thread changes no
   `errno`, as glibc's `free` changes none.
-- I6. The stack holds the thread. It is the C library's default, the one the program's own
+- I7. The stack holds the thread. It is the C library's default, the one the program's own
   threads get, which the library sizes against its own thread-local data
-  (`docs/research/portability.md`, "The background thread's stack"). The thread's frames reach
-  about 8 KiB in a release build and 34 KiB in a debug one (*measured*). glibc's default
-  (*measured*, and read in the 2.43 source by the reviewer) is the soft `RLIMIT_STACK` fixed at
-  start, 2 MiB if it is unlimited and 16 KiB if it is below that, raised to at least a page plus
-  the static thread-local block plus 2048 bytes, so the frames get the limit less the static
-  block, and at least about 6 to 10 KiB: 250,000 bytes of thread-local data under
-  `ulimit -s 256` or `-s 128` left the thread 9,776 bytes, and 104 bytes under `ulimit -s 16`
-  left 11.6 KiB. musl's default (*read in source* and *measured*) is 128 KiB plus the
-  thread-local data and its own block. A limit: a process started with a stack limit below its
-  static thread-local data plus about 40 KiB, or a program that lowers the default with
-  `pthread_setattr_default_np`, gives this thread the same few KiB as its own default threads,
-  which a release build's rounds fit and a debug build's may not. Another: a program that
-  locks all its memory (`mlockall(MCL_FUTURE)`) gets the whole default stack resident, 8 MiB
-  under the usual limit, as for each of its own threads. Without that, only the pages the
-  thread touches are resident, and the kernel keeps huge pages off a thread stack (`nh` in
-  its `VmFlags`, *measured*).
+  (`docs/research/portability.md`, "The background thread's stack"). On x86-64 the thread's
+  frames reach about 8 KiB in a release build and 34 KiB in a debug one (*measured*); on aarch64
+  a debug build's went 291,576 bytes below the top of a stack with 252,000 bytes of thread-local
+  data (*measured*, `tests/thread_stack.rs`), about as far. glibc's
+  default (*measured* on x86-64, and read in the 2.43 source) is the soft `RLIMIT_STACK` fixed at
+  start, 2 MiB if it is unlimited and `PTHREAD_STACK_MIN` if it is below that (16 KiB on x86-64,
+  128 KiB on aarch64), raised to at least a page plus the static thread-local block plus 2048
+  bytes, so the frames get the limit less the static block, and on pages of 4 KiB at least about
+  6 to 10 KiB, more on larger pages: 250,000 bytes of thread-local data under `ulimit -s 256` or
+  `-s 128` left the thread 9,776 bytes, and 104 bytes under `ulimit -s 16` left 11.6 KiB. musl's
+  default (*read in source* and *measured*) is 128 KiB plus the thread-local data and its own
+  block. A limit: a process started with a stack limit below its static thread-local data plus
+  about 40 KiB, or a program that lowers the default with `pthread_setattr_default_np`, gives this
+  thread the same few KiB as its own default threads, which a release build's rounds fit and a
+  debug build's may not. Another: a program that locks all its memory (`mlockall(MCL_FUTURE)`)
+  gets the whole default stack resident, 8 MiB under the usual limit, as for each of its own
+  threads. Without that, only the pages the thread touches are resident, and the kernel keeps
+  huge pages off a thread stack (`nh` in its `VmFlags`, *measured*).
 
 **Proof.** By I1 the call creates an ordinary thread of the C library. By I2 every pointer
 passed is valid for what the call does with it. By I3 the new thread has every program signal
 blocked, so a handler never runs on it and process-directed signals go to the program's
 threads, while the caller's mask is unchanged after the call. By I4 the thread never returns
 into the C library with a value it would interpret, and never unwinds through an `extern "C"`
-frame. By I5 the detach is made on a live thread, and naming needs no file. By I8 the
-caller's `errno` is unchanged. By I6 the thread's frames fit its
+frame. By I5 the detach is made on a live thread, and naming needs no file. By I6 the
+caller's `errno` is unchanged. By I7 the thread's frames fit its
 stack, within the stated limit. A failure of `create` returns its error, leaves the caller's
 mask as it was, and starts nothing.
 
@@ -140,8 +142,8 @@ create one of its own (`tests/fork_loader_lock.rs`). A limit remains, the same a
 `_dl_close_worker`), the opposite order, so the slow path that starts the
 thread, once per process, deadlocks if it runs inside a `dl_iterate_phdr` callback, which
 holds `dl_load_write_lock` (std's backtrace symbolizer allocates in one), while another
-thread is inside `dlopen` or `dlclose` (reproduced by the reviewer; the case
-`a_free_in_a_callback_returns_beside_a_dlopen`, run with `CRALLOC_TEST_KNOWN_FAILURES=1`).
+thread is inside `dlopen` or `dlclose` (the case `a_free_in_a_callback_returns_beside_a_dlopen`,
+run with `CRALLOC_TEST_KNOWN_FAILURES=1`, reproduces it).
 No cheap and sound test tells a slow path that its thread holds the loader's lock: the lock
 is private to glibc. On musl, `dl_iterate_phdr` holds no lock while its callback runs (read in
 source: it takes its read lock only to step to the next module).
@@ -163,4 +165,4 @@ pointers are valid for writes of a `sigset_t` and a `stack_t`.
 (POSIX: with a null `set`, `how` is ignored); `sigaltstack(NULL, &stack)` only stores the
 current alternate stack. Both targets are locals of the right layout (BACKGROUND-01).
 
-Reviewed: 6439180
+Reviewed: 0a92f0b

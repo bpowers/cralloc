@@ -1,9 +1,9 @@
 //! The `Allocator` trait's operations on a heap (cargo feature `allocator-api`).
 //!
 //! `allocate` returns the usable size: the class size for a small block, and for a large one
-//! the size asked for rounded up to a page (`Heap::usable_size`), never the whole slot or run,
-//! which may be far bigger. `deallocate` may then be called with any size from the one
-//! requested to that length, which maps to the same class (the fit rule, proved in
+//! the size asked for carried to the end of the page it ends in (`Heap::usable_size`), never the
+//! whole slot or run, which may be far bigger. `deallocate` may then be called with any size from
+//! the one requested to that length, which maps to the same class (the fit rule, proved in
 //! `classes::verify`), or, for a large block, is not consulted at all. A zero-size layout gets a
 //! dangling pointer aligned to it and no block, and a zero-size block is never freed. The
 //! ledger for the unsafe blocks here is `docs/safety/cralloc/heap/allocator-safety.md`.
