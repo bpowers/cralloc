@@ -79,8 +79,8 @@ end Parts
 
 theorem trace_eq {M : ISA} (c : Spec.Slab.Ctx M) {post : M.State → M.State → Prop}
     {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
-    {trace : M.State → List Event → Prop} :
-    (contract c post exit abort trace).trace = trace := rfl
+    {trace : M.State → List Event → Prop} (s : M.State) (evs : List Event) :
+    (contract c post exit abort trace).trace s evs = trace s (c.attemptEvents s evs) := rfl
 
 theorem env_eq {M : ISA} (c : Spec.Slab.Ctx M) {post : M.State → M.State → Prop}
     {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
@@ -276,6 +276,7 @@ theorem layout_of {s p : M.State} (h1 : c.slabs p = c.slabs s) (h2 : c.fixed p =
   disj := by rw [h2]; exact hl.disj
   slabs := by rw [h2, h1]; exact hl.slabs
   res := by rw [h2, h3]; exact hl.res
+  page := by rw [h1]; exact hl.page
 
 theorem layout (h : Same c s p) : c.Layout p ↔ c.Layout s :=
   ⟨layout_of h.symm.slabs h.symm.fixed h.symm.res, layout_of h.slabs h.fixed h.res⟩
@@ -343,6 +344,49 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
       (fun w hw => (hW w hw).2.2 (by simp) _ hx) (by decide)
 
 end Inv
+
+/-! ## A state with the same addresses and memory -/
+
+section Kept
+
+variable {M : ISA} {c : Spec.Slab.Ctx M} {s p : M.State}
+
+/-- A state with the addresses and the memory of `s` has its regions. -/
+theorem Same.regions (h : Same c s p) (hm : c.mem p = c.mem s) : c.regions p = c.regions s := by
+  have hcpu : c.cpu p = c.cpu s := by simp only [Spec.Slab.Ctx.cpu, h.cpuField, hm]
+  have hword : c.word p = c.word s := by simp only [Spec.Slab.Ctx.word, h.sym, hcpu, h.cls]
+  have hw : c.w p = c.w s := by simp only [Spec.Slab.Ctx.w, hm, hword]
+  have hslots := slots_eq h
+  have hmore : c.more p = c.more s := by
+    obtain ⟨A, f, sig⟩ := c
+    cases f <;> simp only [Spec.Slab.Ctx.more, Spec.Slab.Ctx.magRegion, hw, hslots]
+  simp only [Spec.Slab.Ctx.regions, h.fixed, Spec.Slab.Ctx.InRange, hcpu, hword, hmore]
+
+/-- The precondition holds in a state with the addresses, the memory and the
+permissions of one where it holds, if the convention's well-formedness does. -/
+theorem pre_of_same {post : M.State → M.State → Prop}
+    {exit : String → M.State → M.State → Prop} {abort : M.State → M.State → Prop}
+    {trace : M.State → List Event → Prop} {vals : M.State → List (BitVec 64)}
+    (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
+    (hb : ∀ x, Sig.bufs c.sig.params (vals x) = [])
+    (ha : ∀ x, c.A.argArea ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) x = [])
+    (hwf : c.A.wf ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) 0 p)
+    (hs : (contract c post exit abort trace).pre s) (hsame : Same c s p) (hm : c.mem p = c.mem s)
+    (hrd : c.A.rd p = c.A.rd s) (hwr : c.A.wr p = c.A.wr s) :
+    (contract c post exit abort trace).pre p := by
+  obtain ⟨-, hw, htp, hsym, hargs, hl, hinv⟩ := (pre_iff c hv (hb s) (ha s)).mp hs
+  have hreg := hsame.regions hm
+  have hi : c.inv p := inv_frame hsame (W := []) (by rw [hm]; exact Frame.refl _ _) (by simp)
+    (cls_lt hargs) hinv
+  refine (pre_iff c hv (hb p) (ha p)).mpr ⟨hwf, ⟨?_, ?_, ?_, ?_, ?_⟩, htp, hsym, hsame.argsOk.mpr hargs,
+    hsame.layout.mpr hl, hi⟩
+  · simp only [Spec.Slab.Ctx.ro, hreg, hrd]; exact hw.rd
+  · simp only [Spec.Slab.Ctx.rw, hreg, hwr]; exact hw.wr
+  · rw [hreg]; exact hw.nowrap
+  · rw [hreg]; exact hw.disj
+  · rw [hreg, hsame.res]; exact hw.res
+
+end Kept
 
 /-! ## A retry's precondition -/
 

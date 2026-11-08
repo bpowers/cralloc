@@ -2636,7 +2636,7 @@ mod lean_realloc {
 mod cache_domains {
     use super::*;
     use crate::Cralloc;
-    use crate::depot::Pool;
+    use crate::depot::{MAX_DOMAINS, Pool};
     use crate::front::{Real, Routines};
     use std::collections::BTreeMap;
 
@@ -2647,6 +2647,14 @@ mod cache_domains {
 
     /// The CPU numbers the sets hold, up to this.
     const CPUS: usize = 1024;
+
+    /// The CPUs online.
+    fn online() -> Vec<usize> {
+        let text = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap();
+        let mut cpus = Vec::new();
+        assert!(crate::depot::domain::each_cpu(text.as_bytes(), |cpu| cpus.push(cpu)));
+        cpus
+    }
 
     /// The CPUs this thread may run on.
     fn allowed() -> Vec<usize> {
@@ -2711,8 +2719,8 @@ mod cache_domains {
             held.push(block);
         }
 
-        // The heap found what sysfs says, for each CPU this test may use.
-        let cpus = allowed();
+        // The heap found what sysfs says, for every CPU online.
+        let cpus = online();
         let heap = super::super::global::process().heap();
         let domain = |cpu: usize| heap.depot.domain_of(Real.slabs().cpu(cpu as i32));
         let mut sharers: BTreeMap<std::string::String, Vec<usize>> = BTreeMap::new();
@@ -2722,7 +2730,8 @@ mod cache_domains {
                 .or_default()
                 .push(cpu);
         }
-        if sharers.keys().all(std::string::String::is_empty) {
+        let nothing_shared = sharers.len() == cpus.len();
+        if sharers.keys().all(std::string::String::is_empty) || nothing_shared {
             std::eprintln!("this machine lists no shared cache: one domain");
             assert_eq!(heap.depot.domain_count(), 1);
             return;
@@ -2733,18 +2742,34 @@ mod cache_domains {
             }
         }
         let groups: Vec<&Vec<usize>> = sharers.values().collect();
-        for (i, a) in groups.iter().enumerate() {
-            for b in &groups[i + 1..] {
-                assert_ne!(domain(a[0]), domain(b[0]), "CPUs {a:?} and {b:?}");
+        assert_eq!(heap.depot.domain_count(), groups.len().min(MAX_DOMAINS));
+        if groups.len() <= MAX_DOMAINS {
+            for (i, a) in groups.iter().enumerate() {
+                for b in &groups[i + 1..] {
+                    assert_ne!(domain(a[0]), domain(b[0]), "CPUs {a:?} and {b:?}");
+                }
             }
         }
-        // Two CPUs of one domain and one of another, if this process may use them.
-        let Some(two) = groups.iter().find(|group| group.len() >= 2) else {
-            std::eprintln!("no domain of two CPUs among {cpus:?}");
+        // Two CPUs of one domain and one of another, if this process may use them: `scripts/heavy`
+        // keeps tests off the cores measurements use.
+        let allowed = allowed();
+        let usable: Vec<Vec<usize>> = groups
+            .iter()
+            .map(|group| {
+                let usable = |cpu: &&usize| allowed.contains(cpu);
+                group.iter().filter(usable).copied().collect()
+            })
+            .collect();
+        let Some(two) = usable.iter().find(|group| group.len() >= 2) else {
+            std::eprintln!("no domain of two CPUs among {allowed:?}");
             return;
         };
-        let Some(other) = groups.iter().find(|group| group[0] != two[0]) else {
-            std::eprintln!("one domain among {cpus:?}");
+        let Some(other) = usable.iter().find(|group| {
+            group
+                .first()
+                .is_some_and(|&cpu| domain(cpu) != domain(two[0]))
+        }) else {
+            std::eprintln!("one domain among {allowed:?}");
             return;
         };
         let (first, second, third) = (two[0], two[1], other[0]);

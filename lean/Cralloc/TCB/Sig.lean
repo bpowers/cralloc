@@ -170,6 +170,13 @@ structure Abi (M : ISA) where
   /-- The value of each compile-time constant the code can name
   (`Operand.const`), by name, on a target whose code can name one. -/
   param : Option (M.State → String → BitVec 64) := none
+  /-- Whether a routine finds the thread's rseq area once, in its setup
+  (`Artifact.setup`), so that the memory accesses of its attempts do not include
+  reading `__rseq_offset` (`Contract.trace`). -/
+  setupFindsArea : Bool := false
+  /-- Whether the code may form the address of the slabs from their page alone
+  (AArch64's `adrp` with no `:lo12:`), so that the slabs must start on a page. -/
+  slabsOnPage : Bool := false
 
 /-! ## Tables of constants
 
