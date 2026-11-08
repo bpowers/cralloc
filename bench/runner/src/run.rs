@@ -156,9 +156,8 @@ impl Snapshot {
 /// segment of its plan, before the run is invalid. Other work there takes the server's cores
 /// and caches, and comes and goes, so it moves one allocator's run and not the next. Quiet
 /// runs measured at most 0.06 in a segment; three seconds of one busy CPU, 0.55 to 0.97. On the
-/// M1 Max the reading runs from -0.19 to 0.25 under load, where the threads actually on those
-/// CPUs add up to under 0.08 (docs/research/measuring.md, "On the M1 Max"), so its limit is that
-/// much higher.
+/// M1 Max the meter's own offset under load reaches 0.16 (docs/research/measuring.md, "On the M1
+/// Max"), so its limit is that much higher.
 const FOREIGN_LIMIT: f64 = if cfg!(target_arch = "aarch64") { 0.3 } else { 0.1 };
 /// The same for a job without a load plan, over the process's whole life. Quiet runs of the
 /// quick suite measured at most 0.1.
