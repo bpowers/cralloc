@@ -192,8 +192,9 @@ commit or the drain, and a magazine handle is only made for an address the commi
 **The proofs in Lean say nothing about memory order.** Their model is sequential and has no barrier
 instruction: a proof says what a routine's instructions do to memory taken in program order, one
 thread at a time and interrupted anywhere. It does not say what another CPU sees of them, or when.
-The routines hold plain `ldr`, `ldp` and `str` and no barrier (`front/provisional/`, read line by line
-against this section; `generated/x86_64` is the same in `mov`s), and these stand in for a proof:
+The routines hold plain `ldr`, `ldp` and `str` and no barrier (`front/provisional/` and
+`front/generated/aarch64_inline/`, read line by line against this section; `generated/x86_64` is the
+same in `mov`s), and these stand in for a proof:
 
 - **A slab word is written only on its own CPU,** by a routine, or by a drainer the fence orders
   against that CPU. The next thread on the CPU has what the last one wrote by the context switch. A
