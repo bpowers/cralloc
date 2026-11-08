@@ -270,7 +270,7 @@ theorem restartsOkS : ∀ s s', attempt.pre s → Restarts inlineTarget popInlin
   restartsOk_inline (ret := .x0) verified (fun _ hs p hp => (clobbersOkS hs).2.2 p hp)
     fun _ _ hpe => argsKept_regs hX (by decide) fun r hr => hpe r (by revert r; decide)
 
-def art : Artifact := (popInlineApi a64Docs).artifact VG.AArch64.inlineTarget {
+def art : Artifact := popInlineApi.artifact VG.AArch64.inlineTarget {
   cfg := some ([.targetEnv "musl"], false)
   setup := setupS
   code := popInline
