@@ -187,6 +187,51 @@ cralloc, by group (the RPC jobs are above):
 | Rust programs preloaded (3) | 1.56 (x1.23) | 1.55 (x1.21) | 1.59 (x1.85) | 4.29 (x4.40) |
 | C programs preloaded (8) | 1.16 (x1.19) | 1.26 (x1.70) | 0.94 (x1.07) | 1.36 (x1.53) |
 
+## On the M1 Max
+
+**On the kernel suite cralloc leads here as it does on the Ryzen: ahead on 35 jobs, level on 9, behind
+on 11 of 55, and its time is 0.826 of the best incumbent's (geomean).** Everything else in this note
+is the Ryzen's. The servers and programs have not run here yet, so this says nothing about them.
+
+An Apple M1 Max under Asahi Linux 7.2.12 with 16 KiB pages, at `66dfb90`, 2026-11-08: the generated
+routines, the rules in bytes. Three rounds of every job under eight builds, 1,506 runs, 4 left out for
+other work. The best incumbent is the best of seven: mimalloc v3.5.3 and the crate's, per-CPU tcmalloc,
+jemalloc, glibc and snmalloc, a Release build at last. The control is 0.33% from mimalloc at the median
+of 63 jobs and 3.1% at the 90th percentile; its largest are modes of mimalloc's, up to 21%. The others
+against cralloc, geomean with the geometric standard deviation across jobs:
+
+| Group (jobs) | jemalloc | tcmalloc | mimalloc | glibc | snmalloc |
+|---|---:|---:|---:|---:|---:|
+| Cross-thread (23) | 2.27 (x1.65) | 1.73 (x1.59) | 3.69 (x1.84) | 20.6 (x1.90) | 2.30 (x1.32) |
+| Work stealing (4) | 1.11 (x1.13) | 1.12 (x1.12) | 1.43 (x1.54) | 2.01 (x2.11) | 1.17 (x1.19) |
+| RPC (3) | 1.01 (x1.02) | 0.99 (x1.00) | 1.00 (x1.01) | 1.13 (x1.05) | 0.99 (x1.01) |
+| Single-thread (14) | 1.40 (x1.37) | 1.30 (x1.30) | 1.46 (x1.44) | 2.24 (x1.85) | 1.18 (x1.46) |
+| Rust programs preloaded (3) | 1.60 (x1.31) | 1.35 (x1.14) | 1.38 (x1.54) | 4.39 (x3.69) | |
+| C programs preloaded (8) | 1.17 (x1.29) | 1.36 (x1.96) | 1.09 (x1.23) | 1.35 (x1.55) | |
+| **Memory**, cgroup peak of the jobs where cralloc reaches 30 MiB (14; snmalloc 9) | 1.04 (x1.15) | 1.11 (x1.31) | 1.56 (x1.47) | 1.10 (x1.15) | 1.15 (x1.32) |
+
+**The cross-thread lead is what the Ryzen showed.** Moving a line between clusters costs what crossing
+L3s does ([machine-aarch64.md](machine-aarch64.md)). On one pipeline cralloc takes 4.6 ns an allocation
+against per-CPU tcmalloc's 8.6, and across clusters 12.2 against jemalloc's 20.5.
+
+**Where it is behind,** each against its job's best incumbent. "Instructions" is the share of the gap in
+cycles, and above 1 means more instructions and fewer stalls; "kernel" is the share in kernel cycles.
+Placement is the mean over five pads (0 to 128 bytes), three rounds, two for the RPC jobs.
+
+| Job | Against | Gap | Instructions | Kernel | Faults | Over placements |
+|---|---|---:|---:|---:|---:|---|
+| One pipeline of 4 to 256 KiB blocks | mimalloc | 148% | 1.55 | 0.0 | level | Not swept: far outside any placement |
+| `largepair` | snmalloc | 102% | 0.93 | 0.0 | level | Not swept. glibc takes 17.6 ns where it stays in its top, and 1,611 in the two runs of three where it faults on every pair |
+| `json 32Mi` | mimalloc | 8% | 1.31 | 0.26 | 20,129 / 13 | 7.3%, resolved (11.95, against 11.14) |
+| `map hash 1M` | the mimalloc crate | 6% | 0.85 | 0.31 | 13,236 / 636 | 5.7%, resolved. Ahead of mimalloc v3.5.3 by 1.1% |
+| `sh8bench`, `mstress` | mimalloc | 6%, 4% | over 1 | | 8,714 / 120, 9,146 / 234 | Preloaded, not swept |
+
+- **`json` and `map hash` are mimalloc's huge pages and our back end, not the fast path.** Its heap is
+  on 32 MiB pages, so it takes almost no faults, and a quarter to a third of the gap is the kernel's.
+  [firestorm.md](firestorm.md) puts the rest of JSON's in the launder and the fill.
+- **Level once swept:** `map btree 1M`, 0.4%, its ranges overlapping, and `rpc log c64`, `rpc echo c64` and `spawn t4`, within 0.7%. The Box tree is ahead,
+  2.1% over placements.
+
 ## Where cralloc is behind, and why
 
 Each cause is the one its own study found; none was profiled again at the latest commit.
