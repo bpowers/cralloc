@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <time.h>
+#include <unistd.h>
 
 static const char *mode;
 static int rounds;
@@ -32,7 +33,7 @@ static long rss_mib(void) {
     FILE *f = fopen("/proc/self/statm", "r");
     if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
     if (f) fclose(f);
-    return rss * 4096 / (1 << 20);
+    return rss * sysconf(_SC_PAGESIZE) / (1 << 20);
 }
 
 static long peak_mib(void) {

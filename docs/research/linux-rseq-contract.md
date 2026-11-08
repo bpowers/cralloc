@@ -21,6 +21,7 @@ trusted").
 | `cpu_id` is negative with no registration | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; seen under valgrind. Refusal by seccomp under glibc is from source |
 | `membarrier` on every CPU returns only after every sequence in flight has completed or been aborted | 7.2.9 | `rseq_drain.rs` |
 | The same, aimed at one CPU, which is what the drain uses | tag v7.2 | No probe isolates it: a test that it returns success, and soak modes that drain |
+| Either form is also a full barrier between the caller and those CPUs, which `membarrier(2)` does not promise of it ([memory-ordering.md](memory-ordering.md)) | tag v7.2 | `kernel_fence` in `depot/ordering.rs` |
 | glibc registers a thread's area before the thread can call the allocator | glibc 2.43 | `rseq_lifecycle.rs`; `rseq_preload.rs`. In a static program an IFUNC resolver runs before the thread pointer exists (not tested) |
 | A forked child is safe. A `vfork` or `CLONE_VM` child is not, and glibc never allocates in one | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; `cid_stress.rs`; `rseq_preload.rs` |
 
@@ -126,6 +127,11 @@ interrupt, so its abort is pending. One scheduled out elsewhere is not in a sequ
 it starts later begins after the caller's stores: the call has a full barrier at entry and exit,
 paired with the scheduler's.
 
+That barrier is also how a drainer sees a routine's plain stores on a weakly ordered CPU, with no
+release in the routine: what that CPU's threads stored before the handler's barrier, the caller's
+loads after the call see, and the same on arm64 as on x86-64
+([memory-ordering.md](memory-ordering.md), "What stands in for a release").
+
 - **Registration.** `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ`, once per address space, or
   `EPERM`. With more than one thread it allocates a CPU mask and waits for an RCU grace period
   (`:465`, `:473`). A forked child inherits it (observed); `execve` clears it (from source).
@@ -134,9 +140,10 @@ paired with the scheduler's.
   nothing, so a drain's back-out answers `EPERM`, `EINVAL` or a seccomp filter, not memory pressure.
   A failed registration turns drains off for the life of the process, with no retry
   (`depot/generation.rs`).
-- **Shortcuts, all correct.** One user of the address space or one online CPU returns at once. A CPU
-  number past `nr_cpu_ids`, not online, or running another address space returns 0 with no
-  interrupt.
+- **Shortcuts, all correct.** One user of the address space or one online CPU returns at once, with
+  no barrier at all, so `LinuxOs` follows the call with an acquire fence
+  ([memory-ordering.md](memory-ordering.md)). A CPU number past `nr_cpu_ids`, not online, or running
+  another address space returns 0 with no interrupt.
 - **Cost.** 3.5 to 5.7 microseconds a process-wide call run alone, 18 and 26 beside stress runs,
   with 8 to 24 CPUs busy in the process. Process-wide calls share one system-wide mutex
   (`:172-175`), per-CPU calls a mutex per CPU (`:176`). The per-CPU form's cost was not measured.
@@ -252,6 +259,34 @@ while the thread is switched out, so two running threads never share one and a c
 flips, over four runs of 300 to 600 s, under affinity, signal, `membarrier`, fork and page-fault
 storms: no lost update, no foreign owner, no ID of 8192 or more. Its control, never arming with 72
 threads, gave 14,200 foreign owners and 1.6e9 lost updates in 4 s.
+
+## aarch64
+
+What the design trusts holds on aarch64 as far as the probes attack it: on a kernel with 16 KiB pages
+and on a much older one with 4 KiB, every abort point aborted, no fence let a sequence commit late,
+and every life-cycle state read as on x86-64.
+
+| | M1 Max, Linux 7.2.12, 16 KiB pages | microVM on it, Linux 6.12.109, 4 KiB pages |
+|---|---|---|
+| Abort before each of 6 instructions (`rseq_abort`) | 6 aborted, none committed | the same |
+| Late commits in 20 s of drains, three threads a CPU (`rseq_drain`) | 0 of 329,338 owned, 2.8e9 commits | 0 of 388 owned, 2.8e8 commits |
+| A `membarrier` call | 6.3 us | 49 ms, on a host busy with other work |
+| The same with no barrier, 10 s | 120,393 late commits | late commits |
+| `AT_RSEQ_FEATURE_SIZE`, `__rseq_size` | 33 | 28 |
+| `AT_RSEQ_ALIGN`, `__rseq_offset` | 64, +256 | 32, +256 |
+| `rseq_lifecycle` | as on x86-64 | as on x86-64 |
+| Calls with no registration, in `ls`, `sh`, threaded Python with `fork`, `cargo`, `perl` (`rseq_preload`) | 0 of 25,000 | not run |
+| `rseq_readonly`, pinned, then migrating | top bit kept, then SIGSEGV | top bit kept |
+
+Three things differ from x86-64, none of them in what the routines rely on. The signature is
+`0xd428bc00` (`brk #0x45e0`), and registering another makes the first abort kill the process: musl's
+area did that until it registered this one. `__rseq_offset` is positive, the static thread-local data
+lying above the thread pointer. And `NR_CPUS` stops at 4096 (`arch/arm64/Kconfig`), so 8192 slabs
+cover it with room. A breakpoint needs no privilege here, so the soak's sweep runs as it does on
+x86-64.
+
+A call of 49 ms is the price of an interrupt to a virtual CPU that is not running, so a test that
+drains is slow in such a VM and not wrong. Single runs, 2026-11-07, commit c991762.
 
 ## Kernels below 7.2
 

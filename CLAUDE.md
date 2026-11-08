@@ -10,9 +10,11 @@ have learned about allocator performance and links the evidence behind it.
 
 ## Platform
 
-We develop, test and measure on x86-64, Linux 7.2, glibc 2.43 and stable Rust 1.99. Nightly is
-only for tools that need it (Miri, Kani). Lean is pinned in `lean/`. `third_party/` holds
-local reference checkouts, is gitignored, and is read-only.
+We develop, test and measure on two machines, both Linux 7.2, glibc 2.43 and stable Rust 1.99:
+x86-64 (Ryzen 9 9950X) and aarch64 (Apple M1 Max under Asahi Linux, with 16 KiB pages). Each CPU
+is the baseline on its architecture: nothing older needs to work well, and no older Rust at
+all. Nightly is only for tools that need it (Miri, Kani). Lean is pinned in `lean/`.
+`third_party/` holds local reference checkouts, is gitignored, and is read-only.
 
 ## How we work
 
@@ -80,8 +82,8 @@ process light.
 ## Correctness rules
 
 - All assembly is generated from Lean. Never write `asm!`, `naked_asm!` or `global_asm!` by
-  hand in the allocator. The one exception is the system-call instruction in the OS
-  interface, which has a ledger entry.
+  hand in the allocator. The exceptions are in the OS interface: the system-call instruction
+  and, on aarch64, the reads of the timer and the thread pointer, which have ledger entries.
 - The allocator crate has no dependencies, not even on a C library: it makes its own system
   calls. The exception is the default `background` feature: it creates the background
   thread through the C library, so that the library knows the thread exists. Nothing else

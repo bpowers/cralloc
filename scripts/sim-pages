@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Runs the allocator's own tests on simulated pages of 16 KiB and 64 KiB, which scale the shapes
+# their sizes were written for (`os::sim::PAGE_SCALE`). The real kernels' page sizes are found at
+# run time, so this is the only way one machine runs the heap's rules at the other two. A separate
+# build for each page, in a target directory of its own. Takes minutes, and runs on demand.
+#
+# Usage: scripts/heavy scripts/sim-pages [args for the test binary...]
+set -uo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+failed=0
+for shift in 14 16; do
+  echo "== pages of $((1 << (shift - 10))) KiB"
+  CRALLOC_SIM_PAGE_SHIFT=$shift CARGO_TARGET_DIR="$root/target/sim-pages-$shift" \
+    cargo test -p cralloc --lib --quiet -- "$@" || failed=1
+done
+exit "$failed"

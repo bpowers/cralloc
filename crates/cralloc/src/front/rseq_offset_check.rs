@@ -14,9 +14,15 @@ use super::{SLAB_BYTES, clear_of_hot};
 use std::string::String;
 use std::vec::Vec;
 
+/// The relocation types of a word holding an address, a copy and a GOT slot, on this target.
+#[cfg(target_arch = "x86_64")]
+const RELOCATIONS: (u32, u32, u32) = (1, 5, 6);
+#[cfg(target_arch = "aarch64")]
+const RELOCATIONS: (u32, u32, u32) = (257, 1024, 1025);
+
 /// Where this binary's relocations put something for `__rseq_offset`: (relocation type,
-/// address in the file's image). A routine's word holding its address (`R_X86_64_64`), a GOT
-/// slot (`R_X86_64_GLOB_DAT`) or a copy (`R_X86_64_COPY`).
+/// address in the file's image). A routine's word holding its address (`R_X86_64_64` or
+/// `R_AARCH64_ABS64`), a GOT slot (`GLOB_DAT`) or a copy (`COPY`).
 fn rseq_offset_relocations(image: &[u8]) -> Vec<(u32, u64)> {
     let u16_at = |at: usize| u16::from_le_bytes(image[at..at + 2].try_into().unwrap()) as usize;
     let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
@@ -55,30 +61,35 @@ fn the_rseq_offset_the_routines_load_is_off_every_hot_words_page_offset() {
     let relocations = rseq_offset_relocations(&image);
     // The routines that read through a word (all of them by default, the out-of-line ones in the
     // `executable` form) read their own; only Rust code off the fast paths reads the GOT slot.
+    let (word, copy, got) = RELOCATIONS;
     if cfg!(target_env = "gnu") {
         assert!(
-            relocations.iter().any(|&(kind, _)| kind == 1),
-            "no routine's word holds the address of `__rseq_offset` (R_X86_64_64)"
+            relocations.iter().any(|&(kind, _)| kind == word),
+            "no routine's word holds the address of `__rseq_offset`"
         );
     }
+    #[cfg_attr(all(target_arch = "aarch64", target_env = "musl"), allow(unused_mut))]
     let mut sites: Vec<(String, usize)> = relocations
         .into_iter()
-        .filter(|&(kind, _)| kind != 6)
+        .filter(|&(kind, _)| kind != got)
         .map(|(kind, at)| {
-            let what = match kind {
-                1 => "a routine's word holding the address of `__rseq_offset` (R_X86_64_64)",
-                5 => "the copy of `__rseq_offset` (R_X86_64_COPY)",
-                _ => "a relocation of `__rseq_offset`",
+            let what = if kind == word {
+                "a routine's word holding the address of `__rseq_offset`"
+            } else if kind == copy {
+                "the copy of `__rseq_offset`"
+            } else {
+                "a relocation of `__rseq_offset`"
             };
             (what.into(), at as usize)
         })
         .collect();
     // The load bias is a whole number of pages, so file addresses keep their page offsets; the
-    // variable itself is the copy, glibc's own, or on musl the crate's word.
-    let variable = (&raw const super::__rseq_offset).addr();
+    // variable itself is the copy, glibc's own, or on musl the crate's word (x86-64's: aarch64's
+    // routines have none there).
+    #[cfg(not(all(target_arch = "aarch64", target_env = "musl")))]
     sites.push((
         "the variable the routines read, at run time".into(),
-        variable,
+        (&raw const super::__rseq_offset).addr(),
     ));
     for (what, at) in sites {
         assert!(

@@ -32,10 +32,22 @@ extern "C" {
     fn getenv(name: *const u8) -> *const u8;
 }
 
+#[cfg(target_arch = "x86_64")]
 const SYS_WRITE: u64 = 1;
+#[cfg(target_arch = "x86_64")]
 const SYS_FCNTL: u64 = 72;
+#[cfg(target_arch = "x86_64")]
 const SYS_GETTID: u64 = 186;
+#[cfg(target_arch = "x86_64")]
 const SYS_RSEQ: u64 = 334;
+#[cfg(target_arch = "aarch64")]
+const SYS_WRITE: u64 = 64;
+#[cfg(target_arch = "aarch64")]
+const SYS_FCNTL: u64 = 25;
+#[cfg(target_arch = "aarch64")]
+const SYS_GETTID: u64 = 178;
+#[cfg(target_arch = "aarch64")]
+const SYS_RSEQ: u64 = 293;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const EPERM: i64 = -1;
 
@@ -49,8 +61,11 @@ static NO_CPU: AtomicU64 = AtomicU64::new(0);
 
 unsafe fn raw(n: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
     let ret: i64;
+    #[cfg(target_arch = "x86_64")]
     asm!("syscall", inlateout("rax") n as i64 => ret, in("rdi") a, in("rsi") b, in("rdx") c, in("r10") d,
          lateout("rcx") _, lateout("r11") _, options(nostack));
+    #[cfg(target_arch = "aarch64")]
+    asm!("svc #0", in("x8") n, inlateout("x0") a as i64 => ret, in("x1") b, in("x2") c, in("x3") d, options(nostack));
     ret
 }
 
@@ -109,7 +124,10 @@ fn check(what: &str) {
             }
         }
         let tp: usize;
+        #[cfg(target_arch = "x86_64")]
         asm!("mov {}, fs:0", out(reg) tp, options(nostack, readonly));
+        #[cfg(target_arch = "aarch64")]
+        asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack, preserves_flags));
         let area = (tp as isize + __rseq_offset) as *const u32;
         let len = if __rseq_size < 32 { 32 } else { __rseq_size };
         // An unregister request with the wrong signature: EPERM if this thread has exactly

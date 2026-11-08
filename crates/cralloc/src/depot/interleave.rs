@@ -789,12 +789,47 @@ fn held_hints_stay_set_under_every_schedule(bounds: Bounds) {
     report("held hints", found);
 }
 
+/// A `collect` whose thread moves to another CPU partway through emptying its own slab leaves
+/// nothing on either: the rest of its first slab goes the way of the other CPUs'.
+#[test]
+fn a_collect_that_moves_empties_every_slab() {
+    #[derive(Default)]
+    struct OnCpus(usize);
+    impl crate::stats::Visitor for OnCpus {
+        fn magazine(&mut self, place: crate::stats::Place, _class: SmallClass, objects: usize) {
+            if !matches!(place, crate::stats::Place::Depot) {
+                self.0 += objects;
+            }
+        }
+    }
+    let found = explore(
+        Bounds::preemptions(0),
+        1,
+        || {
+            let world = World::new(6, 0);
+            world.populate();
+            world.migrations.store(1, Ordering::SeqCst);
+            world
+        },
+        |world, me| world.rig.cache(&world.machine(me, 0)).collect(),
+        |_| {},
+        |world, _| {
+            world.check(false);
+            let mut left = OnCpus::default();
+            let rig = &world.rig;
+            super::inspect(&rig.depot, rig.cell.get().unwrap(), rig.slabs(), &mut left);
+            assert_eq!(left.0, 0, "objects stayed on a CPU");
+        },
+    );
+    report("a collect that moves", found);
+}
+
 impl World {
-    /// A heap whose every CPU is a cache domain of its own, so that CPU 0 and CPU 1 use
-    /// different stacks and each is "another domain" to the other, with `classes`.
+    /// A heap whose even and odd CPUs are two cache domains, so that CPU 0 and CPU 1 use different
+    /// stacks and each is "another domain" to the other, with `classes`.
     fn in_two_domains(classes: &[SmallClass]) -> World {
         let os = SimOs::new();
-        os.set_topology(SimTopology::Blocks(1));
+        os.set_topology(SimTopology::Stripes(2));
         let world = World {
             rig: Rig::with_os(os, classes, 6, TIGHT),
             migrations: AtomicUsize::new(0),

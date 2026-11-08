@@ -7,7 +7,7 @@ use super::word::Atomic;
 use crate::cells::Cells;
 use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
-use crate::space::{MAX_REGIONS, RegionId, Space};
+use crate::space::{Geometry, MAX_REGIONS, RegionId, Space};
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU32;
 
@@ -176,6 +176,11 @@ impl<O: Os> Host for ClassHost<'_, O> {
     #[inline(always)]
     fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    #[inline(always)]
+    fn geometry(&self) -> Geometry {
+        self.space.plan().geometry()
     }
 
     #[inline(always)]

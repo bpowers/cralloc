@@ -9,14 +9,14 @@
 //! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
 //! children, unmap, fence the restartable sequences of one CPU, draw a random number, read a
 //! clock, read the CPU topology and the initial environment, and abort. Each implementation
-//! also fixes the [`Geometry`] the heap is laid out with, so the simulated OS can use a
-//! scaled-down heap.
+//! also says what [`Geometry`] the heap is laid out with, so the simulated OS can use a
+//! scaled-down heap, and an OS whose page size is known only at run time can say what it found.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
 //! this and wraps the calls, so most code never calls them directly.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
+#[cfg(cralloc_os)]
 pub mod linux;
 pub mod machine;
 #[cfg(any(test, kani, feature = "sim"))]
@@ -68,9 +68,9 @@ impl fmt::Debug for OsError {
 pub enum Topology {
     /// The CPUs that are online (`/sys/devices/system/cpu/online`).
     Online,
-    /// The CPUs that share CPU `n`'s L3 cache
-    /// (`/sys/devices/system/cpu/cpuN/cache/index3/shared_cpu_list`).
-    SharedL3(u32),
+    /// The CPUs that share CPU `n`'s last-level cache: the `shared_cpu_list` of the highest
+    /// `/sys/devices/system/cpu/cpuN/cache/indexM` there is.
+    SharedLastLevel(u32),
 }
 
 /// Transparent-huge-page advice for a range.
@@ -101,13 +101,18 @@ pub enum HugePages {
 /// - A reservation's memory stays valid until it is unmapped or the value that made it is
 ///   dropped, whichever is first. Moving the value moves none of its reservations.
 /// - `fence(cpu)` returns `Ok` only after every restartable sequence of the process that was in
-///   flight on CPU `cpu` when it was called has completed or been aborted.
+///   flight on CPU `cpu` when it was called has completed or been aborted. It is also a barrier
+///   between that CPU and the caller, which stands in for the release and acquire a routine's
+///   plain stores and loads do not have: whatever a thread on that CPU stored before the sequence
+///   ended, the caller's loads after the call see, and a sequence that starts after the call
+///   sees whatever the caller stored before it.
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
 pub unsafe trait Os: Sync {
-    /// The shape of the heap this OS hosts.
-    const GEOMETRY: Geometry;
+    /// The shape of the heap this OS hosts: the same at every call in a process. Slow paths may
+    /// read it often: where it is a constant it folds away, and elsewhere it is one load.
+    fn geometry() -> Geometry;
 
     /// Reserves `len` bytes of inaccessible address space aligned to `align`. `len` is a
     /// non-zero multiple of the page size and `align` a power of two no smaller than a page.
@@ -197,7 +202,7 @@ pub unsafe trait Os: Sync {
 
     /// Waits while the low 32 bits of `word` hold the low 32 bits of `expected`, for at most
     /// `timeout_ns` nanoseconds if given (`FUTEX_WAIT_PRIVATE` on the word's first four bytes,
-    /// its low half on x86-64). Returns at once if they differ, and otherwise on a
+    /// its low half on a little-endian machine). Returns at once if they differ, and otherwise on a
     /// [`Os::wake`], at the timeout, on a signal, or for no reason: the caller looks at the word
     /// again. Never fails visibly. Every change the caller waits for must change the low half.
     fn wait(&self, word: &AtomicU64, expected: u64, timeout_ns: Option<u64>);
@@ -225,8 +230,9 @@ pub unsafe trait Os: Sync {
     fn random(&self) -> u64;
 
     /// A count that rises with wall-clock time, read without a system call: the CPU's
-    /// timestamp counter on Linux, a clock the test advances in the simulators. Its rate is not
-    /// known (on x86-64 it is somewhere between 1 and 6 GHz), and nothing promises that two
+    /// timestamp counter on x86-64, the generic timer scaled up to a few gigahertz on aarch64,
+    /// and a clock the test advances in the simulators. Its rate is not known exactly (between
+    /// 1 and 6 GHz on x86-64, and between 3 and 6 GHz on aarch64), and nothing promises that two
     /// CPUs agree or that it never goes back. It paces what happens once an interval: the idle
     /// check's drains and the back end's clocked purge, both read on slow paths. No promise of
     /// this trait's safety contract depends on it: a wrong count only makes a drain or a purge

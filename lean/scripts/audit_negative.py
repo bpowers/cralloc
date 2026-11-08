@@ -36,6 +36,19 @@ found (`scripts/witnesses/`), and checks that the check rejects each:
   emitter audits in its own process (`Emit.lean`), so it must still report
   the axiom.
 
+And it adds a registration file that brings its own target, printer, `Api` and
+artifact (`FORGED`), whose proofs all go through and which would emit other
+code than was proven, and checks that the audit refuses each.
+
+And it adds a registration file that imports a module not under `Cralloc`
+(`FOREIGN`), with a target of its own, a theorem of `False` the kernel never saw
+and an initializer, and checks that the audit refuses the module and the target and
+that the initializer did not run; and a module under `Cralloc` whose initializer
+ends the process with success, declared in a form the scan of the text used not to
+see (`EARLY`), and checks that the audit, which must come first, refuses it; and a
+module with each compiler override (`OVERRIDE`), which that audit, on an import with
+no extension loaded, must still find.
+
 Run it from anywhere after `lake build`: it rebuilds the few modules of the
 self-test that the edits change, and the next `lake build` rebuilds them from
 the restored files.
@@ -85,6 +98,210 @@ theorem vg_bad_thm : False := vg_bad
 end VG.Proof.Selftest.AuditPrivate
 """
 
+# A registration of the self-test's proved `add`, with a printer that writes `mov x0, #0` for it.
+FORGED = LEAN / "Cralloc" / "Artifacts" / "Selftest" / "AuditForged.lean"
+FORGED_NS = "VG.Artifacts.Selftest.AuditForged"
+FORGED_TEXT = f"""module
+
+public import Cralloc.Proof.Selftest.AArch64
+public import Cralloc.Proof.Framework.Registration
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace {FORGED_NS}
+
+def forgedPrinter : Printer VG.AArch64.isa :=
+  {{ VG.AArch64.printer with instr := fun _ => [.text "mov x0, #0"] }}
+
+abbrev forgedTarget : Target := {{ VG.AArch64.target with printer := forgedPrinter }}
+
+def forgedApi : Api := {{ Spec.Selftest.addApi with name := "vg_forged_add" }}
+
+def artifacts : List Artifact := [
+  forgedApi.artifact forgedTarget {{
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness }},
+  {{ Spec.Selftest.addApi with
+    name := "vg_forged_direct"
+    target := VG.AArch64.target
+    doc := Spec.Selftest.addApi.summary
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness }}]
+
+end {FORGED_NS}
+"""
+
+# A module not under `Cralloc`, and a registration of what it gives.
+FOREIGN_LIB = LEAN / "CrallocTest" / "AuditForeign.lean"
+FOREIGN_RAN = "code of a module not under Cralloc ran"
+FOREIGN_LIB_TEXT = f"""module
+
+public import Cralloc.TCB.AArch64.Target
+meta import Lean
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace AuditForeign
+
+abbrev evil : VG.Target :=
+  {{ VG.AArch64.target with
+    printer := {{ VG.AArch64.printer with instr := fun _ => [.text "mov x0, #0"] }} }}
+
+set_option debug.skipKernelTC true in
+theorem vg_false : False := by
+  run_tac do
+    let g ← Lean.Elab.Tactic.getMainGoal
+    g.assign (Lean.mkConst ``True.intro)
+
+initialize
+  IO.eprintln "{FOREIGN_RAN}"
+
+end AuditForeign
+"""
+
+FOREIGN = LEAN / "Cralloc" / "Artifacts" / "Selftest" / "AuditForeign.lean"
+FOREIGN_TEXT = """module
+
+public import CrallocTest.AuditForeign
+public import Cralloc.Proof.Selftest.AArch64
+public import Cralloc.Proof.Framework.Registration
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace VG.Artifacts.Selftest.AuditForeign
+
+def artifacts : List Artifact := [
+  Spec.Selftest.addApi.artifact AuditForeign.evil {
+    suffix := "_printer"
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness },
+  Spec.Selftest.addApi.artifact VG.AArch64.target {
+    suffix := "_false"
+    code := .block [.mov .x .x0 (.imm 0)]
+    verified := AuditForeign.vg_false.elim
+    witnesses := []
+    witnessOk := AuditForeign.vg_false.elim }]
+
+end VG.Artifacts.Selftest.AuditForeign
+"""
+
+# A module under `Cralloc` whose initializer would end the emitter with success, and a registration
+# that imports it.
+EARLY_LIB = LEAN / "Cralloc" / "Proof" / "Selftest" / "AuditEarly.lean"
+EARLY_RAN = "this module's initializer ran before the audit"
+EARLY_LIB_TEXT = f"""module
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace VG.Proof.Selftest.AuditEarly
+
+def hook : IO Unit := do
+  IO.eprintln "{EARLY_RAN}"
+  IO.Process.exit 0
+
+attribute [init] hook
+
+end VG.Proof.Selftest.AuditEarly
+"""
+
+EARLY = LEAN / "Cralloc" / "Artifacts" / "Selftest" / "AuditEarly.lean"
+EARLY_TEXT = """module
+
+public import Cralloc.Proof.Selftest.AuditEarly
+public import Cralloc.Proof.Framework.Registration
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace VG.Artifacts.Selftest.AuditEarly
+
+def artifacts : List Artifact := []
+
+end VG.Artifacts.Selftest.AuditEarly
+"""
+
+# A module with each compiler override, and a registration that runs what it overrides.
+OVERRIDE_LIB = LEAN / "Cralloc" / "Proof" / "Selftest" / "AuditOverride.lean"
+OVERRIDE_NS = "VG.Proof.Selftest.AuditOverride"
+OVERRIDE_LIB_TEXT = f"""module
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace {OVERRIDE_NS}
+
+def other : String := "_other"
+
+@[implemented_by other] def swapped : String := "_swapped"
+
+@[extern "vg_no_such_symbol"] def external : Nat → Nat := fun n => n
+
+@[export vg_exported] def exported : String := "_exported"
+
+def f : Nat := 1
+def g : Nat := 1
+
+@[csimp] theorem f_eq : @f = @g := rfl
+
+end {OVERRIDE_NS}
+"""
+
+OVERRIDE = LEAN / "Cralloc" / "Artifacts" / "Selftest" / "AuditOverride.lean"
+OVERRIDE_TEXT = f"""module
+
+public import Cralloc.Proof.Selftest.AuditOverride
+public import Cralloc.Proof.Selftest.AArch64
+public import Cralloc.Proof.Framework.Registration
+
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
+
+@[expose] public section
+
+namespace VG.Artifacts.Selftest.AuditOverride
+
+open {OVERRIDE_NS}
+
+def artifacts : List Artifact := [
+  Spec.Selftest.addApi.artifact VG.AArch64.target {{
+    suffix := swapped ++ exported ++ toString (external 1)
+    code := Impl.Selftest.AArch64.add
+    contract := Spec.Selftest.addContract VG.AArch64.abi
+    verified := Proof.Selftest.AArch64.add_verified
+    witnesses := [Proof.Selftest.AArch64.sat]
+    witnessOk := Proof.Selftest.AArch64.add_witness }}]
+
+end VG.Artifacts.Selftest.AuditOverride
+"""
+
+# What the audit must say of it: each definition, and what only the trusted files may build.
+FORGED_REFUSALS = [(f"{FORGED_NS}.forgedPrinter", "VG.Printer.mk"),
+                   (f"{FORGED_NS}.forgedTarget", "VG.Target.mk"),
+                   (f"{FORGED_NS}.forgedApi", "VG.Api.mk"),
+                   (f"{FORGED_NS}.artifacts", "VG.Artifact.mk")]
+
+
+# Every file the test adds.
+ADDED = (PRIVATE, FORGED, FOREIGN_LIB, FOREIGN, EARLY_LIB, EARLY, OVERRIDE_LIB, OVERRIDE)
+
 
 def is_module(text: str) -> bool:
     return any(l.strip() == "module" for l in text.split("\n")[:5])
@@ -128,7 +345,8 @@ def inject_private_import(text: str) -> str:
 # Each audit command, and an argument to give it in the scratch module.
 AUDITS = [("#assert_standard_axioms", "VG.standardAxioms"),
           ("#assert_no_compiler_overrides", "VG.standardAxioms"),
-          ("#assert_spec_origin", "")]
+          ("#assert_spec_origin", ""),
+          ("#assert_built_inside", "")]
 
 
 def audits_refused(tmp: str) -> bool:
@@ -149,28 +367,28 @@ def audits_refused(tmp: str) -> bool:
     return ok
 
 
-def emit_check(edits: dict, added: pathlib.Path) -> str | None:
-    """Writes `edits` (file: new text) and `added` (with `PRIVATE_TEXT`), runs
-    `Emit.lean --check`, restores the files and deletes `added` (and its
-    build), and returns the output if it failed, else `None`."""
+def emit_check(edits: dict, added: dict) -> str | None:
+    """Writes `edits` and `added` (each file: new text), runs `Emit.lean
+    --check`, restores the files of `edits`, deletes those of `added` (and their
+    builds), and returns the output if it failed, else `None`."""
     with tempfile.TemporaryDirectory() as tmp:
         saved = {p: pathlib.Path(tmp) / p.name for p in edits}
         for p, copy in saved.items():
             shutil.copy2(p, copy)
         try:
-            added.write_text(PRIVATE_TEXT)
-            for p, text in edits.items():
+            for p, text in {**added, **edits}.items():
                 p.write_text(text)
             r = subprocess.run(["lake", "env", "lean", "--run", "Emit.lean", "--check"],
                                cwd=LEAN, capture_output=True, text=True)
         finally:
             for p, copy in saved.items():
                 shutil.copy2(copy, p)
-            added.unlink(missing_ok=True)
             build = LEAN / ".lake" / "build"
-            for d in ("lib/lean", "ir"):
-                for f in (build / d).glob(f"{added.relative_to(LEAN).with_suffix('')}.*"):
-                    f.unlink()
+            for p in added:
+                p.unlink(missing_ok=True)
+                for d in ("lib/lean", "ir"):
+                    for f in (build / d).glob(f"{p.relative_to(LEAN).with_suffix('')}.*"):
+                        f.unlink()
     return None if r.returncode == 0 else r.stdout + r.stderr
 
 
@@ -191,6 +409,67 @@ def rejected(out: str | None) -> bool:
             ok = False
     if not ok:
         print(out or "", file=sys.stderr)
+    return ok
+
+
+def forged_registration() -> bool:
+    """Whether the audit refuses the registration file `FORGED`, for each thing it builds."""
+    out = emit_check({}, {FORGED: FORGED_TEXT}) or ""
+    ok = True
+    for name, ctor in FORGED_REFUSALS:
+        if f"`{name}` builds a `{ctor}`" in out:
+            print(f"the audit rejects `{ctor}` outside the trusted files: `{name}`")
+        else:
+            print(f"Emit.lean --check did not reject `{name}`, which builds a `{ctor}`", file=sys.stderr)
+            ok = False
+    if not ok:
+        print(out, file=sys.stderr)
+    return ok
+
+
+def foreign_module() -> bool:
+    """Whether the audit refuses a registration that imports a module not under `Cralloc`,
+    before anything of that module runs."""
+    out = emit_check({}, {FOREIGN_LIB: FOREIGN_LIB_TEXT, FOREIGN: FOREIGN_TEXT}) or ""
+    ok = True
+    for said in ("`CrallocTest.AuditForeign` is loaded", "`AuditForeign.evil` builds a `VG.Target.mk`",
+                 "CrallocTest.AuditForeign: @[init] on"):
+        if said in out:
+            print(f"the audit of a module not under `Cralloc` says: {said}")
+        else:
+            print(f"Emit.lean --check did not say {said}", file=sys.stderr)
+            ok = False
+    if FOREIGN_RAN in out:
+        print("an initializer of a module not under `Cralloc` ran before the audit", file=sys.stderr)
+        ok = False
+    if not ok:
+        print(out, file=sys.stderr)
+    return ok
+
+
+def early_initializer() -> bool:
+    """Whether the audit refuses an initializer under `Cralloc` before it can run."""
+    out = emit_check({}, {EARLY_LIB: EARLY_LIB_TEXT, EARLY: EARLY_TEXT}) or ""
+    if "@[init] on VG.Proof.Selftest.AuditEarly.hook" in out and EARLY_RAN not in out:
+        print("the audit refuses an initializer before it can run")
+        return True
+    print(f"Emit.lean --check did not refuse the initializer first:\n{out}", file=sys.stderr)
+    return False
+
+
+def overrides() -> bool:
+    """Whether the audit, on an import with no extension loaded, finds each compiler override."""
+    out = emit_check({}, {OVERRIDE_LIB: OVERRIDE_LIB_TEXT, OVERRIDE: OVERRIDE_TEXT}) or ""
+    ok = True
+    for said in (f"@[implemented_by] on {OVERRIDE_NS}.swapped", f"@[extern] on {OVERRIDE_NS}.external",
+                 f"@[export] on {OVERRIDE_NS}.exported", f"@[csimp] {OVERRIDE_NS}.f_eq"):
+        if said in out:
+            print(f"the audit says: {said}")
+        else:
+            print(f"Emit.lean --check did not say {said}", file=sys.stderr)
+            ok = False
+    if not ok:
+        print(out, file=sys.stderr)
     return ok
 
 
@@ -226,23 +505,30 @@ def main() -> int:
     for f in (MODULE, PROOF):
         if not is_module(f.read_text()):
             raise SystemExit(f"{f} is not a module: the test needs one")
-    if PRIVATE.exists():
-        raise SystemExit(f"{PRIVATE} exists: the test adds it")
+    for f in ADDED:
+        if f.exists():
+            raise SystemExit(f"{f} exists: the test adds it")
     with tempfile.TemporaryDirectory() as tmp:
         refused = audits_refused(tmp)
     if refused:
         print("the audits refuse to run in a module")
     out = emit_check({MODULE: inject_module(MODULE.read_text()),
-                      PROOF: inject_private_import(PROOF.read_text())}, PRIVATE)
+                      PROOF: inject_private_import(PROOF.read_text())}, {PRIVATE: PRIVATE_TEXT})
     kernel = forged("skip_kernel", ["lake", "env", "leanchecker", "Cralloc.Proof.Selftest.X86_64"],
                     "leanchecker found a problem")
     hijack = forged("audit_macro_hijack", ["lake", "env", "lean", "--run", "Emit.lean", "--check"],
                     "non-standard axiom: VG.Proof.Selftest.X86_64.vg_helper")
+    built = forged_registration()
+    foreign = foreign_module()
+    early = early_initializer()
+    override = overrides()
     if (subprocess.run(["git", "diff", "--quiet", "--", str(MODULE), str(PROOF)]).returncode != 0
-            or PRIVATE.exists()):
-        print(f"{MODULE} or {PROOF} was not restored, or {PRIVATE} not deleted", file=sys.stderr)
+            or any(f.exists() for f in ADDED)):
+        print(f"{MODULE} or {PROOF} was not restored, or a file the test added not deleted",
+              file=sys.stderr)
         return 1
-    return 0 if rejected(out) and refused and kernel and hijack else 1
+    return 0 if (rejected(out) and refused and kernel and hijack and built and foreign and early
+                  and override) else 1
 
 
 if __name__ == "__main__":

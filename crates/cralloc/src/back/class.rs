@@ -19,8 +19,8 @@ use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
-    PURGE_STEP_PAGES, UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown, move_piece,
-    unwritten_floor, wants_huge,
+    PAGE_STAGGER, PURGE_STEP_PAGES, UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown,
+    move_piece, unwritten_floor, wants_huge,
 };
 use super::region::{self, Carve};
 use super::tree::{self, Host};
@@ -131,10 +131,20 @@ impl Sink for Descending<'_> {
         else {
             return;
         };
-        let mut next = first;
-        for slot in part.iter().rev() {
-            slot.store(next, Relaxed);
-            next = next.wrapping_byte_add(stride);
+        // Two at a time, each from a pointer stepping two strides: one that steps one stride a
+        // slot makes a chain of adds, which holds a core with two store ports to a slot a cycle.
+        let (rest, pairs) = part.as_rchunks::<2>();
+        let mut even = first;
+        let mut odd = first.wrapping_byte_add(stride);
+        let step = stride.wrapping_mul(2);
+        for [a, b] in pairs.iter().rev() {
+            b.store(even, Relaxed);
+            a.store(odd, Relaxed);
+            even = even.wrapping_byte_add(step);
+            odd = odd.wrapping_byte_add(step);
+        }
+        for slot in rest {
+            slot.store(even, Relaxed);
         }
     }
 
@@ -490,7 +500,7 @@ impl<'a, O: Os> Back<'a, O> {
         // A slot smaller than the floor never holds a marked block: one compare here, not a
         // load of the size word. The free loads and writes that word later, to stamp the slot
         // (`stamp_slot`), only if it stays resident.
-        if class.size() < const { unwritten_floor(O::GEOMETRY) } {
+        if class.size() < unwritten_floor(self.space.plan().geometry()) {
             return false;
         }
         let Some(now) = region::recorded(host, region, slot).filter(|r| r.unwritten && !r.huge)
@@ -503,13 +513,16 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let page = layout.page_size();
         let end = region::extent_of(layout, slot, unit, now.size, false);
-        let pages = end.saturating_sub(unit.start) as usize;
+        // From the first page a staggered block may write: those below it say nothing of what
+        // the tenant wrote.
+        let first = layout.first_page(slot, unit, layout.stagger(slot));
+        let pages = end.saturating_sub(first) as usize;
         let samples = UNWRITTEN_SAMPLES.min(pages);
         let base = self.space.region(region);
         let mut resident = 0;
         for i in 0..samples {
             // The middle page of each of `samples` equal parts of the extent.
-            let at = unit.start as usize + (2 * i + 1) * pages / (2 * samples);
+            let at = first as usize + (2 * i + 1) * pages / (2 * samples);
             let ptr = base.map_addr(|a| a.saturating_add(at * page));
             // SAFETY: BACK-CLASS-06 in docs/safety/cralloc/back/class-safety.md. One whole page
             // of the slot, which the caller holds and nothing writes during the call.
@@ -610,8 +623,8 @@ impl<'a, O: Os> Back<'a, O> {
 
     /// [`Back::alloc`] for a large block whose alignment is at most `policy::STAGGER_STEP`: it
     /// starts at its slot's stagger (`Layout::stagger`) if the object fits there, so that large
-    /// blocks of a class do not all start at the same offset in the caches. A small class is
-    /// never staggered.
+    /// blocks of a class do not all start at the same offset in the caches and the TLB. A small
+    /// class is never staggered.
     pub fn alloc_staggered(&self, class: Class, size: usize) -> Option<Block> {
         self.alloc_at(class, size, true)
     }
@@ -624,14 +637,26 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let small = class.is_small();
-        let (region, slot, zeroed, slack) = if let Some(taken) = tree::claim(&host, 1, !small) {
+        // Where the block starts in its slot, which its clean bits are settled by: the slot's
+        // stagger if it fits, else the slot's start.
+        let start_in = |slot: u32| {
+            let into = host.layout().stagger(slot);
+            if stagger && size + into <= bytes {
+                into
+            } else {
+                0
+            }
+        };
+        let (region, slot, into, zeroed, slack) = if let Some(taken) = tree::claim(&host, 1, !small)
+        {
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
+            let into = start_in(slot);
             let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
                 // The size word as the last tenant left it, which says how much room it used.
                 let last = region::recorded(&host, taken.region, slot);
-                let settled = region::settle_slot(&host, taken.region, slot, size, last);
+                let settled = region::settle_slot(&host, taken.region, slot, size, into, last);
                 if last.is_some_and(|r| r.outgrown) {
                     // What is left of the charge its keep added: the pages purges have not
                     // taken off it since (`region::outgrown_dirty`).
@@ -645,16 +670,17 @@ impl<'a, O: Os> Back<'a, O> {
             // stays resident and in no count until the block's free counts it again.
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            (taken.region, slot, settled.zeroed != 0, settled.slack)
+            (taken.region, slot, into, settled.zeroed != 0, settled.slack)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
             // A large block makes resident at most what it asked for (one with headroom asks
             // for the room it may grow into), however big its slot.
             self.grow(if small { bytes } else { size });
+            let into = start_in(first);
             if !small {
-                region::mark_fresh(&host, region, first, size);
+                region::mark_fresh(&host, region, first, size, into);
             }
-            (region, first, true, None)
+            (region, first, into, true, None)
         };
         region::reach(&host, region, slot, self.epoch());
         if let Some(before) = region::recorded(&host, region, slot) {
@@ -672,19 +698,13 @@ impl<'a, O: Os> Back<'a, O> {
                 // so that this block, which has not grown, does not get huge pages.
                 region::unadvise(&host, region, slot);
                 // If the advice stayed, the block's extent is in whole huge pages.
-                region::cover(&host, region, slot);
+                region::cover(&host, region, slot, into);
             }
         }
         if let Some(slack) = slack {
             self.trim_slack(&host, region, slot, slack);
         }
         let layout = host.layout();
-        let into = layout.stagger(slot);
-        let into = if stagger && size + into <= bytes {
-            into
-        } else {
-            0
-        };
         // A slot below the region's count lies wholly inside the region, which is what
         // `Space::slot` checks.
         if slot >= layout.slots() {
@@ -724,8 +744,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// milliseconds (`docs/research/large-blocks.md`, "Slack: what earlier tenants left in an
     /// occupied slot"). What a trim leaves below the step stays in the slot, resident and in no
     /// count, until the slot's next claim trims again or its free charges it. A step here is
-    /// pages and never whole huge pages, as the purge walk's pieces are in a class of a huge
-    /// page or more: those pieces must not split a huge page of a free slot that kept its
+    /// pages and never whole huge pages, as the purge walk's pieces are where a huge page is
+    /// 2 MiB: those pieces must not split a huge page of a free slot that kept its
     /// advice, and a slot that kept it here, which only a refused call to take it back leaves,
     /// has its range cut inward to whole huge pages by `purge_part`: nothing of a step inside
     /// the slot's whole huge pages goes, and a part in its unaligned tail, which the advice
@@ -780,7 +800,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
                     region::record(&host, region, slot, Recorded { size, ..before });
-                    region::cover(&host, region, slot);
+                    region::cover(&host, region, slot, into);
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -858,7 +878,7 @@ impl<'a, O: Os> Back<'a, O> {
                     // resize.
                     unsafe { self.unspill(&host, region, slot, ptr, into, old, size, advised) };
                 }
-                region::cover(&host, region, slot);
+                region::cover(&host, region, slot, into);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/cralloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -896,15 +916,15 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// The advice rounds down, so the huge page a block only starts is left on small pages,
     /// and a staggered block whose size is a whole number of huge pages spills its stagger, a
-    /// few bytes, into the next one. Those bytes give the page a page table, and advice given
-    /// to a page that has one changes nothing: when the block grows over it, the rest of it
-    /// faults 4 KiB at a time, 511 faults where one huge one would do, at each such doubling
-    /// (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense"). So the
-    /// page of bytes is copied aside into the block's own new room, the huge page is returned,
-    /// which frees its emptied page table, and the bytes are copied back, which faults the huge
-    /// page whole under its new advice. Where the OS keeps the page table, or refuses the
-    /// purge, the copy back restores the bytes all the same, and the page goes on in small
-    /// pages, as before.
+    /// few bytes or a few pages, into the next one. Those bytes give the page a page table, and
+    /// advice given to a page that has one changes nothing: when the block grows over it, the rest
+    /// of it faults a small page at a time, 511 faults where one huge one would do with pages of
+    /// 4 KiB, at each such doubling (`docs/research/large-blocks.md`, "Huge pages only for blocks
+    /// that prove dense"). So the pages of the spill are copied aside into the block's own new
+    /// room, the huge page is returned, which frees its emptied page table, and the bytes are
+    /// copied back, which faults the huge page whole under its new advice. Where the OS keeps the
+    /// page table, or refuses the purge, the copy back restores the bytes all the same, and the
+    /// page goes on in small pages, as before.
     ///
     /// Only when the rest of the huge page is not resident, which the OS is asked: in a slot
     /// kept resident from its last tenant, or one the block shrank in and grows back over, the
@@ -912,15 +932,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// it back. The clean bits cannot say this: the extent of an advised block is rounded up to
     /// a huge page, so they are cleared over the page before the program writes it.
     ///
-    /// The room is the first page of the huge page that holds the new end, which the advice,
+    /// The room is the first pages of the huge page that holds the new end, which the advice,
     /// rounded down, does not cover, and which a block that fills its new size writes anyway as
     /// its next spill. Anywhere in the advised range the copy would fault a whole huge page the
     /// program has not reached. A growth that ends on a huge-page boundary has no such page and
     /// is left alone.
     ///
     /// Where the OS gives no huge pages at all (transparent huge pages off for the process),
-    /// this returns one small page and faults it back at each such growth, for nothing; the
-    /// allocator does not know that setting, and the cost is one call and one fault.
+    /// this returns the spill's pages and faults them back at each such growth, for nothing; the
+    /// allocator does not know that setting, and the cost is one call and a fault a page.
     ///
     /// # Safety
     ///
@@ -954,12 +974,18 @@ impl<'a, O: Os> Back<'a, O> {
         // The room: the first page of the huge page that holds the new usable end.
         let fresh = (into + new).next_multiple_of(page);
         let room = ((base + fresh - 1) & !(huge - 1)) - base;
-        // Only the spill of a first page; the page must now be advised; `at > into` keeps the
-        // block's start out of it; and the room must lie past it, past the advised range, and
-        // inside what the block may now use, its new size rounded up to a page.
+        // The most a spill may be: a first page, or the pages of the stagger that spilled.
+        let spilled = if PAGE_STAGGER {
+            into.next_multiple_of(page).max(page)
+        } else {
+            page
+        };
+        // Only a spill; the page must now be advised; `at > into` keeps the block's start out of
+        // it; and the room must lie past it, past the advised range, and inside what the block may
+        // now use, its new size rounded up to a page.
         let first = ((base + at) / page) as u32;
         if part == 0
-            || part > page
+            || part > spilled
             || at <= into
             || first + pages > advised
             || room < at + huge
@@ -969,9 +995,9 @@ impl<'a, O: Os> Back<'a, O> {
             return;
         }
         let spill = ptr.map_addr(|a| a.saturating_add(at - into));
-        let rest = spill.map_addr(|a| a.saturating_add(page));
+        let rest = spill.map_addr(|a| a.saturating_add(part));
         // SAFETY: BACK-CLASS-05: whole pages inside the block, which nothing writes meanwhile.
-        if unsafe { self.space.resident(rest, huge - page) } != Ok(0) {
+        if unsafe { self.space.resident(rest, huge - part) } != Ok(0) {
             return;
         }
         let aside = ptr.map_addr(|a| a.saturating_add(room - into));
@@ -985,10 +1011,11 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
-    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`)
-    /// at a time, and the whole pages of `from` behind each piece go back to the OS before the
-    /// next is copied, so the two copies are both resident for one piece at most. Aborts if
-    /// `from` is not the start of a handed-out large slot or a run.
+    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`, or
+    /// a huge page if the slot is advised for larger ones) at a time, and the whole pages of
+    /// `from` behind each piece go back to the OS before the next is copied, so the two copies
+    /// are both resident for one piece at most. Aborts if `from` is not the start of a
+    /// handed-out large slot or a run.
     ///
     /// What becomes of `from`'s slot depends on `why` (design: "Large objects"):
     ///
@@ -1083,6 +1110,18 @@ impl<'a, O: Os> Back<'a, O> {
             }
             _ => return,
         };
+        // A block under huge-page advice goes back in whole huge pages or not at all
+        // (`region::purge_part`), so its pieces are at least one, however large.
+        let huge = self.space.plan().geometry().huge_page_size();
+        let piece = match &host {
+            Some((host, region, index))
+                if huge > piece
+                    && region::recorded(host, *region, *index).is_some_and(|r| r.huge) =>
+            {
+                huge
+            }
+            _ => piece,
+        };
         // Returns the slot's or run's pages in `start..end`, both page boundaries. Where all of
         // a slot's went back they are marked clean, so that a free of the slot charges only
         // what is left.
@@ -1114,9 +1153,9 @@ impl<'a, O: Os> Back<'a, O> {
         // An outgrown slot within the bound is kept whole, with both copies resident for the
         // move; anything else goes back behind the copy. Two kinds are never kept. A block
         // marked unwritten: its slot is returned, as a block its tenant left unwritten is at its
-        // free. And a block advised for huge pages: its slot's pages fault back 2 MiB at a time
-        // for a fraction of the small pages' cost, and the next block, written over memory that
-        // is resident but cold, took more time than the faults it saved (a buffer grown to
+        // free. And a block advised for huge pages: its slot's pages fault back a huge page at a
+        // time for a fraction of the small pages' cost, and the next block, written over memory
+        // that is resident but cold, took more time than the faults it saved (a buffer grown to
         // 64 MiB over and over, 31% slower kept; `docs/research/large-blocks.md`, "What growth
         // leaves behind").
         let keep = match (&host, slot) {
@@ -1131,6 +1170,10 @@ impl<'a, O: Os> Back<'a, O> {
         // part of a huge page would return nothing.
         let base = from.addr().get();
         let (mut done, mut all) = (0, true);
+        // How far from the slot's start the pages have gone back: the first piece goes from there,
+        // past the pages a stagger passes over, which an earlier tenant may have written, and a
+        // slot that goes back whole is taken to read as zero.
+        let mut given = 0;
         while done < len {
             let boundary = (base + done + 1).next_multiple_of(piece) - base;
             let step = (boundary - done).min(len - done);
@@ -1145,7 +1188,8 @@ impl<'a, O: Os> Back<'a, O> {
             }
             // Only pieces that reach a boundary go back here: the last may end inside a page.
             if !keep && done + step == boundary {
-                all &= give_back((into + done) & !(page - 1), into + boundary);
+                all &= give_back(given, into + boundary);
+                given = into + boundary;
             }
             done += step;
             observe();
@@ -1153,8 +1197,7 @@ impl<'a, O: Os> Back<'a, O> {
         // The rest of an outgrown slot not kept, from the last piece boundary the copy reached
         // (or the slot's start).
         if host.is_some() && !keep && why == Move::Outgrown {
-            let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
-            all &= give_back(last, whole);
+            all &= give_back(given, whole);
         }
         let Some((host, region, index)) = host else {
             // `free_run` purges the whole of a run.
@@ -1393,7 +1436,7 @@ impl<'a, O: Os> Back<'a, O> {
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
             region::advise_grown(&host, region, index, into, len, now.size, dense);
-            region::cover(&host, region, index);
+            region::cover(&host, region, index, into);
         }
     }
 
@@ -1548,7 +1591,7 @@ impl<'a, O: Os> Back<'a, O> {
         let plan = self.space.plan();
         // A class that has filled a region before has carved far past the huge-page threshold,
         // so its new region uses huge pages from the start, if its class gets them at all.
-        let huge = seen != 0 && wants_huge(class.size(), host.layout().page_size());
+        let huge = seen != 0 && wants_huge(class.size(), plan.geometry());
         let layout = host.layout();
         let (start, end) = layout.fixed_commit();
         for region in plan.regions() {
@@ -1713,6 +1756,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
             inverse: odd_inverse((size >> shift) as u64),
             shift,
             limit: met.limit as u64,
+            stride: size,
         }
     }
 
@@ -1745,6 +1789,85 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
     }
 }
 
+/// Looks in a row that find no stretch, after which a batch gives up on them. A look that fails
+/// costs a few instructions, and a whole word's slots if its ends agree and its middle does not.
+const STRETCH_MISSES: u32 = 2;
+
+/// The fewest slots worth a stretch: fewer go by the slot-by-slot loop as cheaply.
+const STRETCH_LEAST: usize = 8;
+
+/// The objects from `at` on, if they carry on from the one before it a slot at a time, upward or
+/// downward, to the end of its word or of the batch: how many, and their bits, none if they would
+/// be too few to bother. None at all if they do not. A magazine that comes back in the order it
+/// went out is mostly this, and a slot here costs a quarter of what it costs one at a time. Only
+/// the slot before, which has passed, needs the fast check: one a whole number of strides from it
+/// in the same word is a slot below the watermark too. `first` and `span` are the word's slots
+/// ([`Fast::word`]).
+#[inline(always)]
+fn stretch<P: SlotPointer>(
+    fast: &Fast,
+    objects: &[P],
+    at: usize,
+    first: u64,
+    span: u64,
+) -> Option<(usize, u64)> {
+    let before = objects.get(at.checked_sub(1)?)?.address().addr();
+    let rest = objects.get(at..)?;
+    let within = fast
+        .slot(core::ptr::without_provenance(before))
+        .wrapping_sub(first);
+    if within >= span {
+        return None;
+    }
+    let step = rest.first()?.address().addr().wrapping_sub(before);
+    let (count, lowest) = if step == fast.stride {
+        let count = ((span - within - 1) as usize).min(rest.len());
+        (count, within + 1)
+    } else if step == fast.stride.wrapping_neg() {
+        let count = (within as usize).min(rest.len());
+        (count, within - count as u64)
+    } else {
+        return None;
+    };
+    if count < STRETCH_LEAST {
+        return Some((0, 0));
+    }
+    let stretch = rest.get(..count)?;
+    let last = before.wrapping_add(step.wrapping_mul(count));
+    if stretch.last()?.address().addr() != last || !steps(stretch, before, step) {
+        return None;
+    }
+    // At most 63 slots, since the one before is in the word too, and `first` starts the word.
+    Some((count, ((1u64 << count) - 1) << lowest))
+}
+
+/// Whether `objects` are `from + stride`, `from + 2 * stride` and on. Four at a time, since a loop
+/// that takes a branch for each slot can do no better than one a cycle on a core that takes one
+/// branch a cycle, and this one has nothing else to wait for.
+#[inline(always)]
+fn steps<P: SlotPointer>(objects: &[P], from: usize, stride: usize) -> bool {
+    let (fours, rest) = objects.as_chunks::<4>();
+    let (twice, thrice, four) = (
+        stride.wrapping_mul(2),
+        stride.wrapping_mul(3),
+        stride.wrapping_mul(4),
+    );
+    let mut off = 0;
+    let mut next = from;
+    for [a, b, c, d] in fours {
+        off |= a.address().addr() ^ next.wrapping_add(stride);
+        off |= b.address().addr() ^ next.wrapping_add(twice);
+        off |= c.address().addr() ^ next.wrapping_add(thrice);
+        next = next.wrapping_add(four);
+        off |= d.address().addr() ^ next;
+    }
+    for object in rest {
+        next = next.wrapping_add(stride);
+        off |= object.address().addr() ^ next;
+    }
+    off == 0
+}
+
 /// Gathers `objects` into `Words` by bitmap word and ORs them into `release`: see
 /// `group`. `met` and `fast` are the region the batch met first and its check, which follow
 /// the pointers from region to region.
@@ -1774,15 +1897,28 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
     // Runs of one slot in a row: a scattered batch, which the loop below would take a run at
     // a time, entering and leaving its dense loop for every slot.
     let mut singles = 0;
+    // Looks in a row for a stretch that found none: a batch that gives up looks no more.
+    let mut misses = 0;
     let mut at = 1;
     loop {
-        // Slots of the run's word, one after another: the shape of a dense magazine. Ends at
-        // the first slot of another word, or one the fast check fails. The loop a dense
-        // launder spends its time in, at about eleven micro-ops: one compare covers the slot
-        // check, the watermark and the word, and the count comes from the position rather
-        // than an increment.
         let start = at;
         let mut bits = held.bits;
+        // The rest of the word at once, if the batch climbs or descends it a slot at a time.
+        if misses < STRETCH_MISSES {
+            match stretch(fast, objects, at, first, span) {
+                Some((0, _)) => {}
+                Some((count, more)) => {
+                    bits |= more;
+                    at += count;
+                    misses = 0;
+                }
+                None => misses += 1,
+            }
+        }
+        // Slots of the run's word, one after another: the shape of a magazine that does not
+        // keep to its slots' order. Ends at the first slot of another word, or one the fast
+        // check fails. One compare covers the slot check, the watermark and the word, and the
+        // count comes from the position rather than an increment.
         let mut ended = None;
         while let Some(object) = objects.get(at) {
             at += 1;
@@ -1919,6 +2055,8 @@ pub(super) struct Fast {
     pub(super) inverse: u64,
     pub(super) shift: u32,
     pub(super) limit: u64,
+    /// The distance between slots, which [`stretch`] walks.
+    pub(super) stride: usize,
 }
 
 impl Fast {
@@ -2053,6 +2191,7 @@ mod tests {
                     inverse: odd_inverse((class.size() >> shift) as u64),
                     shift,
                     limit,
+                    stride: class.size(),
                 };
                 let ks = [
                     0,

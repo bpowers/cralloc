@@ -19,30 +19,12 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64
 
 /-! ## The offset, rounded down to a word of the slab -/
 
-theorem testBit_4088 (i : Nat) : (4088 : Nat).testBit i = decide (3 ≤ i ∧ i < 12) := by
-  by_cases h : i < 12
-  · have : ∀ j < 12, (4088 : Nat).testBit j = decide (3 ≤ j ∧ j < 12) := by decide
-    exact this i h
-  · rw [Nat.testBit_lt_two_pow (Nat.lt_of_lt_of_le (by decide : 4088 < 2 ^ 12)
-      (Nat.pow_le_pow_right (by decide) (by omega)))]
-    simp [h]
-
 /-- `and r9d, 4088` of the offset's low 32 bits: the offset rounded down to a
 multiple of 8, within the slab. -/
-theorem and_4088 (x : Nat) : x % 2 ^ 32 &&& 4088 = 8 * (x % 4096 / 8) := by
-  have h : 8 * (x % 4096 / 8) = (x % 2 ^ 12) >>> 3 <<< 3 := by
-    rw [Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow]; omega
-  rw [h]
-  apply Nat.eq_of_testBit_eq
-  intro i
-  rw [Nat.testBit_and, Nat.testBit_mod_two_pow, testBit_4088, Nat.testBit_shiftLeft,
-    Nat.testBit_shiftRight, Nat.testBit_mod_two_pow]
-  by_cases h3 : 3 ≤ i
-  · rw [show 3 + (i - 3) = i by omega]
-    by_cases h12 : i < 12
-    · simp [h3, h12, show i < 32 by omega]
-    · simp [h3, h12]
-  · simp [h3]
+theorem and_4088_32 (x : Nat) : x % 2 ^ 32 &&& 4088 = 8 * (x % 4096 / 8) := by
+  have h : 8 * (x % 2 ^ 32 % 4096 / 8) = 8 * (x % 4096 / 8) := by
+    rw [Nat.mod_mod_of_dvd _ (by decide : 4096 ∣ 2 ^ 32)]
+  rw [and_4088, h]
 
 /-! ## The states -/
 
@@ -108,7 +90,7 @@ theorem wao_eq (hA : X86 c.A) (hcls : c.cls s = (s.gpr .rdi).toNat % SLAB_BYTES 
   apply BitVec.eq_of_toNat_eq
   have hoff : ((offw s).setWidth 64).toNat = 8 * ((s.gpr .rdi).toNat % 4096 / 8) := by
     rw [BitVec.toNat_setWidth, offw, BitVec.toNat_and, BitVec.toNat_setWidth]
-    rw [show (4088 : BitVec 32).toNat = 4088 from rfl, and_4088]
+    rw [show (4088 : BitVec 32).toNat = 4088 from rfl, and_4088_32]
     have : 8 * ((s.gpr .rdi).toNat % 4096 / 8) < 2 ^ 64 := by omega
     exact Nat.mod_eq_of_lt (by omega)
   simp only [BitVec.toNat_add, BitVec.toNat_ofNat, hoff, SLABS, SLAB_BYTES, SLAB_SHIFT]
@@ -180,42 +162,6 @@ structure SFacts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   top_cs : c.form = .stackPop → c.InRange s → (c.w s).toNat ≠ 0 → (c.w s).toNat % 2 = 0 →
     Region.Disjoint ⟨c.w s, 8⟩ ⟨area s + 8, 8⟩
   pre : c.pre s
-
-section Of
-
-variable {c : Spec.Slab.Ctx isa} {s : State}
-
-theorem mem_ro {x : Region} (h : (x, false) ∈ c.regions s) : x ∈ c.ro s :=
-  List.mem_map.mpr ⟨(x, false), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
-
-theorem mem_rw {x : Region} (h : (x, true) ∈ c.regions s) : x ∈ c.rw s :=
-  List.mem_map.mpr ⟨(x, true), List.mem_filter.mpr ⟨h, rfl⟩, rfl⟩
-
-theorem fixed_mem {x : Region × Bool} (h : x ∈ c.fixed s) : x ∈ c.regions s :=
-  List.mem_append_left _ h
-
-theorem word_mem (hi : c.InRange s) : (⟨c.word s, 8⟩, true) ∈ c.regions s := by
-  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
-  exact List.mem_append_right _ (List.mem_cons_self ..)
-
-theorem more_mem (hi : c.InRange s) {x : Region × Bool} (h : x ∈ c.more s) : x ∈ c.regions s := by
-  simp only [Spec.Slab.Ctx.regions, hi, ↓reduceIte]
-  exact List.mem_append_right _ (List.mem_cons_of_mem _ h)
-
-theorem cpu_mem_fixed : (c.cpuField s, false) ∈ c.fixed s :=
-  List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_cons_self ..))
-
-/-- A stack push's magazine's link slot is apart from `rseq_cs`. -/
-theorem link_cs_disj (hf : c.form = .stackPush) (hl : c.Layout s) :
-    (c.link s).Disjoint (c.csField s) := by
-  obtain ⟨A, f, sig⟩ := c
-  cases hf
-  exact (fixed_disj (a := (Spec.Slab.Ctx.csField ⟨A, .stackPush, sig⟩ s, true))
-    (l₁ := [(Spec.Slab.Ctx.rsVar ⟨A, .stackPush, sig⟩ s, false),
-      (Spec.Slab.Ctx.cpuField ⟨A, .stackPush, sig⟩ s, false)]) hl rfl (List.mem_singleton_self _)
-    (Bool.true_or _)).symm
-
-end Of
 
 /-- A slow-path routine's facts, from the precondition's: its regions are
 the state's, and the layout and the invariant place them apart. -/

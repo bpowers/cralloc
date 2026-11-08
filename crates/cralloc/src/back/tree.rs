@@ -55,7 +55,7 @@
 use super::layout::{Layout, MAX_LEVELS};
 use super::word::{BITS, Word, lowest};
 use crate::os::HugePages;
-use crate::space::RegionId;
+use crate::space::{Geometry, RegionId};
 
 /// What the protocols need from their surroundings: the class's words, its regions' metadata
 /// words, and the OS calls on a region. Production code implements it over the heap
@@ -66,6 +66,9 @@ pub(crate) trait Host {
 
     /// The layout of the class's regions.
     fn layout(&self) -> &Layout;
+
+    /// The geometry, as the heap's regions use it (`Plan::geometry`), which the policy's rules read.
+    fn geometry(&self) -> Geometry;
 
     /// The region with this index, if it is an object region of the heap.
     fn region(&self, index: usize) -> Option<RegionId>;

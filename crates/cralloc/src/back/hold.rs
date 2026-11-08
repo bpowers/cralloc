@@ -135,9 +135,9 @@ use super::host::ClassHost;
 use super::layout::{AgeWalk, Grow, Hints, Recorded, STAMP_MASK, Unit};
 use super::policy::{
     self, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_STEP_WORDS,
-    allowance_floor,
+    allowance_floor, whole_huge_pieces,
 };
-use super::purge::{PassStep, Scope, piece};
+use super::purge::{PassStep, Scope, Splits, piece};
 use super::region::{self, Purge};
 use super::tree::{self, Host};
 use super::word::{BITS, Word};
@@ -198,7 +198,7 @@ impl Fine {
     #[inline(always)]
     pub(crate) fn count(&self) -> u32 {
         // Sequentially consistent, as the thread's look before it sleeps reads it after
-        // marking its word (`crate::thread_word`, "Sleeping"); on x86-64 a plain load.
+        // marking its word (`crate::thread_word`, "Sleeping").
         (self.word.load(SeqCst) >> 32) as u32
     }
 
@@ -208,9 +208,9 @@ impl Fine {
         let seen = self.word.load(Relaxed);
         let next = fine_read(seen, time)?;
         // A failure means another reader stepped or re-stamped, which is the same reading or a
-        // later one: nothing to retry. Sequentially consistent, as the reader that steps the
-        // count then reads the thread's word, and the thread marks its word before it reads
-        // the count (`crate::thread_word`, "Sleeping"); on x86-64 the same locked instruction.
+        // later one: nothing to retry, so it needs no order. Sequentially consistent on success,
+        // as the reader that steps the count then reads the thread's word, and the thread marks
+        // its word before it reads the count (`crate::thread_word`, "Sleeping").
         let stepped = self
             .word
             .compare_exchange(seen, next, SeqCst, Relaxed)
@@ -421,11 +421,10 @@ pub(super) fn walk_aged<H: Host>(
         (carved.min(layout.slots()), count)
     };
     let page = layout.page_size();
-    let huge = layout.huge_pages();
-    // In whole huge pages for a class of a huge page or more, as the purge walk's pieces are,
-    // so that a slot that kept its huge-page advice is not left with one partly returned.
-    let granule = if layout.size() >= huge as usize * page {
-        huge
+    // In whole huge pages where a class is that large, as the purge walk's pieces are, so that a
+    // slot that kept its huge-page advice is not left with one partly returned.
+    let granule = if whole_huge_pieces(host.geometry(), layout.size()) {
+        layout.huge_pages()
     } else {
         1
     };
@@ -915,8 +914,17 @@ impl<O: Os> Back<'_, O> {
         {
             stamp |= WALKED_FROM_TOP;
         }
-        let (bytes, read, done, _) =
-            self.purge_region(class, region, budget, limit, true, Scope::All, false, true);
+        // A large class has no huge-page part, so nothing here is split.
+        let (bytes, read, done, _) = self.purge_region(
+            class,
+            region,
+            budget,
+            limit,
+            true,
+            Scope::All,
+            false,
+            Splits::One,
+        );
         if done && stamp & WALKED_FROM_TOP != 0 {
             let _ = word.compare_exchange(stamp, 0);
         }

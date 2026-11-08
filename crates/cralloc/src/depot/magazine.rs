@@ -26,7 +26,8 @@ use crate::space::Space;
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+use core::sync::atomic::fence;
 
 /// Bytes of the magazine area committed at a time, beyond what a new magazine needs, so that
 /// most magazines are made without a system call.
@@ -274,15 +275,34 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// The magazine of `size` at `offset`, if one can be there: past the first unit,
     /// aligned to its size, and inside the committed part.
+    ///
+    /// **The committed mark.** A slab word can name a magazine with no happens-before edge to this
+    /// thread: a thread that has moved reads another CPU's word, which a routine wrote with a
+    /// plain store. Whoever installed that magazine read a mark that admits it, with acquire, before
+    /// its store, so a reader that loads the word with acquire and then this mark finds one at
+    /// least as high. Rust's model does not cover a routine's store; Arm's rules and x86-64's total
+    /// store order both give this (`docs/research/memory-ordering.md`). A refusal, which most
+    /// callers turn into an abort, comes only after a second look behind a full fence, which needs
+    /// no order on the read of the word at all.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.growth.committed.load(Acquire);
-        let fits = admits(offset, size, Self::start(), committed);
+        let fits = admits(offset, size, Self::start(), committed)
+            || self.admitted_on_a_second_look(offset, size);
         // A number must fit the depot's 32 bits (`Area::end` keeps the area within them).
         MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
         fits.then(|| Magazine {
             word: self.at(offset).map_addr(|base| base | size.ordinal()),
             area: PhantomData,
         })
+    }
+
+    /// Whether the committed mark admits this after all, read behind a full fence, as it does not
+    /// on any path that runs but for a slab word or link that really names nothing.
+    #[cold]
+    fn admitted_on_a_second_look(&self, offset: usize, size: MagazineSize) -> bool {
+        fence(SeqCst);
+        let committed = self.depot.growth.committed.load(Acquire);
+        admits(offset, size, Self::start(), committed)
     }
 
     /// The number of a magazine of this area: its offset in units, which `magazine_at` checked
@@ -320,7 +340,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// Makes `start..end` of the area writable if it is not already.
     fn commit_to(&self, end: usize) -> bool {
-        let page = O::GEOMETRY.page_size();
+        let page = O::geometry().page_size();
         loop {
             let committed = self.depot.growth.committed.load(Acquire);
             if committed >= end {
@@ -336,7 +356,8 @@ impl<'a, O: Os> Area<'a, O> {
             }
             // Racing committers may cover the same pages; making them writable twice is
             // harmless, and the mark only moves up, after the memory under it is writable.
-            self.depot.growth.committed.fetch_max(target, AcqRel);
+            // Sequentially consistent, for the fence of a second look (`Area::magazine_at`).
+            self.depot.growth.committed.fetch_max(target, SeqCst);
         }
     }
 

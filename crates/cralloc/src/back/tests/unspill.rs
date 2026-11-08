@@ -62,7 +62,7 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
-    let class = large(4 * huge);
+    let class = large_of(4 * huge);
     let first = second_slot(&back, class, huge);
     assert_eq!(
         fill_and_grow(&back, os, first, 2 * huge),
@@ -106,7 +106,7 @@ fn a_block_that_shrinks_and_grows_back_keeps_its_resident_huge_page() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
-    let class = large(4 * huge);
+    let class = large_of(4 * huge);
     let block = second_slot(&back, class, huge);
     assert_eq!(fill_and_grow(&back, os, block, 2 * huge), 1);
     for round in 0..3 {
@@ -141,7 +141,7 @@ fn a_growth_writes_no_advised_huge_page_the_program_has_not_reached() {
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     let page = Native::GEOMETRY.page_size();
-    let class = large(8 * huge);
+    let class = large_of(8 * huge);
     let block = second_slot(&back, class, 2 * huge);
     let before = back.usable_size(block.as_ptr()).unwrap();
     assert_eq!(fill_and_grow(&back, os, block, 4 * huge), 1);
@@ -177,9 +177,9 @@ fn a_block_that_moved_in_returns_its_spilled_page_when_it_grows_in_place() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
-    let class = large(8 * huge);
+    let class = large_of(8 * huge);
     let block = second_slot(&back, class, 2 * huge);
-    move_in(&back, large(huge), huge, block, 2 * huge);
+    move_in(&back, large_of(huge), huge, block, 2 * huge);
     assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
     assert_eq!(fill_and_grow(&back, os, block, 4 * huge), 1);
     assert!(patterned(
@@ -199,7 +199,7 @@ fn a_purge_that_fails_part_way_keeps_the_bytes() {
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
         let huge = Native::GEOMETRY.huge_page_size();
-        let class = large(4 * huge);
+        let class = large_of(4 * huge);
         let block = second_slot(&back, class, huge);
         let usable = back.usable_size(block.as_ptr()).unwrap();
         os.set_faults(Call::Purge, faults);
@@ -219,7 +219,7 @@ fn a_purge_that_fails_part_way_keeps_the_bytes() {
 fn a_growth_at_any_boundary_keeps_the_bytes_and_writes_no_advised_room() {
     let huge = Native::GEOMETRY.huge_page_size();
     let page = Native::GEOMETRY.page_size();
-    let class = large(8 * huge);
+    let class = large_of(8 * huge);
     // Offsets from a boundary, for the end of a block that starts a cache line into its slot.
     let near = |at: usize| {
         [
