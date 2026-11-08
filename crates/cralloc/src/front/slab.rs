@@ -32,8 +32,8 @@ use crate::lined::LINE;
 use core::ptr;
 use core::sync::atomic::Ordering;
 
-/// The number of slabs: one for every CPU number the kernel can produce on x86-64. An aarch64
-/// kernel may be built for more; a CPU number with no slab is served by the slow path.
+/// The number of slabs: one for every CPU number a kernel can produce, 8192 on x86-64 and 4096 on
+/// aarch64 (`docs/research/linux-rseq-contract.md`, "aarch64").
 pub const SLAB_COUNT: usize = crate::spec::SLAB_COUNT;
 /// `log2` of [`SLAB_BYTES`].
 pub const SLAB_SHIFT: u32 = crate::spec::SLAB_SHIFT;

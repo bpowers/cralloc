@@ -82,8 +82,8 @@ process light.
 ## Correctness rules
 
 - All assembly is generated from Lean. Never write `asm!`, `naked_asm!` or `global_asm!` by
-  hand in the allocator. The one exception is the system-call instruction in the OS
-  interface, which has a ledger entry.
+  hand in the allocator. The exceptions are in the OS interface: the system-call instruction
+  and, on aarch64, the reads of the timer and the thread pointer, which have ledger entries.
 - The allocator crate has no dependencies, not even on a C library: it makes its own system
   calls. The exception is the default `background` feature: it creates the background
   thread through the C library, so that the library knows the thread exists. Nothing else
