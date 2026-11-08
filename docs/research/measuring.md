@@ -301,9 +301,13 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
   its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
   landed than on the Ryzen, but too few have been swept to drop the rule.
-- **Other work is low enough for the same limits.** A run's other work had a median of -0.01 CPUs. Of
-  402 valid runs the highest was 0.15, and three runs went over the limit of 0.25 and were left out.
-  The gate waited at most 6 s.
+- **A kernel job's limit on other work stands; a server's reads high.** A kernel run's other work has a
+  median of -0.01 CPUs: of 402 valid runs the highest was 0.15, and three went over the limit of 0.25.
+  Server segments under load read -0.19 to 0.25, by job and segment and alike across allocators
+  (`orders axum` at 30% has a median of 0.13), where the threads named on those CPUs add up to under
+  0.08 at the same moments. So the clocks disagree by more than the Ryzen's limit of 0.1, which threw
+  out a third of quiet runs, and the limit here is 0.3. Why they disagree is not traced. Three seconds of
+  a busy CPU, 0.55 and up on the Ryzen, should still show.
 
 ## Reusable techniques
 
