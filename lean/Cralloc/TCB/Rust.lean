@@ -1138,6 +1138,12 @@ def targetConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
   let all := as.flatMap (·.target.consts)
   ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
 
+/-- The constants of the own rseq areas of `as` (`OwnArea.consts`), by name, each once, in the order
+the areas first name them. -/
+def areaConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
+  let all := (areasOf as).flatMap (·.2.consts)
+  (dedup (all.map (·.1))).filterMap fun n => all.find? (·.1 == n)
+
 /-- The constants of every artifact (`Api.rustConsts`), of every own rseq
 area (`OwnArea.consts`) and of every target (`Target.consts`), one file for every target: no assembly, so it
 builds wherever the crate does (under Miri and Kani too). The crate
@@ -1149,8 +1155,8 @@ def constsFile (as : List Artifact) : String :=
   "//! asserts against.\n" ++
   "#![allow(dead_code)]\n" ++
   rustConstsText (rustConstsOf as) ++
-  String.join ((areasOf as).map fun (t, oa) => String.join (oa.consts.map fun (n, ty, v) =>
-    s!"\n/// Of the rseq area for `{t}` (`OwnArea.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n")) ++
+  String.join ((areaConstsOf as).map fun (n, ty, v) =>
+    s!"\n/// Of the rseq area (`OwnArea.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n") ++
   String.join ((targetConstsOf as).map fun (n, ty, v) =>
     s!"\n/// Of its target's assembly (`Target.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
 
@@ -1167,9 +1173,9 @@ def areaFile (t : String) (oa : OwnArea) : String :=
 
 /-- The own rseq area of every target is as the crate needs it: its
 constants are named as Rust constants, fit their types, and are named apart
-from every artifact's constants; its lines are not empty and have no
-newline (each is one line of the block). So are the targets' constants, of which
-each name has one value. -/
+from every artifact's constants, and every area that names one gives it one value; its lines are
+not empty and have no newline (each is one line of the block). So are the targets' constants, of
+which each name has one value. -/
 def checkAreas (as : List Artifact) : Except String Unit := do
   let artConsts := (as.flatMap (·.rustConsts)).map (·.1)
   let targetConsts := as.flatMap (·.target.consts)
@@ -1192,6 +1198,9 @@ def checkAreas (as : List Artifact) : Except String Unit := do
         throw s!"{t}: the own rseq area's constant {n} does not fit in a {ty.rust}"
       if artConsts.contains n || ((oa.consts.map (·.1)).filter (· == n)).length != 1 then
         throw s!"{t}: the own rseq area's constant {n} is named twice"
+      if (areasOf as).any fun (_, oa') => oa'.consts.any fun (m, ty', v') =>
+          m == n && (ty' != ty || v' != v) then
+        throw s!"{t}: the own rseq area's constant {n} has another value on another target"
 
 /-- The root module, `mod.rs`: a `mod` declaration of each target of `ts`
 (its name and Rust `cfg`), in order of their names. -/

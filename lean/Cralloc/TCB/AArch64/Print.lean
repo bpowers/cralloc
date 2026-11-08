@@ -125,6 +125,8 @@ def Instr.lines : Instr → List Line
   | .mrsTp d => [.text s!"mrs {d.x}, tpidr_el0"]
   | .ldrWord d n _ => [.text s!"ldr {d.x}, [{n.x}, #32]"]
   | .movGot d name => gotLines d name
+  | .addAreaHi d n => [.text s!"add {d.x}, {n.x}, :tprel_hi12:{ownAreaSym}"]
+  | .addAreaLo d n => [.text s!"add {d.x}, {n.x}, :tprel_lo12_nc:{ownAreaSym}"]
 
 /-- The branch of a condition, to the label `l`. A `tbz` or `tbnz` names the
 register at the size whose bits hold the bit tested, as the assembler requires. -/
@@ -249,7 +251,8 @@ def MemOp.misaligned (wd : Width) (m : MemOp) : Bool :=
 
 /-- Why an instruction may not be a step of a sequence's body, or `none`. -/
 def Instr.notInBody : Instr → Option String
-  | .adrp .. | .addLo12 .. => some "an instruction the linker writes, which it may also move"
+  | .adrp .. | .addLo12 .. | .addAreaHi .. | .addAreaLo .. =>
+    some "an instruction the linker writes, which it may also move"
   | .movGot .. => some "`movGot`, one step of the model and two instructions"
   | .stpz .. => some "`stp`, two stores in one step of the model"
   | .ldrWord .. => some "a read of the word after its descriptor, which is for its setup"
@@ -261,19 +264,19 @@ def Instr.notInBody : Instr → Option String
   | _ => none
 
 /-- Whether an instruction accesses memory another thread can change. `ldrWord` and `movGot` read
-words no program writes (`TCB/AArch64/Isa.lean`). -/
+words no program writes, and `addAreaHi` and `addAreaLo` none (`TCB/AArch64/Isa.lean`). -/
 def Instr.accessesMemory : Instr → Bool
   | .ldr .. | .str .. | .stpz .. => true
   | .add .. | .sub .. | .and .. | .orr .. | .mov .. | .cmp .. | .tst .. | .lsl .. | .lsr ..
   | .lslv .. | .lsrv .. | .mul .. | .umulh .. | .adrp .. | .addLo12 .. | .mrsTp _ | .ldrWord ..
-  | .movGot .. => false
+  | .movGot .. | .addAreaHi .. | .addAreaLo .. => false
 
 /-- Whether an instruction stores to memory. -/
 def Instr.storesMemory : Instr → Bool
   | .str .. | .stpz .. => true
   | .ldr .. | .add .. | .sub .. | .and .. | .orr .. | .mov .. | .cmp .. | .tst .. | .lsl .. | .lsr ..
   | .lslv .. | .lsrv .. | .mul .. | .umulh .. | .adrp .. | .addLo12 .. | .mrsTp _ | .ldrWord ..
-  | .movGot .. => false
+  | .movGot .. | .addAreaHi .. | .addAreaLo .. => false
 
 /-- Whether an instruction names the descriptor by its label. -/
 def Instr.namesDesc : Instr → Bool

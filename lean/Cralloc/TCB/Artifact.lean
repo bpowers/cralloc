@@ -51,21 +51,43 @@ inductive CfgAtom
 
 /-- An rseq area that the crate defines and registers itself, on a C library
 that registers none (musl). It is data, not code: nothing about it is
-proved. The routines read the area's offset from the thread pointer from a
-word, as they read glibc's `__rseq_offset`; the area's data defines that
-word, holding the offset as the linker computes it, so what the routines
-assume of the word holds by construction. Registering the area with the
-kernel is the crate's (Rust) business. -/
+proved. A routine finds the area's offset from the thread pointer as the target
+allows: in a word, as it reads glibc's `__rseq_offset`, which the area's data defines,
+holding the offset as the linker computes it, so what the routines assume of the word
+holds by construction; or in its own instructions, where no assembler can write the
+offset as data. Registering the area with the kernel is the crate's (Rust) business. -/
 structure OwnArea where
   /-- Compiled only where any of these holds (as `Artifact.cfg`). -/
   cfg : List CfgAtom
-  /-- The assembler lines that define the area and the word, emitted as one
+  /-- The assembler lines that define the area and any word, emitted as one
   `global_asm!` block in `<target>/area.rs`. -/
   lines : List String
   /-- The constants of its layout, emitted with the specification's
   (`constants.rs`), for the crate to register the area with and assert
   against. -/
   consts : List (String × IntTy × Nat)
+
+/-- The bytes the crate registers: the original `struct rseq`
+(`ORIG_RSEQ_SIZE`), which every kernel with rseq accepts. -/
+def ownAreaLen : Nat := 32
+
+/-- The alignment of the area's section: a page. -/
+def ownAreaAlign : Nat := 4096
+
+/-- Where the area sits in its page: past every slab word a routine stores
+to (the crate asserts it) and below the words the C routines read at page
+offset 1024. -/
+def ownAreaPageOffset : Nat := 768
+
+/-- `cpu_id` before registration: -1, as 32 bits. -/
+def ownAreaUnregistered : Nat := 0xffffffff
+
+/-- The constants of the area's layout, the same on every target. -/
+def ownAreaConsts : List (String × IntTy × Nat) := [
+  ("RSEQ_AREA_LEN", .usize, ownAreaLen),
+  ("RSEQ_AREA_ALIGN", .usize, ownAreaAlign),
+  ("RSEQ_AREA_PAGE_OFFSET", .usize, ownAreaPageOffset),
+  ("RSEQ_CPU_ID_UNREGISTERED", .u32, ownAreaUnregistered)]
 
 /-- A code-generation target: an ISA model, its printer, and its calling convention. -/
 structure Target where

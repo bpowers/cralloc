@@ -750,6 +750,24 @@ def cpuContract {M : ISA} (A : Abi M) : Contract M :=
   cpuSig.contract (A.withExtra (some (cpuRegions A))) (post := Curry.const (fun _ _ _ => True) _)
     (x := x)
 
+/-- The signature of `area_offset`. -/
+def areaOffsetSig : Sig where
+  params := []
+  ret := some .usize
+
+/-- What `area_offset` may read: `__rseq_offset`. -/
+def areaOffsetRegions {M : ISA} (A : Abi M) (s : M.State) : List (Region × Bool) :=
+  [((cpuView A).rsVar s, false)]
+
+/-- `area_offset` returns the rseq area's offset from the thread pointer, the word the routines'
+contracts call `__rseq_offset`, and changes no memory. -/
+def areaOffsetContract {M : ISA} (A : Abi M) : Contract M :=
+  let x : Sig.Extra M := {
+    pre := fun _ => A.sym.isSome
+    post := fun s s' => A.ret s' = (A.mem s).readW ((cpuView A).rsVar s).base 64 ∧ A.mem s' = A.mem s }
+  areaOffsetSig.contract (A.withExtra (some (areaOffsetRegions A)))
+    (post := Curry.const (fun _ _ _ => True) _) (x := x)
+
 /-! ## The functions
 
 Their documentation states what `Ctx.pre` and `Ctx.regions` require of the
@@ -957,5 +975,17 @@ def currentCpuApi : Api where
     | none => "Neither `__rseq_offset` nor the thread's `cpu_id` may wrap around the end of the \
         address space."]
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
+
+/-- For a target whose routines hold the offset in their instructions, where the crate's own area
+has no word to read it from, and the crate must find the area to register it. -/
+def areaOffsetApi : Api where
+  module := "slab"
+  name := "area_offset"
+  sig := areaOffsetSig
+  contracts := some fun A _ => areaOffsetContract A
+  summary := "Returns the calling thread's rseq area's offset from its thread pointer, as the \
+    linker fixed it.\n\n\
+    Contract: `VG.Spec.Slab.areaOffsetContract`. No safety requirements: it touches no memory."
+  safety _ := []
 
 end VG.Spec.Slab
