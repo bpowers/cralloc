@@ -854,9 +854,12 @@ def descRefs {M : ISA} (P : Printer M) (n : String) (setup : List M.Instr) (code
   if bad then throw s!"{n} names its descriptor where its label is not that routine's"
 
 /-- What `checkRseq` asks of the code `code` and the setup `setup` of the function `n` on the
-printer `P`, beyond what depends on the artifact (its operands, and being inline). -/
+printer `P`, beyond what depends on the artifact (its operands, and being inline): a setup that
+stores nothing (`Printer.storesMemory`), and what `descRefs`, `seqSteps` and `tailCheck` ask. -/
 def seqShape {M : ISA} (P : Printer M) (n : String) (setup : List M.Instr) (code : Prog M) :
     Except String Unit := do
+  if setup.any P.storesMemory then
+    throw s!"{n}'s setup stores to memory, before its sequence is armed"
   descRefs P n setup code
   match code with
   | .rseq arm body => seqSteps P n setup arm body

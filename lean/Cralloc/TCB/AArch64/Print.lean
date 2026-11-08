@@ -268,6 +268,13 @@ def Instr.accessesMemory : Instr → Bool
   | .lslv .. | .lsrv .. | .mul .. | .umulh .. | .adrp .. | .addLo12 .. | .mrsTp _ | .ldrWord ..
   | .movGot .. => false
 
+/-- Whether an instruction stores to memory. -/
+def Instr.storesMemory : Instr → Bool
+  | .str .. | .stpz .. => true
+  | .ldr .. | .add .. | .sub .. | .and .. | .orr .. | .mov .. | .cmp .. | .tst .. | .lsl .. | .lsr ..
+  | .lslv .. | .lsrv .. | .mul .. | .umulh .. | .adrp .. | .addLo12 .. | .mrsTp _ | .ldrWord ..
+  | .movGot .. => false
+
 /-- Whether an instruction names the descriptor by its label. -/
 def Instr.namesDesc : Instr → Bool
   | .adrp _ .desc | .addLo12 _ _ .desc => true
@@ -313,6 +320,7 @@ def printer : Printer isa where
   descWord | .ldrWord _ _ n => some n | _ => none
   bodyRefuses := Instr.notInBody
   accessesMemory := Instr.accessesMemory
+  storesMemory := Instr.storesMemory
   namesDesc := Instr.namesDesc
   /- An abort returns to the arm alone, so that a retry keeps what the setup formed. -/
   armOneStore := true

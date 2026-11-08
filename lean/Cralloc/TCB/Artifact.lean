@@ -586,7 +586,9 @@ in registers, which a retry must prove again from the registers the abort kept
 What a run of the whole function adds is `SetupOk`: from every entry state, the
 setup runs to a state where an attempt may start. A postcondition is relative
 to the state its last attempt started in, for a function with or without a
-setup; the setup changes neither memory nor the arguments. -/
+setup; the setup changes neither memory nor the arguments. That it leaves memory as it found it
+says nothing of what other threads wrote meanwhile, which the model of a setup does not have, so
+the emitter also refuses a setup with any store (`Rust.seqShape`). -/
 
 /-- `k'` is the contract of the attempts of a routine with the contract `k`, the
 setup `setup` and the clobbers `cl`. With no setup, `k` itself. With one, `k` with
