@@ -195,8 +195,8 @@ is the Ryzen's. The servers and programs have not run here yet, so this says not
 
 An Apple M1 Max under Asahi Linux 7.2.12 with 16 KiB pages, at `66dfb90`, 2026-11-08: the generated
 routines, the rules in bytes. Three rounds of every job under eight builds, 1,506 runs, 4 left out for
-other work. The best incumbent is the best of seven: mimalloc v3.5.3 and the crate's, per-CPU tcmalloc,
-jemalloc, glibc and snmalloc, a Release build at last. The control is 0.33% from mimalloc at the median
+other work. The best incumbent is the best of six: mimalloc v3.5.3 and the crate's, per-CPU tcmalloc,
+jemalloc, glibc and snmalloc in its Release configuration. The control is 0.33% from mimalloc at the median
 of 63 jobs and 3.1% at the 90th percentile; its largest are modes of mimalloc's, up to 21%. The others
 against cralloc, geomean with the geometric standard deviation across jobs:
 
