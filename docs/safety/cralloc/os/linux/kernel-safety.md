@@ -233,8 +233,8 @@ CPUs, or goes back makes a drain or a purge pass come earlier or later, and both
 any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
 `back/region.rs`).
 
-On aarch64 `ticks` has no block of its own: `generic_timer` is SYSCALL-03, and the scale is a shift
-of at most 32 bits (`timer_shift`).
+On aarch64 `ticks` has no block of its own: `timer_count` and `timer_rate` are SYSCALL-03, and the
+scale is a shift of at most 32 bits (`timer_shift`).
 
 ## KERNEL-14: `madvise` of an empty range in `page_shift_by_probing`, on aarch64
 
@@ -364,7 +364,7 @@ single call:
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
   and arithmetic on locals, all async-signal-safe, but for `more_than_one_thread`'s read of one byte
-  of glibc's (KERNEL-12), which is too. On aarch64 `geometry` adds a load, and a probe the first
+  of glibc's (KERNEL-12), which is too. On aarch64 `found` adds a load, and a probe the first
   time.
 
 **Machine checks.** The tests in `kernel.rs`:

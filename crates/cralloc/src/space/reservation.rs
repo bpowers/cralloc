@@ -47,14 +47,16 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 /// copies it around, and a [`Plan`], whose geometry is a dozen bytes of odd-sized fields, was
 /// written a few bytes at a time and read back eight at a time: a load that spans several
 /// stores waits for all of them to retire instead of taking its value from the store buffer,
-/// which cost each slow path about fifty cycles. So a `Space` keeps only the region shift, and
-/// [`Space::plan`] rebuilds the plan from the geometry, which is fixed for the process (a
-/// constant on x86-64, one load on aarch64), and the shift, which folds to arithmetic on one
-/// register.
+/// which cost each slow path about fifty cycles. So a `Space` keeps only the region shift and
+/// what the OS found of the geometry, and [`Space::plan`] rebuilds the plan from them, which folds
+/// to arithmetic on a register or two. Where the geometry is a constant, as on x86-64, what was
+/// found is no field at all.
 pub struct Space<'os, O: Os> {
     base: NonNull<u8>,
     /// `log2` of the region size: the plan's, kept as a whole word (see above).
     region_shift: usize,
+    /// What [`Os::geometry_of`] takes, from [`Os::found`] when this `Space` was made.
+    found: O::Found,
     os: &'os O,
     /// The first region's metadata block: worked out once, since every operation on the
     /// bitmaps reaches its words through it.
@@ -88,12 +90,13 @@ impl<O: Os> fmt::Debug for Space<'_, O> {
 
 impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
-    fn new(base: NonNull<u8>, plan: Plan, os: &'os O) -> Space<'os, O> {
+    fn new(base: NonNull<u8>, plan: Plan, found: O::Found, os: &'os O) -> Space<'os, O> {
         // Reservations lie far below the top of the address space, as in `at`.
         let metadata = base.map_addr(|base| base.saturating_add(plan.metadata_start()));
         Space {
             base,
             region_shift: plan.region_shift() as usize,
+            found,
             os,
             metadata,
         }
@@ -103,14 +106,15 @@ impl<'os, O: Os> Space<'os, O> {
     /// half that, and so on down to the floor, with the same number of regions each time. The
     /// error is the OS's answer at the floor: below it the heap cannot start.
     pub fn reserve(os: &'os O) -> Result<Space<'os, O>, OsError> {
-        let geometry = O::geometry();
+        let found = O::found();
+        let geometry = O::geometry_of(found);
         let mut shift = geometry.max_region_shift();
         loop {
             let Some(plan) = geometry.plan(shift) else {
                 return Err(OsError::EINVAL);
             };
             match os.reserve(plan.size(), plan.region_size()) {
-                Ok(base) => return Ok(Space::new(base, plan, os)),
+                Ok(base) => return Ok(Space::new(base, plan, found, os)),
                 Err(error) if shift == geometry.min_region_shift() => return Err(error),
                 Err(_) => shift -= 1,
             }
@@ -131,10 +135,11 @@ impl<'os, O: Os> Space<'os, O> {
 
     /// The layout, including the region size this reservation got: the OS's geometry with this
     /// reservation's region shift. Every `Space` is made on `O::geometry()`, by
-    /// [`Space::reserve`] and [`SpaceCell`], whose plans come from it.
+    /// [`Space::reserve`] and [`SpaceCell`], whose plans come from it, and [`Os::geometry_of`] of
+    /// what it found is that same geometry.
     #[inline(always)]
     pub fn plan(&self) -> Plan {
-        Plan::new(O::geometry(), self.region_shift as u8)
+        Plan::new(O::geometry_of(self.found), self.region_shift as u8)
     }
 
     #[inline(always)]
@@ -224,7 +229,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// Whether `start..start + len` is a range the OS calls accept: inside this reservation,
     /// page-aligned, a whole number of pages and not empty.
     pub fn is_callable_range(&self, start: NonNull<u8>, len: usize) -> bool {
-        let page = O::geometry().page_size();
+        let page = O::geometry_of(self.found).page_size();
         let offset = start.addr().get().wrapping_sub(self.base.addr().get());
         let size = self.plan().size();
         // The base is region-aligned, so an aligned offset is an aligned address.
@@ -379,7 +384,8 @@ impl<O: Os> SpaceCell<O> {
         if let Some(space) = self.get() {
             return Ok(space);
         }
-        let geometry = O::geometry();
+        let found = O::found();
+        let geometry = O::geometry_of(found);
         let mut shift = geometry.max_region_shift();
         let mut patience = PATIENCE;
         loop {
@@ -389,7 +395,7 @@ impl<O: Os> SpaceCell<O> {
             self.reserving.fetch_add(1, Ordering::AcqRel);
             let error = match self.os.reserve(plan.size(), plan.region_size()) {
                 Ok(base) => {
-                    let space = self.publish(Space::new(base, plan, &self.os));
+                    let space = self.publish(Space::new(base, plan, found, &self.os));
                     self.reserving.fetch_sub(1, Ordering::AcqRel);
                     return Ok(space);
                 }
@@ -460,7 +466,9 @@ impl<O: Os> SpaceCell<O> {
         // Clearing the shift leaves the base, which is not zero. `unwrap_or` keeps this total
         // for a word no `encode` made, which cannot be stored.
         let base = word.map_addr(|w| NonZeroUsize::new(unpack(w.get()).0).unwrap_or(w));
-        Space::new(base, Plan::new(O::geometry(), shift as u8), &self.os)
+        let found = O::found();
+        let plan = Plan::new(O::geometry_of(found), shift as u8);
+        Space::new(base, plan, found, &self.os)
     }
 }
 
