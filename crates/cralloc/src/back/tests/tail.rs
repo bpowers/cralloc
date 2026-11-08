@@ -892,7 +892,7 @@ fn the_thread_is_woken_for_a_mark_and_not_for_a_refused_raise() {
     let _ = kept;
 }
 
-/// The fork hook, end to end: the child's first slow path draws its generation, the depot
+/// The fork hook, end to end: the call in the child that needs a generation draws it, the depot
 /// tells the back end (`Source::forked`), and every inherited tail word asks for a repair,
 /// loses an owner bit no thread of the child holds, and shows its mark to the lookers.
 #[test]

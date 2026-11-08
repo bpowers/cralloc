@@ -1021,16 +1021,16 @@ a Rust `Layout` of the same size implies.
 - **Fork.** The child gets a copy of a heap in which every shared structure is valid at every
   instant. Objects that another thread held privately at the moment of the fork are lost to the
   child: a small, bounded leak. A drain that was under way leaves a claim and markers with no
-  drainer. The generation lives on a page that is wiped on fork, and the first call in the child
-  that needs one, a slow path that meets a marker, a drain or a look at the background thread's word,
-  draws a new one, so the child sees the parent's claims and markers as belonging to another
-  generation and treats them as absent. That draw also clears any owner bit left on a region's
-  huge-page advice, has each region's next change make the kernel's advice agree with its word
-  first, and marks every region a class is carving or has carved from as named for the walks. A
-  parent that never drew a generation has a child that does not know it is one, and that repair does
-  not run. Such a parent has no claims or markers to leave. An owner bit left behind is taken over
-  after two intervals, and a region whose naming the fork cut off is passed over by the walks, which
-  costs memory returned and not a block.
+  drainer. The generation lives on a page that is wiped on fork. A process draws one when it readies
+  the magazine area, so that its child can tell what it is. The first call in the child that needs
+  one, a slow path that meets a marker, a drain or a look at the background thread's word, draws a
+  new one, so the child sees the parent's claims and markers as belonging to another generation and
+  treats them as absent. That draw also clears any owner bit left on a region's huge-page advice, has
+  each region's next change make the kernel's advice agree with its word first, and marks every
+  region a class is carving or has carved from as named for the walks. A child whose parent had no
+  slow path of a small class, or forked between readying the area and that draw, does not know it is
+  one, and we accept that as a limit: the repair does not run, which costs memory returned and never
+  a block, and it may take its parent's threads for its own and start the background thread.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and the slow
   paths hold nothing that a nested call could trip over. The exceptions are where the allocator
   calls the C library, which has locks of its own: the creation of the background thread, and on
