@@ -1126,6 +1126,10 @@ where a test can reach it.
 - Of a thread's attempts at a sequence, one is at last left to finish. Only termination rests on
   this.
 - Fresh anonymous memory, and memory after `MADV_DONTNEED`, reads as zero.
+- Every byte of a block holds some value. A program may leave bytes there that Rust's model calls
+  uninitialised, such as a struct's padding, and a move reads them when it tests a page for zeros,
+  which that model does not allow. The compiler cannot carry what it knows of the program's store to
+  those loads, since each is reached through a function that is not inlined. No test holds such bytes.
 - The linker writes each relocation as the printers assume, and nothing rewrites the binary after it.
   A post-link tool such as BOLT can move code out of a sequence's range, where a preemption does not
   abort it.
