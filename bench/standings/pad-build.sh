@@ -49,7 +49,7 @@ for a in "${allocs[@]}"; do
         (cd "$W/bench" && BENCH_LAYOUT_PAD=$((10#$pad)) CARGO_BUILD_BUILD_DIR="$W/bench/target/pad-build-ws" \
            cargo build --release -p bench-workloads -p bench-rpc ${feat:+--features bench-alloc/$feat} \
            --target-dir "$out") ;;
-      orders | sozu | miniredis | router | qdrant | surrealdb | datafusion | ruff)
+      orders | sozu | miniredis | router | qdrant | surrealdb | datafusion | ruff | meilisearch)
         (cd "$W/bench/apps/$part" && PATH="$data/inputs/$part/bin:$PATH" BENCH_LAYOUT_PAD=$((10#$pad)) \
            CARGO_BUILD_BUILD_DIR="$data/build/$part" \
            cargo build --release --locked ${feat:+--features $feat} --target-dir "$out/apps/$part") ;;

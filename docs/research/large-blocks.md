@@ -35,7 +35,7 @@ in a class's region, and to *claim* one is to take its bit in the bitmap. *Advic
   `largepair` is 64 KiB against snmalloc's free list, and the large pipeline four times mimalloc's
   instructions at half the Ryzen's clock. The port and some idle layers had added a sixth of the path,
   now gone. Magazines of at least six objects would take 16% off the pipeline for up to 584 KiB a CPU,
-  and caching to 256 KiB would pass the incumbents on both, which the design stands against.
+  with no measurable cost on the M1 Max's servers or memory jobs, and caching to 256 KiB would pass the incumbents on both, which the design stands against.
 - **The large-buffer cache has no one winner.** Geomean of its phases, the rules beat tcmalloc,
   mimalloc and glibc at every size. Against jemalloc they lose at 0.5 GiB (1.82 against 1.46), lead
   at 1 GiB on one phase (1.41 against 1.52), and tie at 2 and 5 GiB (1.27, 1.19).
@@ -522,9 +522,26 @@ against the second: a large block's class comes from its address, because it may
 to grow, and a magazine's comes from the layout; a block in a magazine has no stagger, which keeps buffers
 written in turn apart; and the C routines' limit of 32 KiB and the slab's layout are in the Lean proofs. The
 scratch builds took those limits off for the Rust path alone, so they give what it would buy and show
-nothing about those costs. No profiled server makes such a flow. The floor of 8 slots needs one constant
-and is the one to try, after the server suite and the memory jobs, since the budget it passes was halved for
-memory ([memory.md](memory.md), "Magazine budget"). On the Ryzen it took this job from 656 cycles to 530.
+nothing about those costs. No profiled server makes such a flow.
+
+**The floor of 8 slots needs one constant, and on the M1 Max it gains the large pipelines 16 to 17% and
+costs the rest nothing measurable.** It passes a budget that was halved for memory ([memory.md](memory.md),
+"Magazine budget"), so it was compared whole against main at `92eeb7b`, 2026-11-09: three rounds of two
+builds whose functions all sit at one address, since only a table's contents differ, so no placement sweep
+is needed. On the Ryzen it took this job from 656 cycles to 530, and the rest has not run there.
+
+| Jobs | Time, 8 slots over main | Peak, 8 slots over main |
+|---|---:|---:|
+| Ten server jobs | 1.001 (x1.006), none past 0.9% | 1.009 (x1.013), at most 1.2 MiB more |
+| Log store, order service at 2 GiB, SurrealDB, Meilisearch | 0.997 (x1.003) | 0.998 (x1.003) |
+| 46 kernel jobs | 0.990 (x1.038) | 0.998 (x1.005) on the ten at 30 MiB or more |
+| The two large pipelines | 0.830 and 0.839, on 22% fewer instructions | 8.0 to 8.5 MiB, 7.0 to 8.0 |
+| The long `large` memory job | 935k cycles an operation against 934k | 3.84 GiB against 3.89; 1.66 times live after a quiet minute against 1.63 |
+
+Geometric standard deviations in brackets. The mixed pipeline gains 4.2%, a mixed churn 2.6% and a mixed
+exchange 2.4%; no job's runs are slower and apart by more than 0.3%. Saturated rates are level. Tails cannot
+tell here: the machine's own noise moves them more ([measuring.md](measuring.md), "On the M1 Max"). The most
+a server's peak rose is 0.3 MiB a CPU, against the bound of 584 KiB, on jobs that barely use these classes.
 
 ## A doubling's tail is the purge that falls on it
 
