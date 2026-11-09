@@ -39,7 +39,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: qdrant serve data=DIR | build out=DIR [points=N] [dim=D] [segments=S] [seed=X] | \
-                     requests out=FILE kind=search|mixed [n=N] [points=N] [dim=D] [seed=X]";
+                     settle out=DIR | requests out=FILE kind=search|mixed [n=N] [points=N] [dim=D] [seed=X]";
 const COLLECTION: &str = "bench";
 const CATEGORIES: u64 = 100;
 const CLUSTERS: u64 = 256;
@@ -61,6 +61,7 @@ pub fn main() {
     match d.job.as_str() {
         "serve" => serve(&mut d),
         "build" => build(&mut d),
+        "settle" => settle(&PathBuf::from(d.args.str("out", ""))),
         "requests" => requests(&mut d),
         _ => fail(USAGE),
     }
@@ -188,6 +189,9 @@ impl Qdrant {
                 cmd.pre_exec(|| {
                     let empty = sigset(0);
                     libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+                    // A driver that fails must not leave a server holding the runner's pipe, which
+                    // the runner would wait on until the job's time limit.
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                     Ok(())
                 });
             }
@@ -369,10 +373,44 @@ fn build(d: &mut Driver) {
     if !clean {
         fail("Qdrant did not stop after the build");
     }
+    settle(&out);
     let meta = format!("{{\"points\":{},\"dim\":{},\"seed\":{},\"segments\":{segments}}}\n", m.points, m.dim, m.seed);
     std::fs::write(out.join("collection.json"), meta).unwrap_or_else(|e| fail(&format!("collection.json: {e}")));
-    let _ = std::fs::remove_file(out.join("qdrant.yaml"));
     d.report().param("points", m.points).param("build_s", indexed.as_secs_f64());
+}
+
+/// Leaves the collection in `out` so that a fresh start finds it green, as `serve` requires. What
+/// Qdrant saved can hold more than it reported: on the M1 Max a build that was green with 4 segments
+/// came back with 6 and more vectors than points. A collection with work left is grey after a
+/// restart, and stays so until an update or a change of configuration starts its optimizers; an
+/// empty change is Qdrant's documented way.
+fn settle(out: &Path) {
+    let (storage, config) = (out.join("storage"), out.join("qdrant.yaml"));
+    if !storage.is_dir() {
+        fail("settle: out=DIR must hold a built collection");
+    }
+    let mut settled = false;
+    for _ in 0..3 {
+        let q = Qdrant::start(&storage, &config);
+        let info = q.collection();
+        if info["result"]["status"] == "green" {
+            settled = true;
+        } else {
+            eprintln!("qdrant settle: at the start {}", info["result"]);
+            q.json("PATCH", &format!("/collections/{COLLECTION}"), br#"{"optimizers_config":{}}"#);
+            q.green(Duration::from_secs(4 * 3600));
+        }
+        if !q.stop() {
+            fail("Qdrant did not stop as the collection settled");
+        }
+        if settled {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&config);
+    if !settled {
+        fail("the collection is still not green after a restart");
+    }
 }
 
 fn requests(d: &mut Driver) {
