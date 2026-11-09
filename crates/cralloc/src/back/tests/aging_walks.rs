@@ -148,7 +148,7 @@ fn what_walking_a_young_region_costs_under_steady_churn() {
             let taken = tree::claim(&host, 1, true).unwrap();
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
             let last = region::recorded(&host, region, slot);
-            let _ = region::settle_slot(&host, region, slot, class.size(), last);
+            let _ = region::settle_slot(&host, region, slot, class.size(), 0, last);
             stamp(slot, 0);
             live.push(slot);
         }
@@ -161,7 +161,7 @@ fn what_walking_a_young_region_costs_under_steady_churn() {
             let taken = tree::claim(&host, 1, true).unwrap();
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
             let last = region::recorded(&host, region, slot);
-            let _ = region::settle_slot(&host, region, slot, class.size(), last);
+            let _ = region::settle_slot(&host, region, slot, class.size(), 0, last);
             stamp(slot, 0);
             live.push(slot);
         }

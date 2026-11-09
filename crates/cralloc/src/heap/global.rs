@@ -62,8 +62,8 @@ impl Cralloc {
     }
 
     /// The bytes the block starting at `ptr` may use: the class size of a small block; for a
-    /// large one, the size last asked for rounded up to a page, not the whole slot or run.
-    /// `None` if no slot or run of the heap starts at `ptr`.
+    /// large one, the size last asked for carried to the end of the page it ends in, not the
+    /// whole slot or run. `None` if no slot or run of the heap starts at `ptr`.
     pub fn usable_size(ptr: *const u8) -> Option<usize> {
         HEAP.usable_size(ptr)
     }
@@ -98,7 +98,8 @@ impl Cralloc {
     /// path, and keeps what it held when it went quiet until something calls this. The
     /// `background` feature's `Cralloc::start_background` calls it from a thread of its
     /// own; the `cralloc-tokio` crate from a task on a tokio runtime. It never waits, and any
-    /// thread may call it at any time.
+    /// thread may call it at any time. On a kernel whose huge pages are over 2 MiB, its purge
+    /// pass may split them, which takes 1 to 2 ms each ([`Cralloc::maintain_step`]).
     pub fn maintain() {
         opt_out();
         process().maintain();
@@ -109,6 +110,14 @@ impl Cralloc {
     /// microseconds to tens of microseconds. Returns whether the round has more steps; `false`
     /// at once when this interval's round is done. For a caller that must not hold its thread
     /// for a whole round, such as a task on an async runtime, which yields between steps.
+    ///
+    /// Two kinds of step take longer. A step of the purge pass finishes a wholly free huge page,
+    /// claiming and releasing every bitmap word under it: at huge pages of 32 MiB, about 15 us for
+    /// slots of 1 KiB, 100 us for 64 bytes and 700 us for 8, and a millisecond or so where the
+    /// kernel is slow to take the page. And on a kernel whose huge pages are over 2 MiB and at most
+    /// 64 MiB (32 MiB, on pages of 16 KiB), a step of the purge pass may split one huge page, one a
+    /// step, and that holds the caller for 1 to 2 ms. It is the price of ever returning that
+    /// memory without the background thread, since no slow path splits one that large.
     pub fn maintain_step() -> bool {
         opt_out();
         process().maintain_step()

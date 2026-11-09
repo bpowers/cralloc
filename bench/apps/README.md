@@ -114,7 +114,9 @@ slowest allocator's saturated rate (`s30`), six at 70% (`s70`), three bursts of 
 at 70% separated by three-second silences with the connections open (`on`, `off`), then the
 connections close and the server is watched for ten seconds (`idle`). A fixed-rate segment
 after a closed one starts with a second that is not counted. The rates are found with
-`--suite servers-sat` and written into the job, so a change of rate is a change of job.
+`--suite servers-sat` and written into the job, so a change of rate is a change of job. The ones
+in `runner/src/suite.rs` are the Ryzen's; another machine has its own in `bench/rates/`, named
+after its CPU, which `standings/rates.py` writes from such a session.
 
 The generator marks each segment on its stdout; at every mark the runner reads the server's
 counters (cycles, instructions, CPU time, page faults, all threads), so each group of
@@ -137,7 +139,8 @@ the slowest allocator's often the best (`docs/research/servers.md`, "At one fixe
 tail can rank idle states, not allocators"). So by default the runner holds the server's
 cores out of deep idle while the server runs, the same way for every allocator: a spinning
 thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it needs no root, which disabling
-the state would). p99.9 then falls to tens of microseconds. The spinner shares the core, so
+the state would; a machine without SMT has no such thread, and only disabling the state holds
+it). p99.9 then falls to tens of microseconds. The spinner shares the core, so
 the server's cycles per request rise (by 17% on the order service) and its saturated rate
 falls, alike for every allocator. Every run records which way it ran (`idle_states`);
 `--idle-states free` leaves the states alone, and its tails measure the machine as much as
@@ -197,12 +200,13 @@ read by id, read through the indexes and updated in SurrealQL by 64 connections.
 `surrealdb/README.md`.
 
 **A GraphQL router.** The Router jobs start `router/subgraphs`, a glibc process on three CPUs
-of the generator's L3, as the upstream: a proxy job's upstream may be a workspace of its own
+of the generator's L3 (the set `upstream` of `scripts/cpusets`; a machine with none to spare,
+such as the M1 Max, gives the generator and the upstream two of its four each), as the upstream: a proxy job's upstream may be a workspace of its own
 (`Upstream::workspace`), which `build-apps` builds with glibc into `target/upstream/`. See
 `router/README.md`.
 
-**A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
-generator's L3 domain (two of them already keep up): `upstream`, a binary of
+**A proxy.** Sōzu forwards to an upstream the runner starts first, on the same CPUs as the
+Router's (two of the three already keep up): `upstream`, a binary of
 `bench/loadgen` built with glibc, which answers every request with the same response.
 The proxy's driver (`sozu/src/main.rs`) runs Sōzu's own main process, which forks a worker
 process a CPU, each re-running the driver's binary as Sōzu's worker (Sōzu's library keeps

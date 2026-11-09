@@ -30,14 +30,23 @@ the magazine's last slot, reads slots `1..=level` and hands their objects to the
   holding objects nothing else holds. This holds whichever CPU the routine ran on (the thread
   may have moved after reading the word), and whatever the magazine went through between the
   read and the commit, since only the state at the commit matters.
-- A drain racing the take is the case `Drain.tla` already covers for a slow path's install: if
-  the drain's exchange put its marker in first, the routine reads the marker and does not
-  commit; if the routine's sequence was in flight across the exchange and committed over the
-  marker, the drain's step 4 finds a non-marker and takes nothing. If the drain's fence fails
-  instead, its step 3 puts each old value back with a compare-and-swap against its marker; a take
-  that committed zero over the marker makes that compare-and-swap fail, so the drain writes
-  nothing back, which is right: the magazine is the taker's. Either way the magazine has one
-  owner.
+- The thread sees what the slots hold, though the routines order nothing. Whoever filled the
+  magazine installed it on this CPU, and the pushes and pops since were made here, so each of
+  those threads' stores is behind a context switch's full barrier, or in this thread's program
+  order, by the time this commit runs (`docs/research/memory-ordering.md`, "What stands in for a
+  release"). A drain that backs out puts back a value this CPU's threads wrote, and changes no
+  slot.
+- A drain racing the take is the case `Drain.tla` already covers for a slow path's install. A
+  sequence that starts after the drain's fence reads the marker and does not commit. One in flight
+  across the exchange is aborted by the fence, or commits over the marker, and then the drain's
+  step 4 finds a non-marker and takes nothing. If the fence fails instead, step 3 puts each old
+  value back with a compare-and-swap against its marker; a take that committed zero over the marker
+  makes that compare-and-swap fail, so the drain writes nothing back, which is right: the magazine
+  is the taker's. Either way the magazine has one owner.
+- A fork at any instruction gives the child a slab that keeps the invariant, each lost thread's
+  stores being a prefix of its order (`Fork.tla`; `docs/research/memory-ordering.md`, "The fork").
+  A take the fork cut off before its commit did nothing. One cut off after it leaves a magazine
+  nothing refers to, lost to the child.
 - If the routine does not commit, the thread never touches the magazine's slots.
 
 `interleave.rs` checks the take against a mutator (with migrations) and against a drain under
@@ -76,9 +85,14 @@ the walk follows the chain the commit took.
   chain below it: the walk reads the links after the commit, so it follows the chain the commit
   took, not the one the read saw. A thread that moved takes the stack of the CPU it is on; the
   argument does not depend on which CPU that is.
-- A drain racing the take is the same case as AGE-01's, for a spare head: whichever of the
-  drain's exchange and the routine's commit lands first wins the chain, and the drain's steps 3
-  and 4 write nothing over a commit they did not make.
+- The walk sees the links and records as the stack's pushes left them, for the reason AGE-01 gives
+  for slots: each push ran on this CPU, so its stores are behind a context switch or in this
+  thread's program order.
+- A drain racing the take is the same case as AGE-01's, for a spare head. A commit that lands,
+  before the drain's exchange or over its marker, takes the chain, and the drain's steps 3 and 4
+  take nothing and write nothing over it. Otherwise the routine finds the marker or is aborted by
+  the fence, and the chain is the drain's, or goes back on the CPU if the fence failed.
+- A fork is as in AGE-01: a chain the commit took and the fork cut off is lost to the child.
 - If the routine does not commit, nothing is read from or written to the chain.
 
-Reviewed: 602428b
+Reviewed: 5a8ade1

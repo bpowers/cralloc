@@ -13,7 +13,8 @@ them:
 - **Do not multiplex counters or group sampled events.** Take data addresses from IBS.
 
 The runner enforces most of this. [`bench/README.md`](../../bench/README.md) documents it; this note
-says why. Everything was measured on one machine (below).
+says why. Everything was measured on the Ryzen below; "On the M1 Max" says what differs on the other
+machine we have.
 
 ## The traps
 
@@ -201,12 +202,19 @@ moves under about 2%.
   indexing; through 70% load it reaches at most 710 to 739. Both found rereading the raw data,
   2026-11-06. Sozu's summed resident set once counted the 180 MB executable in each process, 53 to
   97 MiB, until shared pages were counted once.
-- **An incumbent may not be what you think.** A thread whose first jemalloc call is a free gets no
-  thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's on jobs with free-only
-  threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and `free-only` forms. tcmalloc's
-  shared library through TLS descriptors understated it by 14 to 26%. A program that compiles in its
-  own allocator hides under preload: difftastic's spread was 2.7% until its jemalloc came out, then
-  18%.
+- **An incumbent may not be what you think.** `snmalloc-sys` reads `debug` in the profile that
+  builds it as asking for snmalloc's Debug configuration, and `cc` as asking for frame pointers. The
+  suite's release profile has `debug = 1`, so snmalloc ran unoptimized with its assertions on, 158
+  ns a pipeline allocation and 502 cycles a `churn live=1k` operation on the M1 Max against 13.8 and
+  21.0 in Release, and the crates' jemalloc and mimalloc kept frame pointers and nothing else of a
+  debug build (the mimalloc crate's debug mode needs a feature; the mimalloc built from third_party
+  was never touched). All three now build as a default release profile does (2026-11-07 at
+  `69dd363`), and every figure of them on the Ryzen is from before. A thread whose first jemalloc
+  call is a free gets no thread cache: tikv's prefixed build ran 181% and 104% slower than Fedora's
+  on jobs with free-only threads, and 1 to 4% faster elsewhere, hence the `all-alloc` and
+  `free-only` forms. tcmalloc's shared library through TLS descriptors understated it by 14 to 26%.
+  A program that compiles in its own allocator hides under preload: difftastic's spread was 2.7%
+  until its jemalloc came out, then 18%.
 - **Some jobs run in two modes, and their medians compare mode counts:** xmalloc-test, glibc on
   larson, DataFusion on two L3s, the order service over HTTP/2 (4 to 6% more instructions, not tied
   to a build), Qdrant's search routing. Look at the runs before reading a median.
@@ -263,6 +271,77 @@ build-and-drop jobs: mimalloc asks for huge pages for its whole heap, cralloc fo
 so it can be a second stale. Peaks of a few MiB move by up to 1.5 MiB between runs, so differences
 under 1 MiB mean nothing.
 
+## On the M1 Max
+
+Asahi Linux 7.2.12 with 16 KiB pages: two Icestorm cores, then two clusters of four Firestorm cores
+at 3036 MHz, each sharing 12 MiB of L2, no L3 in sysfs, no SMT. `scripts/cpusets` gives jobs one
+cluster and the other, and builds the rest of the machine with the second cluster, so a session
+across clusters always runs with heavy work paused. It is a desktop with a browser open. Figures are
+one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
+
+- **The clock has no ramp to wait for.** The governor is `performance`, with boost off. All but 34 of
+  399 warm-ups held the clock in their first three windows (15.5 ms; the longest took 208), and every
+  run's measured clock lay within 2.98 to 3.04 GHz. The warm-up stays because it costs only that, and it would catch a clock
+  that did move.
+- **Which PMU.** One PMU a kind of core, each with a type of its own, and a generic hardware event
+  opened for no CPU goes to Firestorm's. On an Icestorm core such an event counts nothing: its
+  running time stops while its enabled time goes on, as it does for a task that leaves its PMU's
+  CPUs, so the run reads as multiplexed and is invalid.
+- **Ten counters, not interchangeable.** Nine can count cycles and two can count instructions: a third
+  `instructions` event ran 67% of the time. A workload's three and the runner's two fit. There is
+  no NMI watchdog to hold one.
+- **Nothing holds a core out of deep idle without root.** There is no SMT sibling for a spinner, so
+  `CPU PD` (10 us to leave, 10 ms residency) stays in a server's tails until `scripts/deep-idle off`
+  disables it. Runs say `idle_states: free`. A tail the report flags cannot be read as the allocator's.
+- **Placement moved jobs mostly through the routines.** Five pads moved `tree depth=20` 6.1% and `map
+  btree 1M` 5.3%, at level instructions and 0.1 to 0.5% noise, when routines formed addresses inside
+  their sequences (`ebe126a`). With every address formed before the arming store they moved 0.5 and
+  2.0% (`62be25d`), and with the generated routines 0.2 and 0.8% (`66dfb90`), noise 1.3 and 1.5%,
+  where mimalloc moves 0.1 and 0.4%. The cause is not traced; an `adrp` inside the sequence is the
+  suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
+  its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
+  landed than on the Ryzen, but too few have been swept to drop the rule.
+- **A server's meter for other work is off by more than the Ryzen's limit, so the limit here is 0.3,
+  and it is a weak guard.** With heavy work frozen, the median reading of a job's segment still runs
+  from -0.10 to 0.16 CPUs, alike across allocators, and 4 of 1,200 segments exceed 0.25 (six server
+  jobs, three rounds, `870d687`, 2026-11-08). Against a log of every context switch over 60 segments
+  of `connect log grpc h2`, the meter reads 0.11 low at 30% load, 0.03 high at 70%, and about right
+  at saturation and with no load. It also misses: the largest real burst, 0.21 CPUs and nearly all
+  Chromium, read 0.06, so no limit would catch it, and 0.06 CPUs once read 0.17. A limit of 0.1 threw
+  out a third of runs for the offset alone. The time ranking does not show what passes: runs reading
+  over 0.03 above their job's usual take a median 0.996 of the cycles of the same allocator's other
+  runs (0.98 to 1.05). A kernel job's limit stands: its median is -0.01, of 402 valid runs the highest
+  was 0.15, and three exceeded 0.25.
+- **A tail here belongs to the browser and the agents unless the run was quiet, and no limit on CPU
+  time can tell.** Heavy work is frozen and the generator's cluster is nearly clean: 19 runs of other
+  work over 0.5 ms in 273 s, the longest 2.0 ms. The server's is not. Six runs of one build of
+  `connect log grpc h2`, logged by process (`ed4dab4`, 2026-11-08), on CPUs 6-9 while the generator ran:
+
+  | Who | CPUs | Runs over 0.5 ms | Longest, ms |
+  |---|---:|---:|---:|
+  | Chromium, half of it service-worker processes it starts about once a minute | 0.011 | 588 | 112 |
+  | The agent process, `claude`: `mi-scavenger`, `JITWorker`, `HeapHelper` (its JavaScript runtime's garbage collector) | 0.005 | 367 | 33 |
+  | Kernel threads: writeback `kworker`s, and `kcompactd0` the longest | 0.002 | 168 | 88 |
+  | Other desktop, `gnome-shell` the longest | 0.001 | 40 | 4.9 |
+  | The agent's tools: `zsh`, `git`, `pgrep` | 0.0003 | 41 | 3.4 |
+  | The runner | 0 | 0 | |
+
+  The slowest request follows these. In five of the six its latency at 70% is within 0.5 ms of the
+  longest run of other work on the two clusters, from 1.7 to 25 ms, with p99.9 from 0.6 to 9.0 ms at
+  no more than 0.06 CPUs; the sixth had 3.6 ms of a kernel thread and a slowest request of 1.1 ms,
+  p99.9 98 us. Three of the four runs with p99.9 near or over 1 ms had no Chromium run over 0.5 ms in
+  that segment; `claude` had one in five of the six and kernel threads in three. Over 90 earlier runs,
+  39 exceed 1 ms, on every allocator, at rates this few runs cannot separate (3 to 10 of 15). This noise
+  only adds, so a job's tail is its quietest run, and ranking tails takes a session with both the
+  browser and the agents quiet: `bench/standings/quiet-session.sh`, whose log `whoran.py` reads. The
+  log needs no root here, with `perf_event_paranoid` at -1.
+- **`orders axum` and mini-redis have a tail of about 2 ms that is not this noise.** It shows in every
+  run under every allocator. In one logged run of `orders axum` at its fixed rate, the server has one
+  or two CPUs busy in 30% of milliseconds and three or four in the rest, with p99 1.8 ms; at 30% load
+  one CPU suffices and p99 is 26 us, and at saturation p99 is 368 us. So a backlog forms and clears
+  while its workers come and go. That points at the program's scheduling on four workers, which the
+  Ryzen's eight do not show, but no test has isolated it.
+
 ## Reusable techniques
 
 The placement sweep and the run-time switch are under the first trap. Beside them:
@@ -289,6 +368,21 @@ The placement sweep and the run-time switch are under the first trap. Beside the
   glibc's rseq registration fails; a valgrind with `aspacem_maxAddr` raised and a preloaded
   constructor that writes 0 into `cpu_id` fix both. Do not sample on instructions: 25% of one
   profile piled onto the instruction after a locked one.
+- **Exact instruction counts on aarch64, by stepping:** `bench/tools/stepcount.c` single-steps one
+  thread of a running program, and `stepsum.py` sums what it ran by function or inline chain. Step to
+  learn how many instructions a path runs and where, and sample for cycles, of which stepping knows
+  nothing. Sampling on instructions misreads a function here by up to three times: `slot_in` read 6.3%
+  of `largepair` for 2.1%. A step costs 9 to 25 us, so 5 million instructions, about 3,500 large
+  allocations and frees, take one to two minutes; it wants no quiet machine, only `scripts/heavy` and
+  `scripts/memlimit`. A ptrace stop counts as a preemption, which would abort a sequence at its next
+  instruction, so the tool clears the thread's `rseq_cs` at each stop. That is sound only if nothing a
+  sequence guards can change under it. So the thread must be pinned, which the tool checks, and alone
+  on its CPU, and it must reach a slow path at least every 50,000 steps or so, an interval at this
+  rate, or another thread's idle check may drain its slab with no abort to stop the sequence. The
+  program is killed at the end, so nothing outlives a run. A stepped thread runs over 100,000 times
+  slower against the clock, so it meets chores the clock drives far more often: in `largepair` they
+  added about 100 instructions to the 1,780 a pair the hardware counter reads. Do not read those rows
+  directly; take them as what the counter's total leaves.
 - **Lining up requests with the CPUs:** `perf record -e dummy --switch-events -k mono` takes no
   hardware counter and costs nothing measurable; idle counters from sysfs every 5 ms; all on
   `CLOCK_MONOTONIC`.

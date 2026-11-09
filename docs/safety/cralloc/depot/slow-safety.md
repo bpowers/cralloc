@@ -22,9 +22,15 @@ or a marker, which these calls never pass).
   (the reordering of a fill that opens a run, `siblings::spread`, moves each of those objects
   once along the cycles of a permutation of the slots, `Strided::place` being the rank of a
   position in the strided order and so a bijection, and so neither repeats nor drops one);
-  a magazine from a spare stack or the depot had its level recorded by whoever wrote its slots
-  (`retire`, `serve_*`, `take_loaded`, `take_chain`, `launder_held`) after writing them. An empty
-  magazine has none.
+  a magazine from a spare stack or the depot had its level recorded by the last thread that held
+  it, after that thread's writes to its slots (`fill`, `move_top_into`, `serve_*`, the exchange's
+  `set_level` on what it displaced, `reclaim`, `take_loaded`, `take_chain`, `launder_held`). An
+  empty magazine has none.
+- This thread sees those slots and that record on any memory order: from the depot by the push's
+  release and the pop's acquire, and from a spare stack because the stack's pushes ran on the CPU
+  this thread popped on, behind a context switch or in its program order. The next thread on the
+  CPU sees what this one wrote by the same barrier; the commit itself orders nothing
+  (`docs/research/memory-ordering.md`, "From a free to the next allocation").
 
 If the store happens, the slab now refers to the magazine and this thread no longer uses
 `held` (the `Stored` arm never touches it again). If it does not, the thread still holds it.
@@ -49,13 +55,17 @@ for a thread that moved between the read and the routine). For an allocation tha
 `centre_for_alloc` runs only on `Seen::Loaded` with the level its caller found exhausted (the
 pop failed and the classified level was 0, or the loop would have retried), so the word named
 slot 1 and `old` holds no object. That is what makes writing slots `1..=half` of `old` safe: no
-object there is overwritten, and `old`'s record says level 0 until `move_top_into` sets it to
-`half`. For a free the word named slot `capacity + 1`, the magazine full, and `move_top_into`
-writes only `held`, which `obtain_empty` returned at level 0. The thread then holds `held` and
-`old`, neither loaded nor on a stack, and copies between them with `move_top_into` before either
-is installed or retired. Between this store and the install the slab word is zero: a routine on
-the CPU misses and its slow path may install its own magazine, or a drain may put a marker
-there; the install then finds a word that is not zero and stores nothing, and the thread retires
-or serves from the two magazines it still holds, as a failed install does.
+object there is overwritten. Its record is whatever it was when it was installed, and nothing
+reads it before `move_top_into` sets it to `half`. For a free the word named slot `capacity + 1`,
+the magazine full, and `move_top_into` writes the object slots of `held` only, which `obtain_empty`
+returned at level 0. The thread then holds `held` and `old`, neither loaded nor on a stack, and
+copies between them with `move_top_into` before either is installed or retired. They are two
+magazines: no slab word names one this thread holds, so a commit that found `word` did not find
+`held`, even if `old` had reached a stack since the read and been popped as `held`. Between this
+store and the install the slab word is zero: a routine on the CPU misses and its slow path may
+install its own magazine, or a drain may put a marker there; the install then finds a word that is
+not zero and stores nothing, and the thread retires or serves from the two magazines it still
+holds, as a failed install does. If the thread has moved and that CPU's word is zero, the install
+lands there, which the invariant allows.
 
-Reviewed: 602428b
+Reviewed: 5a8ade1

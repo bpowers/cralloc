@@ -42,32 +42,26 @@ mod source;
 #[cfg(feature = "allocator-api")]
 mod allocator;
 // Also in the crate's own tests, so that the gate builds, lints and runs it.
-#[cfg(all(
-    any(test, feature = "background"),
-    target_os = "linux",
-    target_arch = "x86_64",
-    not(miri),
-    not(kani)
-))]
+#[cfg(all(any(test, feature = "background"), cralloc_real))]
 pub(crate) mod background;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 mod global;
 #[cfg(any(test, feature = "sim"))]
 mod sim;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub use global::Cralloc;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use global::{c_alloc_small, c_free_small};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimCralloc, SimHeap};
 
 pub(crate) use address::Found;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 pub(crate) use address::process;
 
 use crate::back::{Back, State};
-use crate::classes::{Class, SmallClass};
+use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::depot::{Cache, Depot, thread};
 use crate::front::Routines;
 use crate::os::Os;
@@ -116,6 +110,18 @@ pub(crate) const fn small(layout: Layout) -> Option<SmallClass> {
     match Class::of_layout(layout) {
         Some(class) => class.small(),
         None => None,
+    }
+}
+
+/// [`small`] for a layout the inlined lookup turned away, which is nearly always a large one: its
+/// size says so with one compare, where working out its class says the same at about 25
+/// instructions.
+#[inline(always)]
+const fn small_of_other(layout: Layout) -> Option<SmallClass> {
+    if layout.size() > MAX_SMALL_SIZE {
+        None
+    } else {
+        small(layout)
     }
 }
 
@@ -184,9 +190,9 @@ impl<O: Os> Heap<O> {
     }
 
     /// The bytes the caller may use of the block starting at `ptr`: the class size of a small
-    /// one; for a large one, the size last asked for rounded up to a page, never the whole slot
-    /// or run, which may be far bigger (`Back::usable_size`). `None` if no slot or run starts
-    /// there.
+    /// one; for a large one, the size last asked for carried to the end of the page it ends in,
+    /// never the whole slot or run, which may be far bigger (`Back::usable_size`). `None` if no
+    /// slot or run starts there.
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         self.back()?.usable_size(ptr)
     }
@@ -322,7 +328,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     fn alloc_other(self, layout: Layout) -> *mut u8 {
-        match small(layout) {
+        match small_of_other(layout) {
             Some(class) => self.alloc_small(class),
             None => self
                 .alloc_large_slow(layout, Zero::No)
@@ -344,7 +350,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     fn grant_other(self, layout: Layout, zero: Zero) -> Option<Grant> {
-        match small(layout) {
+        match small_of_other(layout) {
             Some(class) => self.grant_small(class, layout, zero),
             None => self.alloc_large_slow(layout, zero),
         }
@@ -411,7 +417,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     unsafe fn dealloc_other(self, object: NonNull<u8>, layout: Layout) {
-        match small(layout) {
+        match small_of_other(layout) {
             // SAFETY: HEAP-13. as in `dealloc`, the layout's small class is the block's.
             Some(class) => unsafe { self.free_small(class, object) },
             None => {
@@ -481,19 +487,25 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(always)]
     fn lone_heartbeat(self, rust: bool) {
         match crate::depot::lone_count(&self.heap.depot, &self.routines) {
-            crate::depot::Lone::Beat(turn) => {
-                if let Some(back) = self.heap.started() {
-                    let cache = self.cache(&back);
-                    cache.lone_beat(turn);
-                    if rust {
-                        self.after_rust_slow_path(cache.thread_seen());
-                    }
-                }
-            }
+            crate::depot::Lone::Beat(turn) => self.lone_beat(turn, rust),
             crate::depot::Lone::Counted => {
                 if self.word().load().needs_attention() {
                     self.attend_thread(rust);
                 }
+            }
+        }
+    }
+
+    /// The one large call in sixteen that beats. Out of line, so that the other fifteen, which
+    /// only count, do not save and restore the registers its chores need.
+    #[cold]
+    #[inline(never)]
+    fn lone_beat(self, turn: crate::depot::LoneTurn, rust: bool) {
+        if let Some(back) = self.heap.started() {
+            let cache = self.cache(&back);
+            cache.lone_beat(turn);
+            if rust {
+                self.after_rust_slow_path(cache.thread_seen());
             }
         }
     }

@@ -52,10 +52,10 @@ fn threads() -> Vec<Wants> {
     let smalls: Vec<Class> = SmallClass::all().map(SmallClass::class).collect();
     let mut all = Vec::new();
     for _ in 0..4 {
-        all.push(std::vec![large(region / 2); 12]);
+        all.push(std::vec![large_of(region / 2); 12]);
     }
     for _ in 0..2 {
-        all.push(std::vec![large(region); 6]);
+        all.push(std::vec![large_of(region); 6]);
     }
     for t in 0..3 {
         all.push((0..12).map(|i| smalls[3 * i + t]).collect());
@@ -262,17 +262,20 @@ fn round(seed: u64, faults: bool) -> (usize, usize) {
 
 fn rounds(salt: u64, count: u64, faults: bool) {
     let (mut given_up, mut refused) = (0, 0);
-    for at in 0..count {
+    // Some race for a carving word must be lost, or the rounds did not reach `unprepare`. On few
+    // CPUs the threads may not meet for a while: a run on four virtual CPUs often took more rounds
+    // than the host's 60, and it is the check of each round that matters. On one they may never.
+    let cpus = thread::available_parallelism().map_or(1, usize::from);
+    let mut at = 0;
+    while at < count || (given_up == 0 && cpus > 1 && at < 100 * count) {
         let (regions, none) = round(salt ^ at, faults);
         given_up += regions;
         refused += none;
+        at += 1;
     }
-    // Some race for a carving word must have been lost, or the rounds did not reach
-    // `unprepare`. On one CPU the threads may never meet.
-    let cpus = thread::available_parallelism().map_or(1, usize::from);
     assert!(
         given_up != 0 || cpus < 2,
-        "no region was given up in {count} rounds"
+        "no region was given up in {at} rounds"
     );
     assert!(!faults || refused != 0, "no commit was refused");
 }

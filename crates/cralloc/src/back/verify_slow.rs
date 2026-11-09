@@ -61,10 +61,10 @@ fn layouts_come_back_from_the_memo() {
     let plan = any_used_plan();
     let class = any_class();
     let memo = Memo::new();
-    let Some(layout) = memo.layout(plan, class) else {
+    let Some(layout) = memo.layout(|| plan, class) else {
         return;
     };
-    assert!(memo.layout(plan, class) == Some(layout));
+    assert!(memo.layout(|| plan, class) == Some(layout));
 }
 
 /// The slot count without a divide is the quotient.
@@ -261,6 +261,7 @@ fn the_fast_check_passes_exactly_the_slot_starts_below_the_limit() {
         inverse: odd_inverse(size >> shift),
         shift,
         limit,
+        stride: size as usize,
     };
     let offset: u64 = kani::any();
     let object = core::ptr::without_provenance::<u8>(base.wrapping_add(offset as usize));

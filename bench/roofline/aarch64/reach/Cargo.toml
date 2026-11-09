@@ -1,0 +1,25 @@
+[package]
+name = "roofline-reach"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stands alone: not a member of any workspace above it.
+[workspace]
+
+[features]
+# Put a function's body, or the whole text, past a conditional branch's reach.
+big_function = []
+big_text = []
+# Which way an inlined fast path reaches its cold stub.
+stub_label = []
+stub_unlikely = []
+stub_none = []
+# How a routine reads __rseq_offset.
+direct_offset = []
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = "fat"
+codegen-units = 1

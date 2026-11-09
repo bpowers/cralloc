@@ -29,6 +29,9 @@
 //!   its last claim was rather than from the top, moves past a group of 64 words where it meets
 //!   another claimer, leaves a word it finds empty to whoever emptied it, and clears the bits of
 //!   the words it empties in one group with one atomic AND and a re-read of each.
+//! - **a purge's claims** ([`ExactRun`]) are the same `Run`, going by address: a search that
+//!   starts at each word in turn, takes bits only if all it wants are there, and clears as a run
+//!   does, all of it before the purge returns the pages.
 //! - **release**: set the bits with one atomic OR; a bit already set is a double free. Then walk
 //!   up: at each level read the summary bit and, if it is clear, set it with an atomic OR. After
 //!   an OR that found the summary word empty, the next level's bit is set without reading it
@@ -55,7 +58,7 @@
 use super::layout::{Layout, MAX_LEVELS};
 use super::word::{BITS, Word, lowest};
 use crate::os::HugePages;
-use crate::space::RegionId;
+use crate::space::{Geometry, RegionId};
 
 /// What the protocols need from their surroundings: the class's words, its regions' metadata
 /// words, and the OS calls on a region. Production code implements it over the heap
@@ -66,6 +69,9 @@ pub(crate) trait Host {
 
     /// The layout of the class's regions.
     fn layout(&self) -> &Layout;
+
+    /// The geometry, as the heap's regions use it (`Plan::geometry`), which the policy's rules read.
+    fn geometry(&self) -> Geometry;
 
     /// The region with this index, if it is an object region of the heap.
     fn region(&self, index: usize) -> Option<RegionId>;
@@ -696,29 +702,85 @@ fn clear_group<H: Host>(host: &H, at: Cursor) {
     }
 }
 
-/// Claims exactly `bits` of a leaf word if every one of them is free, as a purge does. Returns
-/// whether it did.
-pub(crate) fn claim_exact<H: Host>(host: &H, region: RegionId, index: u32, bits: u64) -> bool {
-    let spot = Spot::leaf(region, index);
-    let leaf = spot.word(host);
-    let mut seen = leaf.load();
-    loop {
-        if seen & bits != bits {
-            return false;
-        }
-        match leaf.compare_exchange(seen, seen & !bits) {
-            Ok(_) => {
-                if seen == bits {
-                    clear(host, spot);
-                }
-                return true;
+/// A purge's claims in one region, word after word: a run of claims that goes by address where
+/// a fill's follows the summary bits, which is the model's search that may start at any word.
+/// It clears the bits of the words it empties together, one atomic AND for each group
+/// (`clear_group`), and the caller ends it with [`ExactRun::finish`] before it uses what it
+/// holds. So however long a purge goes on to hold its claim, a fill finds nothing of it under
+/// set bits, and does not wait for it or walk it: at most the words of the group under way, for
+/// the moment they take to claim. Dropped without `finish`, as in a thread lost in a fork, it
+/// leaves those bits set over empty words, which the protocol allows.
+pub(crate) struct ExactRun {
+    /// The group under way and the words of it this run has emptied.
+    at: Option<Cursor>,
+}
+
+impl ExactRun {
+    pub(crate) const fn new() -> ExactRun {
+        ExactRun { at: None }
+    }
+
+    /// Claims exactly `bits` of a leaf word if every one of them is free. Returns whether it
+    /// did; if not, it has written nothing to the word, and what the run took before is still
+    /// the caller's to give back.
+    #[inline]
+    pub(crate) fn claim<H: Host>(
+        &mut self,
+        host: &H,
+        region: RegionId,
+        index: u32,
+        bits: u64,
+    ) -> bool {
+        let spot = Spot::leaf(region, index);
+        let leaf = spot.word(host);
+        let mut seen = leaf.load();
+        loop {
+            if seen & bits != bits {
+                return false;
             }
-            Err(now) => seen = now,
+            match leaf.compare_exchange(seen, seen & !bits) {
+                Ok(_) => {
+                    if seen == bits {
+                        self.emptied(host, spot);
+                    }
+                    return true;
+                }
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// Notes that this run has emptied the word `leaf`, clearing the bits of the last group if
+    /// the word is in another.
+    #[inline]
+    fn emptied<H: Host>(&mut self, host: &H, leaf: Spot) {
+        if host.layout().height() == 0 {
+            // The word's summary bit is a class word's, shared with other regions.
+            clear(host, leaf);
+            return;
+        }
+        let mut at = match self.at {
+            Some(at) if at.group == leaf.index / BITS => at,
+            Some(at) => {
+                clear_group(host, at);
+                Cursor::at(leaf)
+            }
+            None => Cursor::at(leaf),
+        };
+        at.emptied |= 1 << (leaf.index % BITS);
+        self.at = Some(at);
+    }
+
+    /// Clears the summary bits this run still owes.
+    pub(crate) fn finish<H: Host>(self, host: &H) {
+        if let Some(at) = self.at {
+            clear_group(host, at);
         }
     }
 }
 
 /// Frees `bits` of a leaf word. Aborts if any of them is already free: that is a double free.
+#[cfg(test)]
 pub(crate) fn release<H: Host>(host: &H, region: RegionId, index: u32, bits: u64) {
     let mut release = Release::new(host, region);
     release.leaf(region, index, bits);

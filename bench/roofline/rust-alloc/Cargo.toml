@@ -23,9 +23,17 @@ slab_ool = ["slab"]     # out-of-line routines, as generated
 slab_pc = ["slab"]      # out of line, one entry per class
 asm = ["dep:cralloc"]  # cralloc itself, reading __rseq_offset through the GOT
 asm_exe = ["asm", "cralloc/executable"]  # ... reading it with one direct load
+# What the benchmark suite runs as each incumbent (bench/alloc), for run_aarch64.sh.
+ba = ["dep:bench-alloc"]
+ba_mi = ["ba", "bench-alloc/mi"]
+ba_mi_sized = ["ba", "bench-alloc/mi-sized"]
+ba_je = ["ba", "bench-alloc/je"]
+ba_tc = ["ba", "bench-alloc/tc"]
+ba_sn = ["ba", "bench-alloc/sn"]
 
 [dependencies]
 cralloc = { path = "../../../crates/cralloc", optional = true }
+bench-alloc = { path = "../../alloc", optional = true }
 
 [profile.release]
 opt-level = 3
@@ -36,3 +44,14 @@ panic = "abort"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# The allocator crates' build scripts read `debug` in their own profile, so these build what a
+# user of a default release profile gets (bench/Cargo.toml says what it changes).
+[profile.release.package.snmalloc-sys]
+debug = false
+
+[profile.release.package.tikv-jemalloc-sys]
+debug = false
+
+[profile.release.package.libmimalloc-sys]
+debug = false

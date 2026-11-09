@@ -81,8 +81,10 @@ A 4 KiB class moves 14 objects a call, so its per-call costs dominate: fill 21 c
 29, scattered 52. On Meilisearch fill and launder together average about 20 cycles an object
 (computed from the 2026-10-22 profile and counts), between dense and scattered.
 
-- **What a dense launder is made of.** The loop is 12 instructions and about 2.5 cycles a slot. A
-  call pays about 300 cycles once, for the walk up the summary tree, the retained-count add and the
+- **What a dense launder is made of.** The loop is 12 instructions and about 2.5 cycles a slot, or,
+  where a word's slots come one stride apart, a look at the rest of the word four at a time, which on
+  Firestorm is about half the cycles ([firestorm.md](firestorm.md), "What the slow paths take"; not
+  measured on Zen 5). A call pays about 300 cycles once, for the walk up the summary tree, the retained-count add and the
   host lookup: 1.2 a slot. One locked OR per bitmap word adds under one a slot. So the depot and
   back end deal in whole magazines: copying through a 64-entry buffer, with a back-end call per 64,
   cost a dense launder 9.0 cycles against 4.9 and a dense fill 7.1 against 4.6.

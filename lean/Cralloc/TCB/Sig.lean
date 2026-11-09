@@ -170,6 +170,17 @@ structure Abi (M : ISA) where
   /-- The value of each compile-time constant the code can name
   (`Operand.const`), by name, on a target whose code can name one. -/
   param : Option (M.State → String → BitVec 64) := none
+  /-- Whether a routine finds the thread's rseq area once, in its setup
+  (`Artifact.setup`), so that the memory accesses of its attempts do not include
+  reading `__rseq_offset` (`Contract.trace`). -/
+  setupFindsArea : Bool := false
+  /-- Whether the code may form the address of the slabs from their page alone
+  (AArch64's `adrp` with no `:lo12:`), so that the slabs must start on a page. -/
+  slabsOnPage : Bool := false
+  /-- How many bytes of a class's 8-byte mask entry a C routine reads (`Spec.CEntry`), of
+  which it tests the low 32 bits: where a load scaled by 8 reads all of it (AArch64's
+  `ldr x, [b, i, lsl #3]`; a 32-bit load scales by 4), all of them. -/
+  maskBytes : Nat := 4
 
 /-! ## Tables of constants
 

@@ -93,8 +93,8 @@ pub(super) fn plans_keep_their_parts_apart(geometry: Geometry) {
     assert!(process & page_mask == 0);
     assert!(process + geometry.page_size() == plan.size());
 
-    assert!(geometry.huge_page_size() & page_mask == 0);
-    assert!(plan.region_size() & (geometry.huge_page_size() - 1) == 0);
+    assert!(plan.geometry().huge_page_size() & page_mask == 0);
+    assert!(plan.region_size() & (plan.geometry().huge_page_size() - 1) == 0);
 }
 
 /// `locate` inverts region offsets: an offset is located exactly when it is inside an object

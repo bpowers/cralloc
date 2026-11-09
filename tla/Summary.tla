@@ -32,6 +32,19 @@
        empty has its bit set back by a walk up, and if the AND emptied the
        summary word and every word read empty, the thread clears the summary
        word's own bit, as a single clear would.
+     A purge's claims (tree::ExactRun) are these same steps. Each word is a
+     search that starts there and takes the bits it wants, or gives up having
+     written nothing, as a thread leaving this search does. It holds its clears
+     within a group and makes them before it returns any page. What it then
+     holds is live here, for as long as a program could hold it: madvise
+     changes no bit. Giving back, after the madvise or after meeting a word not
+     wholly free, is a free of each word, and the batch that shares their walk
+     (tree::Release) is those frees paused between OR and walk, the walks made
+     one after another. A small class's purges are Summary_run and Summary_look;
+     a large class's meet kept bits and frees that look at every level, which
+     is SummaryLookUp. No model here says a fill does not wait for a purge: that
+     is a matter of how far its search walks, which back/tests/purge_claim.rs
+     counts and a_purge_lost_at_any_step_holds_up_no_fill explores.
    Keep = TRUE lets a thread that empties a level-0 word leave its summary
    bit set and owe nothing, under any number of summary words, as a large
    class's claim does: the bit is cleared by the next search that finds the

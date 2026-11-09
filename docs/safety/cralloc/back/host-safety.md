@@ -3,10 +3,11 @@
 `ClassHost` is the protocols' view of one class of the real heap. It turns metadata word
 numbers into references into the reservation, and forwards purges to `Space`.
 
-**The `ClassHost` invariant.** `layout` is `Layout::new(space.plan().geometry(), class)` for the
-host's class, and every `RegionId` a caller passes is a region this class has named: a carving
-word of the class has held it. Such a region is the class's for good. `Back::host` is the only
-constructor, and it builds the layout that way. Region ids reach a host only from:
+**The `ClassHost` invariant.** `layout` is `Layout::new(space.plan(), class)` for the host's
+class, and every `RegionId` a caller passes is a region this class has named: a carving word of
+the class has held it. Such a region is the class's for good. `Back::host` is the only constructor,
+and it reads the layout from the class's memo, which gives what `Layout::new` gives (Kani,
+`layouts_come_back_from_the_memo`). Region ids reach a host only from:
 
 - the class's carving word, which holds only a region this class's `assign` took from the table
   with a compare-and-swap from `Unassigned` to `Class(class)` and then named with its swing;
@@ -31,7 +32,23 @@ constructor, and it builds the layout that way. Region ids reach a host only fro
   its tag for good, so the second read gives the carver (`tla/Assign.tla`: `Assign_repair`,
   without the second read, publishes the wrong class; `Assign_repair_recheck` holds;
   `back::tests::published_tag` plays it against the code). The byte is written once (a
-  compare-and-swap from zero) and never cleared.
+  compare-and-swap from zero) and never cleared. The repair's read is of the block's word 0
+  or of `State::headers`, and word 0 is committed: whichever class put the tag there committed
+  its fixed part first, and commit is never undone.
+
+`Back::assign` is the one caller that works on a region before it is named, and it holds to less:
+
+- Before the tag it commits the block's fixed part and, for a large class, the region's first slot
+  (`region::commit_first`), on a region the table said was unassigned, which another thread may
+  have taken since. A commit changes no contents. `commit_first` also reads the region's `Hints`
+  word through this layout, word 1 of the block it has just committed, which in another class's
+  region is something else, a small class's summary word. It is an atomic read of a committed
+  word, and what it finds only steers how much the commit makes writable. A large class has no
+  huge-page part (`region::huge_threshold`), so nothing is written back. If the region was taken,
+  this thread's `take` fails and the commit is forgotten.
+- After the tag, and before its swing, it alone writes the region's header (`Grow`, `Hints`), which
+  no one reads until the carving word names the region. A loser zeroes it before it gives the tag
+  back, so that a region given back has an all-zero block.
 
 A class never gives a named region up: the only tag change away from `Class(class)` is
 `assign` giving back a region it took and did not name, after its swing lost. Such a region
@@ -40,10 +57,6 @@ cannot be reached any other way: `back::tags` keeps the table and the published 
 and offers a class for a region number only through the published byte (`tla/Assign.tla`
 checks the protocol, and `Assign_table` shows a walk that read the table instead acting on a
 region another class or a run then had).
-
-The reviewed finding at 1d73192 (the walks read the table, and could act on a region given
-back with the wrong class's layout, `back::tests::published_tag`) is closed by the published
-tag, and the finding of the review of f07640f (the repair's stale read) by its second read.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
@@ -62,7 +75,9 @@ that conflicts with a shared reference.
    `age_word()`), which `layouts_fit` places before the first summary word,
    `clean_word(w)` with `w` below the clean count, `zero_word(w)`
    with `w` below the leaf count, and `size_word(slot)` with `slot` below the slot count (a
-   slot `Plan::slot_at` accepted). The layout a host holds is the one worked out: a layout read
+   slot a claim took, or one `Layout::block_at` found, which may be past the region's last
+   and which its caller checks against the slot count or the watermark before it reads the word:
+   `Back::lookup`, `Back::slot_in`). The layout a host holds is the one worked out: a layout read
    back from the class's memo equals `Layout::new` (Kani, `layouts_come_back_from_the_memo`).
    Kani's `layouts_fit_the_used_geometries` and
    `layouts_fit_every_geometry` prove that all of these sections lie inside
@@ -167,15 +182,19 @@ unchanged (the region's base plus the offset). The range checks are `Space::purg
 aborts on a range outside the reservation or not whole pages. The caller's obligations are
 discharged at the call sites: BACK-REGION-01, BACK-REGION-02 and BACK-REGION-03.
 
-**Machine checks.** The simulator records which pages are committed, and fails a commit,
-purge or unmap of a page that was written before it was committed. The back end's `SimOs`
+**Machine checks.** The simulator records which pages are committed. In guarded memory, a
+shape whose pages are whole host pages, a write to a page not committed faults at once; in
+ordinary memory, where a shape's pages are smaller than the host's, a commit or purge of a page
+written before it was committed fails, and an unmap does not look. The back end's `SimOs`
 tests (`back::tests`) run every access path on it, natively and under Miri with strict
 provenance, with fault injection (including calls that fail partway) and with four threads.
-`the_leaf_bitmap_is_committed_before_it_is_written` fails if a carve skips the leaf commit
-(checked by deleting it). The protocol scenarios in `back::models` run on a test host that does
-not track commits; they check the protocols, not this entry. Kani proves the layout's sections
+`the_leaf_bitmap_is_committed_before_it_is_written` fails if a carve skips the leaf commit only in
+guarded memory, since with the commit gone nothing commits those pages later: on a host with
+pages of 4 KiB, or of 16 KiB with `CRALLOC_SIM_PAGE_SHIFT=14` (`scripts/sim-pages`). On a host of
+16 KiB at the default shift it passes either way. The protocol scenarios in `back::models` run on a test host whose words
+are ordinary memory; they check the protocols, not this entry. Kani proves the layout's sections
 fit the block (`layouts_fit_*`) and the leaf commit covers the carved slots
 (`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols on a heap does not fit
 the memory cap, so the access paths are tested, not proved.
 
-Reviewed: 7ddb618
+Reviewed: 5a8ade1

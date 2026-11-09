@@ -32,6 +32,6 @@ def addApi : Api where
   contracts := some fun A _ => addContract A
   summary := "Pipeline self-test: returns `a.wrapping_add(b)`.\n\n\
     Contract: `VG.Spec.Selftest.addContract`. No safety requirements."
-  safety := []
+  safety := fun _ => []
 
 end VG.Spec.Selftest

@@ -275,7 +275,7 @@ fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
 
 /// A pass whose goal has one to three pages left must still take them from a long run, or stop.
 /// A run cut to what the goal has left before the test for short runs would be under
-/// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over, every run the walk met from
+/// `PURGE_MIN_RUN_PAGE_UNITS`, counted as a short run and stepped over, every run the walk met from
 /// then on: the pass would walk the rest of its lap past long free runs, purging nothing, and
 /// end only when it had gone round.
 ///

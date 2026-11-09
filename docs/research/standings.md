@@ -174,8 +174,10 @@ cargo.
 
 **The kernel suite** is a regression check, not a target (`c7f5c21`, 2026-10-22 to 23, ten rounds of
 native jobs, seven of preloaded, medians). Against the best incumbent on each job cralloc is ahead
-on 38, level on 2 and behind on 15, and the geomean of its time over the best's is 0.803. The others
-against cralloc, by group (the RPC jobs are above):
+on 38, level on 2 and behind on 15, and the geomean of its time over the best's is 0.803. snmalloc was
+among the incumbents only in its Debug configuration ([measuring.md](measuring.md), "An incumbent may
+not be what you think"), so a Release build may lower some of those bests. The others against
+cralloc, by group (the RPC jobs are above):
 
 | Group (jobs) | jemalloc | tcmalloc | mimalloc | glibc |
 |---|---:|---:|---:|---:|
@@ -184,6 +186,106 @@ against cralloc, by group (the RPC jobs are above):
 | Work stealing (4) | 1.09 (x1.17) | 1.16 (x1.16) | 1.37 (x1.37) | 1.98 (x2.00) |
 | Rust programs preloaded (3) | 1.56 (x1.23) | 1.55 (x1.21) | 1.59 (x1.85) | 4.29 (x4.40) |
 | C programs preloaded (8) | 1.16 (x1.19) | 1.26 (x1.70) | 0.94 (x1.07) | 1.36 (x1.53) |
+
+## On the M1 Max
+
+**On the kernel suite cralloc leads here as it does on the Ryzen: ahead on 35 jobs, level on 9, behind
+on 11 of 55, and its time is 0.826 of the best incumbent's (geomean).** Its lead on servers is smaller
+than on the Ryzen: the others take 1.005 to 1.023 of its cycles a request, glibc 1.161. Programs are
+level. Tails do not rank here yet. Everything else in this note is the Ryzen's.
+
+An Apple M1 Max under Asahi Linux 7.2.12 with 16 KiB pages, at `66dfb90`, 2026-11-08: the generated
+routines, the rules in bytes. Three rounds of every job under eight builds, 1,506 runs, 4 left out for
+other work. The best incumbent is the best of six: mimalloc v3.5.3 and the crate's, per-CPU tcmalloc,
+jemalloc, glibc and snmalloc in its Release configuration. The control is 0.33% from mimalloc at the median
+of 63 jobs and 3.1% at the 90th percentile; its largest are modes of mimalloc's, up to 21%. The others
+against cralloc, geomean with the geometric standard deviation across jobs:
+
+| Group (jobs) | jemalloc | tcmalloc | mimalloc | glibc | snmalloc |
+|---|---:|---:|---:|---:|---:|
+| Cross-thread (23) | 2.27 (x1.65) | 1.73 (x1.59) | 3.69 (x1.84) | 20.6 (x1.90) | 2.30 (x1.32) |
+| Work stealing (4) | 1.11 (x1.13) | 1.12 (x1.12) | 1.43 (x1.54) | 2.01 (x2.11) | 1.17 (x1.19) |
+| RPC (3) | 1.01 (x1.02) | 0.99 (x1.00) | 1.00 (x1.01) | 1.13 (x1.05) | 0.99 (x1.01) |
+| Single-thread (14) | 1.40 (x1.37) | 1.30 (x1.30) | 1.46 (x1.44) | 2.24 (x1.85) | 1.18 (x1.46) |
+| Rust programs preloaded (3) | 1.60 (x1.31) | 1.35 (x1.14) | 1.38 (x1.54) | 4.39 (x3.69) | |
+| C programs preloaded (8) | 1.17 (x1.29) | 1.36 (x1.96) | 1.09 (x1.23) | 1.35 (x1.55) | |
+| **Memory**, cgroup peak of the jobs where cralloc reaches 30 MiB (14; snmalloc 9) | 1.04 (x1.15) | 1.11 (x1.31) | 1.56 (x1.47) | 1.10 (x1.15) | 1.15 (x1.32) |
+
+**The cross-thread lead is what the Ryzen showed.** Moving a line between clusters costs what crossing
+L3s does ([machine-aarch64.md](machine-aarch64.md)). On one pipeline cralloc takes 4.6 ns an allocation
+against per-CPU tcmalloc's 8.6, and across clusters 12.2 against jemalloc's 20.5.
+
+**Where it is behind,** each against its job's best incumbent. "Instructions" is the share of the gap in
+cycles, and above 1 means more instructions and fewer stalls; "kernel" is the share in kernel cycles.
+Placement is the mean over five pads (0 to 128 bytes), three rounds, two for the RPC jobs.
+
+| Job | Against | Gap | Instructions | Kernel | Faults | Over placements |
+|---|---|---:|---:|---:|---:|---|
+| One pipeline of 4 to 256 KiB blocks | mimalloc | 148% | 1.55 | 0.0 | level | Not swept: far outside any placement |
+| `largepair` | snmalloc | 102% | 0.93 | 0.0 | level | Not swept. glibc takes 17.6 ns where it stays in its top, and 1,611 in the two runs of three where it faults on every pair |
+| `json 32Mi` | mimalloc | 8% | 1.31 | 0.26 | 20,129 / 13 | 7.3%, resolved (11.95, against 11.14) |
+| `map hash 1M` | the mimalloc crate | 6% | 0.85 | 0.31 | 13,236 / 636 | 5.7%, resolved. Ahead of mimalloc v3.5.3 by 1.1% |
+| `sh8bench`, `mstress` | mimalloc | 6%, 4% | over 1 | | 8,714 / 120, 9,146 / 234 | Preloaded, not swept |
+
+- **`json` and `map hash` are mimalloc's huge pages and our back end, not the fast path.** Its heap is
+  on 32 MiB pages, so it takes almost no faults, and a quarter to a third of the gap is the kernel's.
+  [firestorm.md](firestorm.md) puts the rest of JSON's in the launder and the fill.
+- **Level once swept:** `map btree 1M`, 0.4%, its ranges overlapping, and `rpc log c64`, `rpc echo c64` and `spawn t4`, within 0.7%. The Box tree is ahead,
+  2.1% over placements.
+
+**Servers here.** Thousands of server cycles a request at 70% of the slowest allocator's saturated rate
+on this machine, and each allocator against cralloc. The server has four Firestorm cores and the
+generator the other four, with heavy work frozen. Three rounds of single builds, not swept over
+placements, so differences of a few percent are not resolved.
+
+| Job | cralloc | jemalloc | tcmalloc | mimalloc | glibc | snmalloc |
+|---|---:|---:|---:|---:|---:|---:|
+| Connect log service, HTTP/1.1 | 80.0 | +2.8% | +2.7% | +0.6% | +12.5% | +1.3% |
+| Connect, HTTP/2 | 84.2 | +3.1% | +3.5% | +1.6% | +13.4% | +1.5% |
+| gRPC, HTTP/2 | 87.0 | +1.1% | +0.9% | -0.2% | +11.1% | -0.5% |
+| Orders, actix | 36.6 | -0.1% | +0.1% | +3.8% | +20.1% | +2.9% |
+| Orders, axum | 43.3 | -0.1% | -2.7% | +1.3% | +24.1% | +1.8% |
+| Orders, axum, HTTP/2 | 38.3 | -1.3% | +0.5% | +5.5% | +30.2% | +3.6% |
+| Apollo Router | 1,437 | +3.9% | +0.0% | +6.5% | +40.5% | +0.3% |
+| Apollo Router, without glibc's rate | 1,432 | +4.0% | +0.2% | +6.2% | | +0.3% |
+| Sozu proxy | 57.8 | -0.1% | +0.1% | -0.5% | -0.3% | -0.7% |
+| mini-redis | 25.6 | -0.7% | +0.2% | -1.1% | -0.2% | -0.6% |
+| **Geomean over the ten** (glibc nine) | | **1.013 (x1.019)** | **1.005 (x1.016)** | **1.023 (x1.027)** | **1.161 (x1.114)** | **1.010 (x1.014)** |
+| Instructions, the same | | 1.035 (x1.023) | 1.035 (x1.016) | 1.007 (x1.016) | 1.139 (x1.084) | 1.000 (x1.007) |
+| cralloc's saturated rate over theirs | | 1.007 (x1.020) | 1.011 (x1.012) | 1.036 (x1.035) | 1.239 (x1.173) | 1.012 (x1.034) |
+| **Memory**, resident at the end against cralloc's | | 0.846 (x1.143) | 1.035 (x1.138) | 2.132 (x1.536) | 0.983 (x1.561) | 1.347 (x1.295) |
+| Cgroup peak against cralloc's | | 0.968 (x1.203) | 0.937 (x1.110) | 2.517 (x1.597) | 0.993 (x1.524) | 1.236 (x1.343) |
+
+cralloc at `66dfb90`, 2026-11-08, 177 runs, 2 left out. The runner's own commits moved under the
+sessions; the allocator's did not.
+
+- **jemalloc and tcmalloc run 3.5% more instructions for 0.5 to 1.3% more cycles,** so their
+  instructions per cycle are better, as on the Ryzen.
+- **`orders axum` against tcmalloc is the one to sweep:** 2.7% fewer cycles on 4.3% more instructions.
+- **Tails do not rank here.** With the browser and the agents running, a run's p99.9 follows what else
+  ran ([measuring.md](measuring.md), "On the M1 Max"). On `connect log` each allocator's quietest run
+  reads 57 to 64 us; on the other jobs some allocators had no quiet run in three. `orders axum`,
+  mini-redis and Sozu stay at 2 to 3 ms under all of them.
+- **Memory at the end of the plan.** jemalloc holds the least on most jobs: 203 MiB against cralloc's
+  212 on orders, 21 against 32 on Sozu. glibc holds less on small heaps (19 on Sozu) and far more on
+  orders (400). mimalloc and snmalloc hold the most: mimalloc 36 on Connect against 12 to 15, and 173
+  on Sozu; snmalloc 469 on orders.
+
+**Programs here.** Gcycles of all threads, and peak resident MiB. Six rounds of ruff, three of the
+others.
+
+| | cralloc | jemalloc | tcmalloc | mimalloc | glibc | snmalloc |
+|---|---:|---:|---:|---:|---:|---:|
+| DataFusion, 4 threads | 50.18 | 51.26 | 49.39 | 51.69 | 50.28 | 51.18 |
+| Peak MiB | 942 | 884 | 1,038 | 1,903 | 937 | 1,533 |
+| boa | 31.10 | 31.42 | 31.72 | 31.37 | 32.99 | 31.48 |
+| Peak MiB | 278 | 248 | 263 | 321 | 271 | 281 |
+| ruff, 4 threads | 14.79 | 14.98 | 14.91 | 14.69 | 16.10 | 14.55 |
+| Peak MiB | 64 | 53 | 51 | 177 | 48 | 60 |
+| Geomean of cycles against cralloc | | 1.015 | 1.004 | 1.011 | 1.050 | 1.005 |
+| Geomean of peak against cralloc | | 0.884 | 0.941 | 1.859 | 0.899 | 1.154 |
+
+cralloc at `66dfb90`, 2026-11-08. Runs of a job lie within 1.5%. Not swept.
 
 ## Where cralloc is behind, and why
 

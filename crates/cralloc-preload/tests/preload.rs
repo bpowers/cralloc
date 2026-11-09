@@ -534,7 +534,7 @@ fn a_quiet_program_gets_its_memory_back(mode: &str, by_default: bool) {
         assert_eq!(numbers.len(), 2, "{text}");
         (numbers[0], numbers[1])
     };
-    // The clocked pass keeps the floor of the allowance (32 MiB, `ALLOWANCE_FLOOR_HUGE_PAGES`
+    // The clocked pass keeps the floor of the allowance (32 MiB, `ALLOWANCE_FLOOR_HUGE_UNITS`
     // in cralloc's policy), so the thread takes what is above it, less a few MiB of the
     // program's own.
     const FLOOR_MIB: u64 = 32;

@@ -147,7 +147,7 @@
 //! count any slow path adds to and the thread pays down: once a step of growth, the grower
 //! wakes the thread if retained memory is over the cap, or drops the debt as a payment under the
 //! cap would; the thread takes the same steps a heartbeat would ([`Back::purge_steps`]) until
-//! none would do more. While more than `policy::GROWTH_UNPAID_HUGE_PAGES` is left unpaid, the
+//! none would do more. While more than `policy::GROWTH_UNPAID_HUGE_UNITS` is left unpaid, the
 //! slow paths pay it as if there were no thread: a grower pays a step itself, and so does each
 //! heartbeat, so that what the thread's lag can add to retained memory is bounded whatever the
 //! scheduler does. A grower's step alone would not do: it pays half a megabyte while a carve
@@ -186,7 +186,10 @@
 //! counts a sparse one exactly (`tail::free_resident`), and splits it only if a quarter of its
 //! pages or more are free and resident (`policy::TAIL_SPLIT_SHARE`): then it walks it a page at
 //! a time from the cursor, in runs within the huge page, asking the kernel to split it over
-//! each run before returning the run. The count is not remembered: a huge page that samples
+//! each run before returning the run. Which steps may ask is [`Splits`]: on a request's slow
+//! path only where a huge page is 2 MiB, since one of 32 MiB takes over a millisecond to split
+//! (`policy::request_may_split`), and such a step passes a huge page it would have split. The
+//! count is not remembered: a huge page that samples
 //! sparse and is under the cut is counted again at each lap that may return memory, at the
 //! cost of a walk of it, since no word has room for the verdict. Above the region's boundary
 //! the advice is off and a huge page with a clean page has been split, so a step that may
@@ -194,7 +197,7 @@
 //! what is left; one with no clean page has never been returned in part and is treated as
 //! below the boundary. Below the boundary the walk does not believe the clean bits of a huge
 //! page that holds anything (`tail`, "Accounting"), and returns its clean runs too. A step resumed inside a huge page that may not return
-//! memory passes the rest of it. On a request's slow path a split asked for counts as the
+//! memory passes the rest of it. On a step held to one split, a split asked for counts as the
 //! step's whole budget, refused or not, so such a step asks for one at most; a refused split
 //! leaves the run, and no split is asked for again before the next interval. The lowest huge
 //! page a step returned part of is noted in the region's tail word, and when the walk reaches
@@ -233,9 +236,9 @@ use super::layout::Unit;
 use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
-    PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_PAGES, PURGE_STEP_WORDS, TAIL_SPLIT_SHARE, allowance_floor, decay_goal, growth_goal,
-    growth_step, growth_unpaid, retained_cap,
+    PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_STEP_PAGES,
+    PURGE_STEP_WORDS, TAIL_SPLIT_SHARE, allowance_floor, decay_goal, growth_goal, growth_step,
+    growth_unpaid, purge_min_run, request_may_split, retained_cap, whole_huge_pieces,
 };
 use super::region::{self, Purge};
 use super::tail;
@@ -243,7 +246,7 @@ use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
-use crate::space::{MAX_REGIONS, RegionId};
+use crate::space::{Geometry, MAX_REGIONS, RegionId};
 use crate::thread_word::{Duty, Snapshot};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
@@ -348,11 +351,11 @@ pub(crate) enum Scope {
     Idle,
     /// As `Idle`, in runs of any length: what the clocked pass takes once in
     /// [`super::policy::PURGE_ANY_RUN_EVERY`]. `Idle` takes runs of at least
-    /// [`super::policy::PURGE_MIN_RUN_PAGES`].
+    /// [`super::policy::PURGE_MIN_RUN_PAGE_UNITS`].
     IdleAnyRun,
     /// Every free unit: what growth over the cap and `trim` take.
     All,
-    /// Every free unit, in runs of at least [`super::policy::PURGE_MIN_RUN_PAGES`]: what
+    /// Every free unit, in runs of at least [`super::policy::PURGE_MIN_RUN_PAGE_UNITS`]: what
     /// `maintain`'s steps of the clocked pass take in a silence, while more than the floor
     /// could be returned. From the top of each region down, so what lies above the frontiers
     /// goes first and the lowest pages stay.
@@ -370,6 +373,39 @@ impl Scope {
             (false, true) => Scope::IdleAnyRun,
             (true, false) => Scope::Quiet,
             (true, true) => Scope::QuietAnyRun,
+        }
+    }
+}
+
+/// How many huge pages a step of the walk may ask the kernel to split (`tail`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Splits {
+    /// None: a huge page the step would return part of is passed whole.
+    None,
+    /// One, refused or not, which ends the step: the bound on a request's slow path.
+    One,
+    /// As many as the step's budgets allow.
+    Any,
+}
+
+impl Splits {
+    /// What a step on a request's slow path may split (`policy::request_may_split`).
+    const fn on_request(geometry: Geometry) -> Splits {
+        if request_may_split(geometry) {
+            Splits::One
+        } else {
+            Splits::None
+        }
+    }
+
+    /// What one of `maintain`'s steps may split. Its caller may be an async runtime's worker,
+    /// which yields between steps, and a split that takes a millisecond is what the worker's
+    /// other tasks can stand once, not several times over.
+    const fn on_maintain(geometry: Geometry) -> Splits {
+        if request_may_split(geometry) {
+            Splits::Any
+        } else {
+            Splits::One
         }
     }
 }
@@ -447,8 +483,7 @@ impl<O: Os> Back<'_, O> {
             // Whoever raises the count past the floor has the line already: an add that
             // crosses an eighth of the floor looks at the whole count, and over the floor asks
             // a slow path to look at the level (`crate::thread_word`).
-            // Every space is made on the OS's geometry, so the step is a constant.
-            let floor = const { allowance_floor(O::GEOMETRY) };
+            let floor = allowance_floor(self.space.plan().geometry());
             if crate::thread_word::crosses(old, bytes, floor / 8) {
                 // The hold's floor is on large memory alone: a crossing that takes it over
                 // tells the background thread, if its plan for the hold waited for that.
@@ -489,7 +524,7 @@ impl<O: Os> Back<'_, O> {
         let step = growth_step(self.space.plan().geometry());
         // Sequentially consistent: a grower that leaves the debt to the thread then reads the
         // thread's word, and the thread sets its mark before it reads the debt
-        // (`crate::thread_word`, "Sleeping"). On x86-64 the add is the same locked instruction.
+        // (`crate::thread_word`, "Sleeping").
         let old = self.state.growth.fetch_add(bytes, SeqCst);
         if old.wrapping_add(bytes) >= step {
             self.growth_due(old, bytes, step);
@@ -501,7 +536,7 @@ impl<O: Os> Back<'_, O> {
     /// ([`Back::pay_growth`]). While the background thread runs it is the thread's: once a
     /// step of growth, when the add crosses a multiple of the step, the grower wakes the thread
     /// if retained memory is over the cap, and otherwise drops the debt as a payment under the
-    /// cap would. Unless more than [`policy::GROWTH_UNPAID_HUGE_PAGES`] of growth was unpaid
+    /// cap would. Unless more than [`policy::GROWTH_UNPAID_HUGE_UNITS`] of growth was unpaid
     /// before this add: then the thread has not run, and the grower pays a step itself (and the
     /// heartbeats too, `note_for_thread`), so that the bound on retained memory does not rest on
     /// the scheduler (design: "The background thread").
@@ -509,16 +544,17 @@ impl<O: Os> Back<'_, O> {
     /// layout on the stack, and every large allocation paid 19 more stores and 18 more loads
     /// for it (4% on a pipeline of large objects; `docs/research/memory.md`, "Small heaps").
     ///
-    /// [`policy::GROWTH_UNPAID_HUGE_PAGES`]: super::policy::GROWTH_UNPAID_HUGE_PAGES
+    /// [`policy::GROWTH_UNPAID_HUGE_UNITS`]: super::policy::GROWTH_UNPAID_HUGE_UNITS
     #[cold]
     #[inline(never)]
     fn growth_due(&self, old: usize, bytes: usize, step: usize) {
         let thread = &self.state.thread;
         let geometry = self.space.plan().geometry();
+        let splits = Splits::on_request(geometry);
         if thread.load().duty() == Duty::Slow {
-            let _ = self.pay_growth(step);
+            let _ = self.pay_growth(step, splits);
         } else if old >= growth_unpaid(geometry) {
-            let _ = self.pay_growth(step);
+            let _ = self.pay_growth(step, splits);
             // The thread is behind: what this step left owed is its to pay.
             thread.rouse_any(self.space.os());
         } else if crate::thread_word::crosses(old, bytes, step) {
@@ -535,7 +571,7 @@ impl<O: Os> Back<'_, O> {
     /// the rest stays owed. Returns the bytes purged that had been resident.
     #[cold]
     #[inline(never)]
-    fn pay_growth(&self, step: usize) -> usize {
+    fn pay_growth(&self, step: usize, splits: Splits) -> usize {
         let geometry = self.space.plan().geometry();
         let debt = self.state.growth.swap(0, SeqCst);
         let owed = growth_goal(debt, self.retained(), retained_cap(geometry), step);
@@ -555,7 +591,7 @@ impl<O: Os> Back<'_, O> {
                 goal - purged,
                 Scope::All,
                 false,
-                true,
+                splits,
             );
             spent += read;
             purged += bytes;
@@ -759,7 +795,13 @@ impl<O: Os> Back<'_, O> {
         } else {
             self.hold_maintain_step(&|| time)
         };
-        let (paid, owing) = self.pay_owed();
+        // A payment asks for one split at most off a request's path too: it is a step.
+        let splits = if size.heartbeat {
+            Splits::on_request(self.space.plan().geometry())
+        } else {
+            Splits::One
+        };
+        let (paid, owing) = self.pay_owed(splits);
         PassStep {
             more: pass.is_some() || hold.more || owing,
             returned: returned + hold.returned + paid,
@@ -771,7 +813,7 @@ impl<O: Os> Back<'_, O> {
     /// under way: the pass is already returning everything over the floor that the frontiers
     /// allow, from the same walk position, and the debt waits for it to end, at most a lap.
     /// Returns what the step returned, and whether a step is still owed.
-    fn pay_owed(&self) -> (usize, bool) {
+    fn pay_owed(&self, splits: Splits) -> (usize, bool) {
         let step = growth_step(self.space.plan().geometry());
         let owed = || {
             self.state.decay.word.load(SeqCst) & ACTIVE == 0
@@ -780,7 +822,7 @@ impl<O: Os> Back<'_, O> {
         if !owed() {
             return (0, false);
         }
-        let paid = self.pay_growth(step);
+        let paid = self.pay_growth(step, splits);
         (paid, owed())
     }
 
@@ -830,7 +872,7 @@ impl<O: Os> Back<'_, O> {
         let geometry = self.space.plan().geometry();
         if self.state.growth.load(Relaxed) >= growth_unpaid(geometry) {
             let step = growth_step(geometry);
-            let _ = self.pay_growth(step);
+            let _ = self.pay_growth(step, Splits::on_request(geometry));
             owing = self.state.growth.load(SeqCst) >= step;
         }
         self.hold_note(time) || started || owing
@@ -876,7 +918,8 @@ impl<O: Os> Back<'_, O> {
     /// One bounded step of the clocked pass under way or due, for `maintain`'s steps: whether
     /// the pass has more to do. Smaller than a heartbeat's step, in bitmap read and in pages
     /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
-    /// thread for tens of microseconds.
+    /// thread for tens of microseconds, unless the step finishes a huge page of small slots
+    /// (`policy::PURGE_STEP_WORDS`).
     pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> PassStep {
         self.raise_marked(false);
         let mut returned = 0;
@@ -897,6 +940,7 @@ impl<O: Os> Back<'_, O> {
     /// so the next one is due in the next interval. Returns the decay word of the pass it stepped if it
     /// stopped at its budget with the pass still under way, so that more steps would do more;
     /// `None` otherwise. Adds the bytes it returned that had been resident to `returned`.
+    #[inline(never)]
     fn decay_step_counting(
         &self,
         now: &dyn Fn() -> u64,
@@ -990,7 +1034,7 @@ impl<O: Os> Back<'_, O> {
                 limit,
                 Scope::of_pass(quiet, pass.any),
                 pass.count,
-                size.heartbeat,
+                size.splits(geometry),
             );
             spent += read;
             *returned += purged;
@@ -1050,10 +1094,14 @@ impl<O: Os> Back<'_, O> {
         // path is asked to look at the background thread's word again, so that a start refused
         // for a passing reason is tried again (`crate::thread_word`).
         state.thread.raise_level();
+        // Sequentially consistent, as the store of the pass word below: the thread's last look
+        // before it sleeps reads this word first (`Back::pass_published`), and a sequentially
+        // consistent load need not see a weaker write, even one that comes before a store it is
+        // ordered after.
         if state
             .decay
             .word
-            .compare_exchange(seen, word, Release, Relaxed)
+            .compare_exchange(seen, word, SeqCst, Relaxed)
             .is_err()
         {
             return false;
@@ -1078,7 +1126,7 @@ impl<O: Os> Back<'_, O> {
         // until then no stepper finds its tag and none acts. Sequentially consistent, as a
         // starter that leaves the pass to the background thread then reads the thread's word,
         // and the thread marks its word before it reads this one (`crate::thread_word`,
-        // "Sleeping"): on x86-64 one exchange an interval.
+        // "Sleeping"). Once an interval.
         let from = state.walk.purge_at.load(Relaxed);
         state.walk.pass_from.store(from, Relaxed);
         let pass = Pass {
@@ -1134,7 +1182,7 @@ impl<O: Os> Back<'_, O> {
                         false,
                         Scope::All,
                         false,
-                        false,
+                        Splits::Any,
                     )
                     .0;
             }
@@ -1146,7 +1194,7 @@ impl<O: Os> Back<'_, O> {
     /// position on if that region is done. Stops after `budget` words of bitmap or once it
     /// has purged `limit` bytes, finishing the unit it is on, or with `counting`, walks on to
     /// count once it has. What it sees a purge could return goes into the lap's count, and a
-    /// step that ends a lap makes that count the one the clocked pass is held to. `one_split`
+    /// step that ends a lap makes that count the one the clocked pass is held to. `splits`
     /// as for [`Back::purge_region`]. Returns the words of bitmap read, at least one, the bytes
     /// purged, and whether it finished its region.
     fn purge_step(
@@ -1155,7 +1203,7 @@ impl<O: Os> Back<'_, O> {
         limit: usize,
         scope: Scope,
         counting: bool,
-        one_split: bool,
+        splits: Splits,
     ) -> (usize, usize, bool) {
         let plan = self.space.plan();
         let top = self.walk_regions();
@@ -1171,9 +1219,9 @@ impl<O: Os> Back<'_, O> {
             return (1, 0, true);
         };
         let (purged, read, done, found) = match self.purgeable(region) {
-            Some(class) => self.purge_region(
-                class, region, budget, limit, true, scope, counting, one_split,
-            ),
+            Some(class) => {
+                self.purge_region(class, region, budget, limit, true, scope, counting, splits)
+            }
             None => (0, 1, true, 0),
         };
         let walk = &self.state.walk;
@@ -1217,10 +1265,10 @@ impl<O: Os> Back<'_, O> {
     /// and leaves the cursor alone. With [`Scope::Idle`] the region is done at its frontier
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
     /// rest of the region under it. With `counting`, once it has purged `limit` bytes it walks
-    /// on within its budget, looking and purging nothing. With `one_split`, a step that may run
-    /// on a request's slow path, a split of a huge page above the frontier (`tail`) ends the
-    /// call as if its budget were spent. Returns the bytes purged, the words read, whether the
-    /// walk reached the bottom, or the frontier, and the bytes of the free, resident pages it
+    /// on within its budget, looking and purging nothing. `splits` says how many huge pages above
+    /// the frontier (`tail`) the call may ask the kernel to split: with [`Splits::One`], the first
+    /// ends the call as if its budget were spent. Returns the bytes purged, the words read, whether
+    /// the walk reached the bottom, or the frontier, and the bytes of the free, resident pages it
     /// saw and left: what a purge could still return.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn purge_region(
@@ -1232,7 +1280,7 @@ impl<O: Os> Back<'_, O> {
         resume: bool,
         scope: Scope,
         counting: bool,
-        one_split: bool,
+        splits: Splits,
     ) -> (usize, usize, bool, usize) {
         let Some(host) = self.host(class) else {
             return (0, 1, true, 0);
@@ -1256,8 +1304,9 @@ impl<O: Os> Back<'_, O> {
         let may_return = !counting && limit > 0;
         // A call costs about the same whatever it returns, so the clocked pass leaves short
         // runs for a later pass, which takes runs of any length once in a while.
+        let geometry = self.space.plan().geometry();
         let min_run = match scope {
-            Scope::Idle | Scope::Quiet => PURGE_MIN_RUN_PAGES,
+            Scope::Idle | Scope::Quiet => purge_min_run(geometry),
             Scope::IdleAnyRun | Scope::QuietAnyRun | Scope::All => 1,
         };
         if cursor != 0 && cursor <= floor {
@@ -1284,7 +1333,7 @@ impl<O: Os> Back<'_, O> {
         // Where the last run this call purged began: a run that ends there is the tail of a
         // longer one that the cap on a run's length cut, and goes whatever its length.
         let mut below_purged = None;
-        // On a request's slow path a split counts as a whole step (`tail`), refused or not:
+        // On a step held to one split, a split counts as a whole step (`tail`), refused or not:
         // once one is asked for, the step ends after the run, as one that had returned its
         // pages would. The background thread's steps, and `trim`, are bounded only by their
         // budgets.
@@ -1321,6 +1370,7 @@ impl<O: Os> Back<'_, O> {
                         salt,
                         cut: resume,
                         may_return,
+                        may_split: splits != Splits::None,
                         below_purged,
                         room: Room {
                             floor,
@@ -1345,7 +1395,7 @@ impl<O: Os> Back<'_, O> {
                 if let Some(unit) = step.part {
                     tail::note(&host, region, unit);
                 }
-                if step.split && one_split {
+                if step.split && splits == Splits::One {
                     // The rest of the step's budget: every caller's loop stops at it.
                     split = true;
                     read = read.max(budget);
@@ -1393,12 +1443,11 @@ impl<O: Os> Back<'_, O> {
                         // unit of the small-page part is the pages of the slots it covers). Cut
                         // to what the step may still purge, not to a run's length: a run's bound
                         // keeps a call's claims of many slots short, and a piece of one slot
-                        // claims one. In whole huge pages for a class of a huge page or more, so
-                        // that a slot that kept its huge-page advice is not left with a huge page
-                        // partly unmapped, which stays charged whole.
-                        let huge = layout.huge_pages();
-                        let granule = if layout.size() >= huge as usize * page {
-                            huge
+                        // claims one. In whole huge pages where a class is that large, so that a
+                        // slot that kept its huge-page advice is not left with a huge page partly
+                        // unmapped, which stays charged whole.
+                        let granule = if whole_huge_pieces(geometry, layout.size()) {
+                            layout.huge_pages()
                         } else {
                             1
                         };
@@ -1608,7 +1657,7 @@ impl<O: Os> Back<'_, O> {
             part: None,
             split: false,
         };
-        let splits = walk.may_return && !self.tail_refused(REFUSED_SPLIT);
+        let splits = walk.may_return && walk.may_split && !self.tail_refused(REFUSED_SPLIT);
         // Whether the clean bits of this huge page can be believed. Under the advice for huge
         // pages (below the boundary) khugepaged may have rebuilt a huge page that holds
         // anything, making its free pages resident again whatever their clean bits say; so
@@ -1803,7 +1852,7 @@ impl<O: Os> Back<'_, O> {
     /// cleared rather than left to go stale. Only the thread that draws the child's generation
     /// runs this, so it may also clear the bit of a live owner of the child's: the forking
     /// thread, if it forked from a signal handler in the middle of a change, or a second thread
-    /// the child started before its first slow path. That owner is then taken over: its
+    /// the child started before it drew its generation. That owner is then taken over: its
     /// give-back finds the bit gone and asks for a repair, as any taken-over owner does, and the
     /// repair puts the advice right whatever its late call did. A word left with a
     /// claim's mark sets the marks flag, which the bit's owner would have. Words that are zero,
@@ -1874,6 +1923,8 @@ struct TailWalk {
     cut: bool,
     /// Whether this step may still return memory.
     may_return: bool,
+    /// Whether this step may ask the kernel to split a huge page ([`Splits`]).
+    may_split: bool,
     below_purged: Option<u32>,
     room: Room,
 }
@@ -1944,6 +1995,8 @@ struct StepSize {
     /// A heartbeat's step, which is the program running: it counts the interval
     /// (`Back::note_epoch`) and never goes below the frontiers.
     heartbeat: bool,
+    /// A step of the background thread's, which no request or task waits for.
+    own_thread: bool,
 }
 
 impl StepSize {
@@ -1952,12 +2005,14 @@ impl StepSize {
         words: PURGE_STEP_WORDS,
         pages: PURGE_STEP_PAGES,
         heartbeat: true,
+        own_thread: false,
     };
     /// A step of the background thread's in the place of a heartbeat's: as large, but not
     /// the program running, so that the thread's readings through a silence neither count
     /// intervals toward a frontier's age nor keep a pass above the frontiers, as `maintain`'s.
     const THREAD: StepSize = StepSize {
         heartbeat: false,
+        own_thread: true,
         ..StepSize::HEARTBEAT
     };
     /// A step of `maintain`'s (`policy::PURGE_MAINTAIN_STEP_WORDS`).
@@ -1965,7 +2020,19 @@ impl StepSize {
         words: PURGE_MAINTAIN_STEP_WORDS,
         pages: PURGE_MAINTAIN_STEP_PAGES,
         heartbeat: false,
+        own_thread: false,
     };
+
+    /// The huge pages a step of this size may ask the kernel to split.
+    const fn splits(self, geometry: Geometry) -> Splits {
+        if self.heartbeat {
+            Splits::on_request(geometry)
+        } else if self.own_thread {
+            Splits::Any
+        } else {
+            Splits::on_maintain(geometry)
+        }
+    }
 }
 
 /// How far a run may extend: down to the floor, pages, and bitmap words read.

@@ -5,8 +5,13 @@
 //! until the next burst begins. A task that wakes about twice a second and takes the round of
 //! [`cralloc::Cralloc::maintain`] does that work during the silence instead. It takes the
 //! round a bounded step at a time ([`cralloc::Cralloc::maintain_step`], tens of
-//! microseconds at most) and yields to the runtime between steps, so it never holds a worker
+//! microseconds as a rule) and yields to the runtime between steps, so it never holds a worker
 //! for longer than a step; a call in an interval whose round is done returns at once.
+//!
+//! The longer steps are on a kernel whose huge pages are over 2 MiB and at most 64 MiB (32 MiB,
+//! on pages of 16 KiB): there a step that finishes a wholly free huge page of the smallest slots
+//! holds a worker for up to a millisecond or so, and one may split a huge page, for 1 to 2 ms.
+//! That is the price of ever returning that memory without cralloc's background thread.
 //!
 //! ```no_run
 //! #[global_allocator]

@@ -8,7 +8,9 @@ magazines and objects.
 A pass means no interleaving within those bounds breaks the model's properties. It does not cover
 weak memory, since every step is atomic and sequentially consistent, or the Rust, whose schedule
 explorers follow these models by review, not proof (`back/models.rs` and `depot/interleave.rs` in
-`crates/cralloc/src`).
+`crates/cralloc/src`). `docs/research/memory-ordering.md` says which words those steps are true of
+and argues the rest; `armcheck.py` here checks by litmus test what that argument takes from Arm's
+memory model.
 
 A check expected to fail is kept on purpose: it shows the model can see a flaw, and that a rule is
 needed or a limit is real.
@@ -51,7 +53,7 @@ gigabytes, under `target/tla` or `TMPDIR`.
 | `Exchange` | The slow path between routines, with the half-full swap; migration at every step; a handler as a nested call; a live marker; no valid cid. | Routines, depot and back end are single steps. The drainer is an environment. |
 | `Drain` | Claim, exchange, fence, re-read, release, back-out; concurrent drainers; sequences in flight; a fork at any step. | One class and spare stack per cid; the depot is a set; magazines carry a fill level, not objects; the generation is a counter. |
 | `Depot` | Push and pop by compare-and-swap on a versioned head; stale link reads; owners overwriting the link. | One stack, since each has its own head. A capped push that gives up did not push. |
-| `Summary` | Claim, release and clear-then-re-read at every level of the tree, with the healing free (`Heal`), a fill's batched clears (`Run`), a claim that keeps its bit (`Keep`), and a free that reads a bit first (`Look`). | One region; two bits to a word (three in `Summary_run_wide`); batches only at the leaf level. |
+| `Summary` | Claim, release and clear-then-re-read at every level of the tree, with the healing free (`Heal`), the batched clears of a fill and of a purge's claims (`Run`), a claim that keeps its bit (`Keep`), and a free that reads a bit first (`Look`). | One region; two bits to a word (three in `Summary_run_wide`); batches only at the leaf level; how far a search walks, so whether a fill waits. |
 | `SummaryLookUp` | `Summary` with a free that may read every level of its walk (`tree::release_one`), and claims that keep their bits. | As `Summary`. |
 | `Purge` | A purge as a claim against allocation and laundering; objects that straddle pages; the zero bitmap. | Summary bits, the watermark, clean-page bits; which pages a purge picks. |
 | `Startup` | Racing initializers, one compare-and-swap, the loser unmapping; a limited address-space budget; a fork. | The heap's contents; the allocator's retry and halving. |

@@ -8,9 +8,30 @@ Rust programs are the `servers` suite (connect-rust, axum and actix-web services
 open load) and the `apps` suite (ruff, DataFusion, boa), with their own build step and
 inputs: see `apps/README.md`.
 
-Everything here is x86-64 Linux only and needs `perf_event_open` for hardware counters
-(`/proc/sys/kernel/perf_event_paranoid` of 2 or lower for user-space counts; the runner also
-counts kernel cycles, which needs 1 or lower).
+Everything here runs on Linux on x86-64 and aarch64 and needs `perf_event_open` for hardware
+counters (`/proc/sys/kernel/perf_event_paranoid` of 2 or lower for user-space counts; the runner
+also counts kernel cycles, which needs 1 or lower). On aarch64 the Rust is built for the host's
+CPU by `.cargo/config.toml`, and the C libraries, the baselines' and those in allocator crates,
+for the host's CPU and page size by `baselines/build.sh` and `benchrun build`, so that every
+allocator has inline LSE atomics.
+
+## Which CPUs
+
+`scripts/cpusets` derives every CPU set from sysfs, and says how. `benchrun`, `baselines/build.sh`,
+`scripts/heavy` and `scripts/deep-idle` all read it, and `CRALLOC_CPUS_<NAME>` overrides a set.
+
+| Set | Use | Ryzen 9950X | M1 Max | Graviton 4 (96 cores, one L3) |
+|---|---|---:|---:|---:|
+| `a` | multi-threaded jobs, servers | 0-3 | 6-9 | 0-3 |
+| `b` | jobs across domains, load generators | 8-11 | 2-5 | 48-51 |
+| `single` | single-threaded jobs | 2 | 8 | 2 |
+| `heavy` | builds, tests, proofs | 12-15, 28-31 | 0-5 | 52-95 |
+| `runner` | the runner itself | 15 | 1 | 95 |
+| `upstream` | a proxy's upstream | 12-14 | half of `b`, the generator on the other half | 52-54 |
+
+Only the Ryzen and the M1 have been run. "L3" below means a cache domain: on the M1 a cluster's
+shared L2, its last level in sysfs. A job that uses `b` as well as `a` shares a cache with heavy work
+on every machine here, so `scripts/measure --both-l3` pauses that work.
 
 ## Running
 
@@ -31,7 +52,7 @@ incumbents, on every change to the back end. `benchrun list --suite full` prints
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
 (below), `--no-warm` (skip the clock warm-up below, only to measure what it changes), and
-the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `12-15,28-31`, the cores `scripts/heavy` uses).
+the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default the set `heavy`).
 `report` takes `--steady-only` to leave out runs whose clock was off.
 
 `run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
@@ -61,8 +82,9 @@ runs the jobs under each, interleaved, as `run` interleaves allocators, and prin
 layout's median against the default, the spread (largest median over smallest), the noise
 (the largest half-IQR of one layout's runs) and the spread of the process's instructions. It
 takes the shared measurement lock (`/tmp/cralloc-measure.lock`) itself, for the
-measurement only, so do not wrap it in `flock`. `--no-build` reuses the variants built last
-time. A spread of more than about 3% beyond the noise, with instructions level, means the
+measurement only, so do not wrap it in `flock`; on a machine where heavy work shares the jobs'
+CPUs it does that through `scripts/measure --both-l3`, which pauses that work. `--no-build`
+reuses the variants built last time. A spread of more than about 3% beyond the noise, with instructions level, means the
 job's time depends on code placement; `perf annotate` of plain cycles samples
 (`perf record -e cycles:u`, not an event group) names the loop. `loops64` executes a little
 padding, so its instructions are up to 1 to 3% higher in loop-heavy jobs; the shuffles retire
@@ -73,7 +95,8 @@ sensitive in either; the profile says which. They are for this check only: the s
 the normal build, which is what ships.
 
 **Comparing allocators on a placement-sensitive job.** `--layouts pads` builds five variants,
-`pad00` to `pad64`, in which a padding function of N bytes in bench-alloc moves all the code
+`pad00` to `pad64` (on aarch64, where a line can be 128 bytes, `pad000` to `pad128`), in which a
+padding function of N bytes in bench-alloc moves all the code
 the linker places after it, the allocator's and the program's, by exactly N bytes and changes
 nothing else (`padN` takes any multiple of 16, written with two digits or more). With several
 allocators the summary also prints each one's mean and range over the layouts, and each
@@ -112,7 +135,7 @@ cannot be rebuilt under a session.
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
 | `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
 | `standings/` | What a standings session runs and reports with: session and queue scripts, placement-pad builds, summarizers. See `standings/README.md`. |
-| `tools/` | Small standalone helpers, each explained in its header: `acct.py` (every resident page by structure), `thp-off.py`, `largesum.py` and `doublesum.py` (tables of `servers-large` and `servers-doubling` runs). |
+| `tools/` | Small standalone helpers, each explained in its header: `acct.py` (every resident page by structure), `thp-off.py`, `largesum.py` and `doublesum.py` (tables of `servers-large` and `servers-doubling` runs), `stepcount.c` and `stepsum.py` (exact instruction counts by single-stepping a thread, on aarch64), and `cc-lld`, the linker every benchmark uses on aarch64 (`.cargo/config.toml` here says why). |
 | `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |
 
 ## Adding an allocator
@@ -140,11 +163,13 @@ cannot be rebuilt under a session.
 - **One process per measurement.** Each run is a fresh process; a round runs every job
   under every allocator, with the allocators in a new random order for every job. A full
   session is ten rounds.
-- **Pinning.** Jobs use CPUs 0-3 (one L3 domain) and 8-11 (the other), one thread per
-  physical core, with the SMT siblings 16-19 and 24-27 left idle. Each process is confined to
-  its CPU list before `execve`, and workloads pin thread `i` to the `i`-th CPU of
-  `BENCH_CPUS`. Single-threaded jobs run on CPU 2. The runner itself runs on CPU 15.
-- **Counters.** A workload counts cycles (user and kernel), user cycles, instructions,
+- **Pinning.** Jobs use the sets `a` and `b`, one thread per physical core, with any SMT
+  siblings left idle. Each process is confined to its CPU list before `execve`, and workloads
+  pin thread `i` to the `i`-th CPU of `BENCH_CPUS`. Single-threaded jobs run on the set `single`,
+  and the runner itself on the set `runner`.
+- **Counters.** Hardware events go to the PMU of the CPUs the process may run on, found in
+  sysfs by CPU, so that on a machine with two kinds of core they count on the kind the job is
+  pinned to. A workload counts cycles (user and kernel), user cycles, instructions,
   page faults and CPU time over its measured phase only, summed over all its threads
   (`perf_event_open` with `inherit`). The runner also counts the whole process from its
   first instruction (counters attached between `fork` and `execve`, as `perf stat` does),
@@ -186,10 +211,11 @@ cannot be rebuilt under a session.
   either way). The runner takes the smaller, since real other work shows in both, and leaves
   out each CPU's `ksoftirqd`, which runs the server's own deferred network work. For a server
   it does this over every counted segment of the plan, and more than 0.1 CPUs of other work in
-  any one segment makes the run invalid; for any other job, over the whole run, with a limit
-  of 0.25 CPUs. Quiet server segments measure at most 0.06, quiet runs of the quick suite at
-  most 0.1; three seconds of one busy CPU, 0.55 to 0.97 in its segment. The results are
-  `interference.foreign_by_segment` and `interference.foreign_task_cpus`.
+  any one segment (0.3 on aarch64, where the clocks disagree by more) makes the run invalid;
+  for any other job, over the whole run, with a limit of 0.25 CPUs. Quiet server segments
+  measure at most 0.06, quiet runs of the quick suite at most 0.1; three seconds of one busy
+  CPU, 0.55 to 0.97 in its segment. The results are `interference.foreign_by_segment` and
+  `interference.foreign_task_cpus`.
 - **Control.** `mimalloc-ctl` is mimalloc under a second name and from its own build
   directory, run as if it were another allocator. The report compares it with mimalloc on
   every job, pairing runs from the same round, with a 95% bootstrap interval of the median
@@ -250,11 +276,11 @@ Choices that can favour one allocator, not yet tested either way; read the numbe
 - The sampler reads `smaps_rollup` once a second, which holds the process's `mmap_lock`
   during a page-table walk and slightly delays allocators that `munmap` or `mremap` often
   (`--rollup-ms` changes the interval).
-- Builds run on CPUs 12-15 and their siblings 28-31 (`scripts/heavy`), which share an L3 with
-  measurement CPUs 8-11 and not with 0-3. A session under `scripts/measure --both-l3` freezes
-  them, so it has no heavy work beside it; a job on CPUs 0-3 alone, under plain
-  `scripts/measure`, runs beside them and shares only memory. When builds shared the job's L3,
-  memory-bound jobs drifted by up to three times with no load on their own CPU.
+- Builds run on the set `heavy` (`scripts/heavy`), which shares a cache with `b` and not with
+  `a`. A session under `scripts/measure --both-l3` freezes them, so it has no heavy work beside
+  it; a job on `a` alone, under plain `scripts/measure`, runs beside them and shares only memory.
+  When builds shared the job's L3, memory-bound jobs drifted by up to three times with no load on
+  their own CPU.
 
 Output is JSON lines: a `session` record (machine, settings, allocators, the baseline
 manifests) followed by one `run` record per process.

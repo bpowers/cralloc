@@ -44,7 +44,7 @@
 //! With the header in the back end's state and the leaf bitmap after the sizes, each large
 //! allocation and free touched two more lines than this, 1.5% on a pipeline of large objects.
 
-use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
+use super::policy::{PAGE_STAGGER, STAGGER_SLOTS, STAGGER_STEP, stagger_pages};
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
 use crate::space::{Plan, slot_from};
@@ -88,11 +88,12 @@ pub(crate) struct Layout {
     sizes: u32,
     page_shift: u8,
     huge_shift: u8,
+    /// How many whole pages a slot's stagger goes over (`policy::stagger_pages`), zero for none.
+    stagger_pages: u8,
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields (the total derivable and not read back) and
-/// three bytes.
+/// come from the class, as sixteen 32-bit fields and four bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.
@@ -117,13 +118,15 @@ impl Memo {
         }
     }
 
-    /// The layout of `class` in `plan`, from the memo if it holds one, else worked out and
-    /// kept. `plan` must be the same for every call on one memo.
+    /// The layout of `class` in the plan `plan` gives, from the memo if it holds one, else
+    /// worked out and kept. The plan must be the same for every call on one memo. Asked for only
+    /// when it is needed: on a kernel whose page size is found at run time a plan's fields are
+    /// real work to fill in, and only the first call of a class reads them.
     #[inline]
-    pub(crate) fn layout(&self, plan: Plan, class: Class) -> Option<Layout> {
+    pub(crate) fn layout(&self, plan: impl FnOnce() -> Plan, class: Class) -> Option<Layout> {
         let mut last = self.words[PACKED_WORDS - 1].load(Ordering::Acquire);
         if last & PACKED == 0 {
-            last = self.work_out(plan, class)?;
+            last = self.work_out(plan(), class)?;
         }
         let mut words = [0; PACKED_WORDS];
         for (word, kept) in words.iter_mut().zip(&self.words) {
@@ -584,6 +587,11 @@ impl Layout {
             sizes,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
+            stagger_pages: if class.is_small() {
+                0
+            } else {
+                stagger_pages(geometry, class.size()) as u8
+            },
         })
     }
 
@@ -606,7 +614,6 @@ impl Layout {
             self.origin as u32,
             self.zero,
             self.sizes,
-            self.total_words(),
         ];
         let pair = |a: u32, b: u32| a as u64 | (b as u64) << 32;
         [
@@ -618,7 +625,7 @@ impl Layout {
             pair(f[10], f[11]),
             pair(f[12], f[13]),
             pair(f[14], f[15]),
-            f[16] as u64
+            self.stagger_pages as u64
                 | (self.height as u64) << 32
                 | (self.page_shift as u64) << 40
                 | (self.huge_shift as u64) << 48
@@ -646,6 +653,7 @@ impl Layout {
             sizes: hi(7),
             page_shift: (w[8] >> 40) as u8,
             huge_shift: (w[8] >> 48) as u8,
+            stagger_pages: w[8] as u8,
         }
     }
 
@@ -768,6 +776,12 @@ impl Layout {
     #[inline(always)]
     pub(crate) const fn huge_pages(&self) -> u32 {
         1 << (self.huge_shift - self.page_shift)
+    }
+
+    /// Bytes per huge page, as the plan's geometry says (`Geometry::huge_page_size`).
+    #[inline(always)]
+    pub(crate) const fn huge_page_size(&self) -> usize {
+        1 << self.huge_shift
     }
 
     /// How a region's frontier word packs (`FrontierFormat`).
@@ -930,16 +944,38 @@ impl Layout {
     }
 
     /// How far past its slot's start a block in slot `slot` starts when it is staggered: a
-    /// multiple of `policy::STAGGER_STEP` that depends only on the slot's index, so that it is
-    /// never stored and a free recomputes it. Zero for small classes, which are never
-    /// staggered. A block of a large class starts either here or at the slot's start; which
-    /// one the address says.
+    /// multiple of `policy::STAGGER_STEP` that depends only on the class and the slot's index, so
+    /// that it is never stored and a free recomputes it. Lines over 4 KiB, so that the same offset
+    /// in blocks of one class falls in different cache sets, and in a slot large enough, whole
+    /// pages too (`policy::stagger_pages`), so that it falls on different pages' numbers and in
+    /// different TLB sets. Always under the slot's size. Zero for small classes, which are never
+    /// staggered. A block of a large class starts either here or at the slot's start; which one
+    /// the address says.
     #[inline(always)]
     pub(crate) const fn stagger(&self, slot: u32) -> usize {
         if self.sizes == 0 {
-            0
+            return 0;
+        }
+        let lines = (slot as usize % STAGGER_SLOTS) * STAGGER_STEP;
+        if !PAGE_STAGGER || self.stagger_pages == 0 {
+            return lines;
+        }
+        lines + (((slot % self.stagger_pages as u32) as usize) << self.page_shift)
+    }
+
+    /// The page holding the first byte of a block `into` bytes into slot `slot`, within the
+    /// slot's whole pages `unit`: the pages of `unit` below it are not the block's to write
+    /// (`region`, "Clean bits"). Folds to `unit.start` where the stagger stays within a page.
+    #[inline(always)]
+    pub(crate) const fn first_page(&self, slot: u32, unit: Unit, into: usize) -> u32 {
+        if !PAGE_STAGGER {
+            return unit.start;
+        }
+        let first = ((self.slot_bytes(slot) + into) >> self.page_shift) as u32;
+        if first < unit.start {
+            unit.start
         } else {
-            (slot as usize % STAGGER_SLOTS) * STAGGER_STEP
+            first
         }
     }
 
@@ -1037,15 +1073,86 @@ mod tests {
     use crate::os::sim::{Native, Shape, Standard, Tiny};
     use crate::space::{Geometry, Plan};
 
-    /// The plans the tests cover: the largest and smallest of the design, and the simulator's.
-    fn plans() -> [Plan; 5] {
+    /// The plans the tests cover: the largest and smallest of the design and of the kernels with
+    /// larger pages, and the simulator's.
+    fn plans() -> [Plan; 11] {
         [
             Geometry::DESIGN.largest_plan(),
             Geometry::DESIGN.smallest_plan(),
+            Geometry::of_kernel(12).largest_plan(),
+            Geometry::of_kernel(12).smallest_plan(),
+            Geometry::of_kernel(14).largest_plan(),
+            Geometry::of_kernel(14).smallest_plan(),
+            Geometry::of_kernel(16).largest_plan(),
+            Geometry::of_kernel(16).smallest_plan(),
             Standard::GEOMETRY.largest_plan(),
             Native::GEOMETRY.largest_plan(),
             Tiny::GEOMETRY.largest_plan(),
         ]
+    }
+
+    /// A large free compares its slot with the huge page its layout holds, not its plan's: they
+    /// agree in every plan, one that uses no huge pages too.
+    #[test]
+    fn a_layouts_huge_page_is_its_plans() {
+        for plan in plans() {
+            for class in Class::all() {
+                if let Some(layout) = Layout::new(plan, class) {
+                    assert_eq!(layout.huge_page_size(), plan.geometry().huge_page_size());
+                }
+            }
+        }
+    }
+
+    /// Every stagger lies in its slot, multiples of 64 bytes, and a block is found again from where
+    /// it starts: at the slot's start or at its stagger, and nowhere else. The room covers it.
+    #[test]
+    fn a_stagger_is_a_multiple_of_a_line_in_its_slot_and_its_block_is_found_again() {
+        use crate::back::policy::{STAGGER_STEP, stagger_room};
+        for plan in plans() {
+            let geometry = plan.geometry();
+            for class in Class::all().filter(|&c| !c.is_small()) {
+                let Some(layout) = Layout::new(plan, class) else {
+                    continue;
+                };
+                let room = stagger_room(geometry, class.size());
+                for slot in (0..300).map(|s| s % layout.slots()) {
+                    let into = layout.stagger(slot);
+                    assert_eq!(into % STAGGER_STEP, 0, "{class:?} {slot}");
+                    assert!(into < room && into < class.size(), "{class:?} {slot}");
+                    let start = layout.slot_bytes(slot);
+                    assert_eq!(layout.block_at(start), Some((slot, 0)), "{class:?} {slot}");
+                    assert_eq!(
+                        layout.block_at(start + into),
+                        Some((slot, into)),
+                        "{class:?} {slot}"
+                    );
+                    if into + 1 < class.size() {
+                        assert_eq!(layout.block_at(start + into + 1), None, "{class:?} {slot}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A block's first page is its slot's where its stagger stays in the first page, and past it by
+    /// the page term's pages where it does not.
+    #[test]
+    fn a_blocks_first_page_is_past_the_page_term() {
+        let plan = Geometry::of_kernel(14).largest_plan();
+        let page = plan.geometry().page_size();
+        let layout = Layout::new(plan, Class::of_size(1 << 24).unwrap()).unwrap();
+        for slot in [0, 1, 5, 31, 32, 33] {
+            let unit = layout.slot_unit(slot).unwrap();
+            let into = layout.stagger(slot);
+            assert_eq!(layout.first_page(slot, unit, 0), unit.start, "{slot}");
+            assert_eq!(
+                layout.first_page(slot, unit, into),
+                unit.start + (into / page) as u32,
+                "{slot}"
+            );
+            assert_eq!(into / page, slot as usize % 32, "{slot}");
+        }
     }
 
     #[test]
@@ -1160,8 +1267,8 @@ mod tests {
                 };
                 assert_eq!(Layout::unpack(layout.pack(), class), layout, "{class:?}");
                 let memo = Memo::new();
-                assert_eq!(memo.layout(plan, class), Some(layout));
-                assert_eq!(memo.layout(plan, class), Some(layout), "kept");
+                assert_eq!(memo.layout(|| plan, class), Some(layout));
+                assert_eq!(memo.layout(|| plan, class), Some(layout), "kept");
             }
         }
     }
