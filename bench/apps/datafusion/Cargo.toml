@@ -21,6 +21,7 @@ mi = ["bench-alloc/mi"]
 mi-sized = ["bench-alloc/mi-sized"]
 mi-crate = ["bench-alloc/mi-crate"]
 cralloc = ["bench-alloc/cralloc"]
+cralloc-outline = ["bench-alloc/cralloc-outline"]
 # The sampler of where cralloc's memory is (bench/alloc/src/memstat.rs); not an allocator entry.
 cralloc-memstat = ["bench-alloc/cralloc-memstat"]
 je = ["bench-alloc/je"]

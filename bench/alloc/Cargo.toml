@@ -19,6 +19,10 @@ mi-crate = ["dep:mimalloc"]
 # cralloc itself. `executable` reads glibc's __rseq_offset with one direct load, which is
 # right for the workload binaries, which are executables.
 cralloc = ["dep:cralloc", "cralloc/executable"]
+# cralloc behind calls the optimizer may not inline (src/outline.rs), to measure what inlining
+# its fast path gives and costs. A measurement option on top of the cralloc feature, as cralloc's
+# own would be: build.rs does not count it.
+cralloc-outline = ["cralloc"]
 # cralloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
 # Not an allocator of its own: build.rs does not count it. For docs/research/memory.md, "How
 # memory is accounted".

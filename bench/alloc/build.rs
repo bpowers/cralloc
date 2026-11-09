@@ -33,7 +33,8 @@ fn main() {
         .filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(|f| f.to_lowercase().replace('_', "-")))
         // Measurement options on top of the cralloc feature, not allocators.
         .filter(|f| {
-            !["cralloc-memstat", "cralloc-background", "cralloc-domains", "live-bytes", "memacct"].contains(&f.as_str())
+            !["cralloc-memstat", "cralloc-background", "cralloc-domains", "cralloc-outline", "live-bytes", "memacct"]
+                .contains(&f.as_str())
         })
         .collect();
     if chosen.len() > 1 {
