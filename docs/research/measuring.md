@@ -333,8 +333,8 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   that segment; `claude` had one in five of the six and kernel threads in three. Over 90 earlier runs,
   39 exceed 1 ms, on every allocator, at rates this few runs cannot separate (3 to 10 of 15). This noise
   only adds, so a job's tail is its quietest run, and ranking tails takes a session with both the
-  browser and the agents quiet. The log needs no root here: `perf record -a --switch-events -e dummy`,
-  with `perf_event_paranoid` at -1.
+  browser and the agents quiet: `bench/standings/quiet-session.sh`, whose log `whoran.py` reads. The
+  log needs no root here, with `perf_event_paranoid` at -1.
 - **`orders axum` and mini-redis have a tail of about 2 ms that is not this noise.** It shows in every
   run under every allocator. In one logged run of `orders axum` at its fixed rate, the server has one
   or two CPUs busy in 30% of milliseconds and three or four in the rest, with p99 1.8 ms; at 30% load
