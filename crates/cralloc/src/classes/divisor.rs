@@ -16,11 +16,11 @@
 //! error term is less than `1 / q` and the floor is unchanged: `(x * M) >> 32 == x / q`. The
 //! product is below `2^29 * 2^32`, so it fits in 64 bits.
 //!
-//! Kani checks this in three parts, because a SAT solver needs a minute or two to verify a
-//! multiplier and the merge gate has a minute in all. `verify.rs`, in the gate: every class's
-//! divisor is its odd factor's multiplier and a shift of at least 3; and if `quotient(x)` is
-//! `x / q` then `divide(offset)` is `offset / (q << shift)`. `verify_slow.rs`, on demand:
-//! `quotient` is exact for every `x` below 2^29, for each `q`.
+//! Checked in two parts. Kani, in the gate's `verify.rs`: every class's divisor is its odd factor's
+//! multiplier and a shift of at least 3; and if `quotient(x)` is `x / q` then `divide(offset)` is
+//! `offset / (q << shift)`. A test that runs every `x` below 2^29 for each `q`, with
+//! `scripts/gate --all`: `quotient` is exact. That takes seconds, where a SAT solver takes many
+//! minutes over a multiplier.
 
 /// `ceil(2^32 / q)` for `q = 1, 3, 5, 7`, indexed by `q >> 1`.
 pub(super) const MAGIC: [u64; 4] = [1 << 32, magic(3), magic(5), magic(7)];
@@ -66,6 +66,20 @@ pub(super) const fn quotient(x: u32, magic: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::super::Class;
+    use super::{MAGIC, quotient};
+
+    /// Every input that can reach `quotient`, for each odd factor.
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn the_quotient_is_exact_for_every_input() {
+        for q in [1u32, 3, 5, 7] {
+            let magic = MAGIC[(q >> 1) as usize];
+            for x in 0..1u32 << 29 {
+                let below = quotient(x, magic) * q;
+                assert!(below <= x && x - below < q, "{x} / {q}");
+            }
+        }
+    }
 
     #[test]
     fn division_matches_the_divide_instruction() {

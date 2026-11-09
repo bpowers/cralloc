@@ -5,8 +5,8 @@
 //! Which slots a unit touches, and which lie wholly inside it, is proved for every class and
 //! position on the tiny heap's regions. For the larger geometries CBMC does not finish the
 //! 64-bit multiply in `Divisor::divide` within the hour; there it rests on `touching` being
-//! `(start / size, (end - 1) / size)` by definition, `Divisor::divide` being proved exact for
-//! every input (`classes::verify`, `classes::verify_slow`), and the unit test
+//! `(start / size, (end - 1) / size)` by definition, `Divisor::divide` being exact for every input
+//! (`classes::verify`, and a test of every input in `classes::divisor`), and the unit test
 //! `layout::tests::purge_passes_tile_the_carved_pages`.
 //!
 //! Runs of operations on a heap are not here. A harness running the real back end on a tiny
