@@ -292,6 +292,11 @@ sessions; the allocator's did not.
 cralloc does the least work on three of the four and the second least on SurrealDB, and holds the
 least on three, with jemalloc 0.5% below it on the order service.
 
+Qdrant, a million vectors, mixed load: its cycles do not rank allocators here either, all within 1.4%
+at 12.2 million a request. Mean and peak anonymous MiB: jemalloc 257 and 377, cralloc 306 and 403,
+tcmalloc 331 and 369, glibc 558 and 604, snmalloc 576 and 629, mimalloc 653 and 725 (three rounds,
+cralloc two, `66dfb90`).
+
 **Programs here.** Gcycles of all threads, and peak resident MiB. Six rounds of ruff, three of the
 others.
 
