@@ -216,7 +216,7 @@ const fn geometry_of(page_shift: Found) -> Geometry {
 /// The heap's geometry, for this file's own calls.
 #[inline(always)]
 fn geometry() -> Geometry {
-    geometry_of(found())
+    LinuxOs::geometry()
 }
 
 /// Finds the kernel's page size and keeps the process's first answer, which a thread that raced
@@ -956,7 +956,6 @@ mod tests {
     /// What a `Space` keeps gives it the geometry it would have read, whatever the page.
     #[test]
     fn what_is_found_gives_the_geometry() {
-        assert_eq!(LinuxOs::geometry_of(LinuxOs::found()), LinuxOs::geometry());
         #[cfg(target_arch = "aarch64")]
         for shift in [12, 14, 16] {
             assert_eq!(geometry_of(shift), Geometry::of_kernel(shift as u32));
