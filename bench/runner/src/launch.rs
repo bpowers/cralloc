@@ -7,7 +7,7 @@
 //! `enable_on_exec` on a process that has not yet exec'd count the whole program and, with
 //! `inherit`, every thread it creates. This is how `perf stat` does it.
 use bench_harness::mem::Rollup;
-use bench_harness::perf::{Counters, PROCESS_EVENTS, Sample, Target};
+use bench_harness::perf::{Counters, Sample, Target, process_events};
 use std::cell::Cell;
 use std::ffi::CString;
 use std::fs::File;
@@ -111,7 +111,7 @@ impl Child {
             return Err(io::Error::other(format!("moving the child into {}: {e}", spec.cgroup.display())));
         }
         let counters = if spec.count {
-            match Counters::open_on(PROCESS_EVENTS, Target::ChildBeforeExec(pid), spec.cpus) {
+            match Counters::open_on(&process_events(), Target::ChildBeforeExec(pid), spec.cpus) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     kill();

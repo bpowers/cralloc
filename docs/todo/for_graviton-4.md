@@ -26,6 +26,10 @@ Then run the portable tools, which find the CPUs and PMU from sysfs:
   2 MiB fault and split costs and the stagger's gain there are computed or inflated.
 - **The page stagger:** V2's L2 TLB size and sets are unverified. If it is not indexed by low page bits,
   the page term costs an eighth of a slot's address space for nothing. `streams rule` shows it.
+- **Inlining in a large program.** On Firestorm, whose L1I is 192 KiB against V2's 64, an out-of-line
+  build took 0.5 to 1.7% off the cycles of six jobs and added 4% to `tree depth=18` (`firestorm.md`,
+  "What inlining costs a program"). Repeat it: `pad-build.sh` builds `cro` beside `cra`, with
+  `BENCH_PROCESS_EVENTS` set to this PMU's L1I and iTLB events.
 - **The pointer prefetch.** Magazines of raw addresses gain on Firestorm, and V2 reports an indirect
   prefetcher: `streams pointers` and `magazine`.
 - **`membarrier` in a VM:** 49 ms in a microVM on a busy host, against 6.3 us on this one, and a drain

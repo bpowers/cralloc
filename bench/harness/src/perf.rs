@@ -114,15 +114,28 @@ pub const REGION_EVENTS: &[Event] = &[
 /// the user-cycles counter to make room for three; a run whose counters were multiplexed
 /// says so in its result. For investigations: the runner never sets it.
 pub fn extra_events() -> Vec<Event> {
-    let Ok(list) = std::env::var("BENCH_EVENTS") else { return Vec::new() };
+    events_from("BENCH_EVENTS")
+}
+
+/// What the runner counts for a whole process: [`PROCESS_EVENTS`], and any raw events in
+/// `BENCH_PROCESS_EVENTS`, listed as for [`extra_events`]. For a program with no measured phase,
+/// or a server: they reach the run's `process` record and, for a server, `extra_per_req`.
+pub fn process_events() -> Vec<Event> {
+    let mut events = PROCESS_EVENTS.to_vec();
+    events.extend(events_from("BENCH_PROCESS_EVENTS"));
+    events
+}
+
+fn events_from(variable: &str) -> Vec<Event> {
+    let Ok(list) = std::env::var(variable) else { return Vec::new() };
     list.split(',')
         .filter(|s| !s.is_empty())
         .map(|item| {
             let (name, config) =
-                item.split_once('=').unwrap_or_else(|| panic!("BENCH_EVENTS item {item:?} is not name=config"));
+                item.split_once('=').unwrap_or_else(|| panic!("{variable} item {item:?} is not name=config"));
             let hex = config.trim_start_matches("0x");
             let config =
-                u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("BENCH_EVENTS config {config:?} is not hex"));
+                u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("{variable} config {config:?} is not hex"));
             Event::Raw { name: Box::leak(name.to_string().into_boxed_str()), config }
         })
         .collect()

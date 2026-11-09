@@ -261,7 +261,9 @@ sessions; the allocator's did not.
 
 - **jemalloc and tcmalloc run 3.5% more instructions for 0.5 to 1.3% more cycles,** so their
   instructions per cycle are better, as on the Ryzen.
-- **`orders axum` against tcmalloc is the one to sweep:** 2.7% fewer cycles on 4.3% more instructions.
+- **tcmalloc's 2.7% on `orders axum` is placement.** Over five pads at `92eeb7b`, two rounds, it is
+  0.4% ahead there (p = 0.58), and 1.3% and 0.6% behind on actix and HTTP/2 (p = 0.07 each), on 3.8 to
+  5.6% more instructions and about 20% fewer L1I misses.
 - **Tails do not rank here.** With the browser and the agents running, a run's p99.9 follows what else
   ran ([measuring.md](measuring.md), "On the M1 Max"). On `connect log` each allocator's quietest run
   reads 57 to 64 us; on the other jobs some allocators had no quiet run in three. `orders axum`,
@@ -270,6 +272,32 @@ sessions; the allocator's did not.
   212 on orders, 21 against 32 on Sozu. glibc holds less on small heaps (19 on Sozu) and far more on
   orders (400). mimalloc and snmalloc hold the most: mimalloc 36 on Connect against 12 to 15, and 173
   on Sozu; snmalloc 469 on orders.
+
+**Large heaps here.** The same measure, and each one's mean anonymous memory through 70% load, in MiB
+(Meilisearch's heap sits beside a mapped store of about 3 GiB). Three rounds of single builds, 72 runs,
+3 left out, cralloc at `66dfb90`, 2026-11-08.
+
+| Job | cralloc | jemalloc | tcmalloc | mimalloc | glibc | snmalloc |
+|---|---:|---:|---:|---:|---:|---:|
+| Log store, thousands of cycles | 198 | +0.2% | +5.2% | +16.3% | +52.9% | +5.8% |
+| Log store, MiB | 1,466 | 1,531 | 1,521 | 1,560 | 2,067 | 3,101 |
+| Order service at 2 GiB, thousands of cycles | 38.7 | +0.5% | +1.5% | +7.6% | +36.4% | +8.1% |
+| Order service at 2 GiB, MiB | 2,221 | 2,209 | 2,228 | 2,369 | 3,159 | 2,720 |
+| SurrealDB, 750k records, thousands of cycles | 1,500 | +9.2% | +6.3% | +2.8% | +43.7% | -2.0% |
+| SurrealDB, 750k records, MiB | 1,723 | 1,806 | 1,809 | 1,924 | 1,928 | 2,016 |
+| Meilisearch, thousands of cycles | 9,655 | +2.8% | +2.2% | +4.8% | +17.0% | +0.3% |
+| Meilisearch, MiB | 1,385 | 1,505 | 1,557 | 2,512 | 1,934 | 2,963 |
+| **Geomean of cycles** | | **1.031 (x1.035)** | **1.038 (x1.019)** | **1.077 (x1.048)** | **1.369 (x1.104)** | **1.030 (x1.040)** |
+| **Geomean of memory** | | **1.043** | **1.053** | **1.231** | **1.331** | **1.596** |
+| cralloc's saturated rate over theirs | | 1.023 (x1.023) | 1.022 (x1.014) | 1.082 (x1.077) | 1.373 (x1.083) | 1.043 (x1.047) |
+
+cralloc does the least work on three of the four and the second least on SurrealDB, and holds the
+least on three, with jemalloc 0.5% below it on the order service.
+
+Qdrant, a million vectors, mixed load: its cycles do not rank allocators here either, all within 1.4%
+at 12.2 million a request. Mean and peak anonymous MiB: jemalloc 257 and 377, cralloc 306 and 403,
+tcmalloc 331 and 369, glibc 558 and 604, snmalloc 576 and 629, mimalloc 653 and 725 (three rounds,
+cralloc two, `66dfb90`).
 
 **Programs here.** Gcycles of all threads, and peak resident MiB. Six rounds of ruff, three of the
 others.

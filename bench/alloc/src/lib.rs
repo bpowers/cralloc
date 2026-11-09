@@ -54,9 +54,19 @@ mod pad;
 mod asm;
 #[cfg(feature = "cralloc")]
 use asm as chosen;
-#[cfg(all(feature = "cralloc", not(feature = "cralloc-memstat"), not(feature = "live-bytes")))]
+#[cfg(all(
+    feature = "cralloc",
+    not(feature = "cralloc-memstat"),
+    not(feature = "live-bytes"),
+    not(feature = "cralloc-outline")
+))]
 #[global_allocator]
 static GLOBAL: cralloc::Cralloc = cralloc::Cralloc;
+#[cfg(feature = "cralloc-outline")]
+mod outline;
+#[cfg(feature = "cralloc-outline")]
+#[global_allocator]
+static GLOBAL: outline::Outline = outline::Outline;
 #[cfg(feature = "live-bytes")]
 mod live;
 #[cfg(feature = "live-bytes")]

@@ -277,11 +277,17 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         // The server's counts over every segment of this name: from its mark to the next.
         let (mut cycles, mut instructions, mut task_ns, mut faults, mut ms) = (0u64, 0u64, 0u64, 0u64, 0.0);
         let mut rss_max = 0;
+        let mut extra = std::collections::BTreeMap::<&str, u64>::new();
         for w in l.marks.windows(2) {
             if w[0].segment.is_none() || &w[0].name != name {
                 continue;
             }
             let d = w[1].snap.counters.since(&w[0].snap.counters);
+            for &(event, value) in &d.values {
+                if !matches!(event, "cycles" | "instructions" | "task_clock_ns" | "page_faults") {
+                    *extra.entry(event).or_default() += value;
+                }
+            }
             cycles += d.get("cycles").unwrap_or(0);
             instructions += d.get("instructions").unwrap_or(0);
             task_ns += d.get("task_clock_ns").unwrap_or(0);
@@ -301,6 +307,7 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
             "faults_per_req": per(faults),
             "cpus_busy": if ms > 0.0 { task_ns as f64 / 1e6 / ms } else { 0.0 },
             "rss_max": rss_max,
+            "extra_per_req": extra.iter().map(|(&e, &v)| (e, per(v))).collect::<std::collections::BTreeMap<_, _>>(),
         });
         if name == rank {
             primary = server["cycles_per_req"].as_f64();
