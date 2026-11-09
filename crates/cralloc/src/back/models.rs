@@ -32,6 +32,7 @@ use crate::classes::Class;
 use crate::classes::MagazineSize;
 use crate::os::sim::{PAGE_SCALE, Shape, Standard, Tiny};
 use crate::space::{Geometry, Plan, RegionId};
+use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::vec::Vec;
@@ -55,6 +56,14 @@ fn tiny() -> Plan {
 
 fn standard() -> Plan {
     Standard::GEOMETRY.largest_plan()
+}
+
+/// A purge's claim of one word, its clear made at once.
+fn claim_exact(host: &Host8, region: RegionId, word: u32, bits: u64) -> bool {
+    let mut claims = tree::ExactRun::new();
+    let claimed = claims.claim(host, region, word, bits);
+    claims.finish(host);
+    claimed
 }
 
 /// Frees `slot`, as the program would, from outside any schedule.
@@ -893,7 +902,7 @@ fn a_run_races_exact_claims(preemptions: usize) {
                 0 => claim_run_of(host, 3, 2),
                 1 => {
                     for (word, bits) in [(1, 0b11), (0, 0b1)] {
-                        if tree::claim_exact(host, r0, word, bits) {
+                        if claim_exact(host, r0, word, bits) {
                             tree::release(host, r0, word, bits);
                         }
                     }
@@ -924,6 +933,145 @@ fn a_run_races_exact_claims_quickly() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_run_races_exact_claims_fully() {
     a_run_races_exact_claims(2);
+}
+
+/// A host of 32-byte slots with only the two pages around the end of the first group free, and
+/// those pages as a unit: words 62 to 65, so that a purge's claims and its release cross from
+/// one group to the next.
+fn purge_across_groups_setup() -> (Host8, Unit) {
+    let host = Host8::new(standard(), class(32 * PAGE_SCALE), 1);
+    let r0 = host.region_at(0);
+    let layout = *host.layout();
+    host.carve_all(r0, layout.slots());
+    let boundary = (layout.slot_bytes(BITS * BITS) >> layout.page_shift()) as u32;
+    let unit = Unit {
+        start: boundary - 1,
+        end: boundary + 1,
+    };
+    let (first, last) = layout.touching(unit);
+    assert!(first / BITS < BITS && last / BITS >= BITS);
+    for slot in first..=last {
+        host.write(r0, slot);
+        free_now(&host, r0, slot);
+    }
+    (host, unit)
+}
+
+/// A purge whose claims cross a group, against a fill and frees beside it: `purge_unit` as it runs,
+/// which is the model's `Run` going by address (`Summary_run.cfg`). The fill finds the words the
+/// purge has emptied and moves past them, and if it takes from a word the purge has not reached,
+/// the purge gives back exactly what it took. That is the case this scenario is for, so it fails
+/// if no schedule reached it. Nothing is lost, invented or handed out twice, and every free word
+/// is visible at the end. Preemptions bounded to two (one in the quick run).
+fn a_purge_across_groups_races_a_fill(preemptions: usize) {
+    let gave_back = AtomicBool::new(false);
+    let (host, unit) = purge_across_groups_setup();
+    let (first, last) = host.layout().touching(unit);
+    // Below the unit's first word, and above its last.
+    let beside = [first - BITS, last + 1];
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let (host, _) = purge_across_groups_setup();
+            (host, Mutex::new(Vec::new()), AtomicBool::new(false))
+        },
+        |(host, kept, busy), me| {
+            let r0 = host.region_at(0);
+            match me {
+                0 => {
+                    if matches!(region::purge_unit(host, r0, unit), (Purge::Busy, _)) {
+                        busy.store(true, Relaxed);
+                    }
+                }
+                1 => kept.lock().unwrap().extend(claim_run_of(host, 1, 1)),
+                _ => {
+                    for slot in beside {
+                        free_now(host, r0, slot);
+                    }
+                }
+            }
+        },
+        |(host, kept, busy), outcome| {
+            assert!(outcome.killed.is_empty());
+            let r0 = host.region_at(0);
+            // Only the purge empties the words below the group's end, so a fill that took from
+            // the second group took after the purge had looked, and it failed partway.
+            let past = kept.lock().unwrap().iter().any(|&(_, s)| s / BITS >= BITS);
+            if busy.load(Relaxed) && past {
+                gave_back.store(true, Relaxed);
+            }
+            let mut expected: Vec<u64> = (first..=last).map(|s| host.global(r0, s)).collect();
+            expected.extend(beside.iter().map(|&s| host.global(r0, s)));
+            run_check(host, 1, kept, &expected);
+        },
+    );
+    assert!(
+        gave_back.load(Relaxed),
+        "no schedule made a purge give back what it took"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_purge_across_groups_races_a_fill_quickly() {
+    a_purge_across_groups_races_a_fill(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_purge_across_groups_races_a_fill_fully() {
+    a_purge_across_groups_races_a_fill(2);
+}
+
+/// A purge may vanish at any step, as in a forked child, while a fill runs: `Summary_run_crash.cfg`
+/// with a purge's claims. The fill does not wait for it. Whatever the purge held is lost with it,
+/// and what it had released may stay hidden, which is the leak a purge in flight at a fork has
+/// always been, of at most the unit. Nothing is handed out twice, and what a fill finds is free.
+fn a_purge_lost_at_any_step_holds_up_no_fill(preemptions: usize) {
+    let (host, unit) = purge_across_groups_setup();
+    let (first, last) = host.layout().touching(unit);
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        2,
+        || {
+            let (host, _) = purge_across_groups_setup();
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            if me == 0 {
+                kept.lock().unwrap().extend(claim_run_of(host, 2, 64));
+            } else {
+                let _ = region::purge_unit(host, host.region_at(0), unit);
+            }
+        },
+        |(host, kept), _| {
+            let mut kept = kept.lock().unwrap().clone();
+            kept.extend(claim_run_of(host, 4096, 64));
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            assert!(kept.iter().all(|&(_, s)| (first..=last).contains(&s)));
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_purge_lost_at_any_step_holds_up_no_fill_quickly() {
+    a_purge_lost_at_any_step_holds_up_no_fill(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_purge_lost_at_any_step_holds_up_no_fill_fully() {
+    a_purge_lost_at_any_step_holds_up_no_fill(3);
 }
 
 /// Two fills by one thread over the same words while another thread frees into them in
@@ -1210,7 +1358,7 @@ fn kept_bits_and_single_frees_lost_at_any_step(preemptions: usize) {
         3,
         || {
             let host = deep_run_setup();
-            assert!(tree::claim_exact(&host, host.region_at(0), 64, 1));
+            assert!(claim_exact(&host, host.region_at(0), 64, 1));
             (host, Mutex::new(Vec::new()))
         },
         |(host, kept), me| {
@@ -2238,7 +2386,7 @@ fn wide_direct_frees_heal_what_a_fork_left_fully() {
 /// `tla/Summary.tla` does not: its OR of a level-1 bit finds the level-1 word empty, and it still
 /// reads the level-2 bit before setting it, while the thread that emptied that word is clearing the
 /// same bit on its way up (`tla/SummaryLookUp.tla`). Two summary levels and the class's two; the
-/// claim is a purge's (`claim_exact`), which clears and reads again at every level. With `alone`,
+/// claim is a purge's (`tree::ExactRun`), which clears and reads again at every level. With `alone`,
 /// nothing else in the class is free, so the clears go on through the class word to its top word
 /// and the free looks at each of those behind an OR that found the word below empty. Every
 /// schedule, or those with at most `preemptions` preemptions.
@@ -2263,7 +2411,7 @@ fn a_single_free_looks_above_a_word_it_found_empty(alone: bool, preemptions: Opt
         |host, me| {
             let r0 = host.region_at(0);
             if me == 0 {
-                assert!(tree::claim_exact(host, r0, 64, 1));
+                assert!(claim_exact(host, r0, 64, 1));
             } else {
                 free_one(host, r0, 65 * 64 + 1);
             }

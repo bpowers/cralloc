@@ -82,6 +82,59 @@ fn a_free_and_an_emptying_claim_leave_the_slot_visible_fully() {
     a_free_and_an_emptying_claim_leave_the_slot_visible(FULL);
 }
 
+/// The same two writes and two reads with a purge's claim, whose clear is one of a group: a free of
+/// the word's other slot against the purge's atomic AND of the summary word and its re-read.
+fn a_free_and_a_purges_clear_leave_the_slot_visible(time: Duration) {
+    let host: TestHost<Atomic> = TestHost::new(Standard::GEOMETRY.largest_plan(), class(64), 1);
+    let region = host.region_at(0);
+    host.carve_all(region, 64);
+    let gate = Gate::new(2);
+    let rounds = Rounds::of(time, 100);
+    spread(2, |me| {
+        let mut noise = 0x9e37_79b9_7f4a_7c15u64 + me as u64;
+        let mut round = 0;
+        loop {
+            // Slot 0 free, the only one, and every summary bit above it set.
+            if me == 0 {
+                while tree::claim(&host, 64, false).is_some() {}
+                tree::release(&host, region, 0, 1);
+            }
+            gate.pass();
+            if !rounds.go_on(round) {
+                return;
+            }
+            round += 1;
+            jitter(&mut noise);
+            if me == 0 {
+                tree::release_one(&host, region, 0, 1);
+            } else {
+                let mut claims = tree::ExactRun::new();
+                assert!(claims.claim(&host, region, 0, 1));
+                claims.finish(&host);
+            }
+            gate.pass();
+            if me == 0 {
+                assert!(
+                    host.all_visible(),
+                    "a free slot lies under a clear summary bit"
+                );
+            }
+            gate.pass();
+        }
+    });
+}
+
+#[test]
+fn a_free_and_a_purges_clear_leave_the_slot_visible_quickly() {
+    a_free_and_a_purges_clear_leave_the_slot_visible(QUICK);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_free_and_a_purges_clear_leave_the_slot_visible_fully() {
+    a_free_and_a_purges_clear_leave_the_slot_visible(FULL);
+}
+
 /// A launder's atomic OR and a fill's claiming compare-and-swap are all that carries a block from
 /// its last owner to its next. Threads fill and launder one class, so that each mostly takes what
 /// another has just returned, and every block's ledger must show every earlier owner.

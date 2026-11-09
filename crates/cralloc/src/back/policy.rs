@@ -117,7 +117,8 @@ pub const FRONTIER_INTERVALS: u64 = 2;
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a
-/// huge-page unit of small slots may read more.
+/// huge-page unit of small slots reads and claims more: 65,536 words for 8-byte slots at 32 MiB
+/// (`docs/research/memory.md`, "Returning memory off request paths").
 pub const PURGE_STEP_WORDS: usize = 256;
 
 /// How many pages a heartbeat's step of a decay pass may purge: 128, half a MiB with pages of

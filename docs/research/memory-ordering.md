@@ -94,7 +94,7 @@ Each route keeps the block's bytes and the magazine's contents in one happens-be
 | A drain | The fence, to the drainer; then the depot's or a launder's release. Nothing reads a slot or link before the fence returns, because the exchange in step 2 can read a commit before the slots it covers are visible |
 | Launder, then fill | The launderer has the chain above; its atomic OR of the leaf word releases, and the fill's compare-and-swap acquires, through any other ORs of that word |
 | Large block, single slot | The holder's stores of the size word (release), the free's OR and the next claim's compare-and-swap |
-| Purge | The claim acquires the last owner's stores, `madvise` runs under the claim, and the release of the claim carries that to the next owner, who then reads zero |
+| Purge | The claim acquires the last owner's stores, `madvise` runs under the claim, and each word's atomic OR of the release carries that to the next owner, who then reads zero. The batch shares only the walk up the summary bits, which orders nothing a block needs: a fill's compare-and-swap of the leaf word is its acquire, however it was led there |
 | Run of regions | `free_run` purges and then gives each tag back by compare-and-swap; the next `claim_run`'s compare-and-swap acquires it |
 
 **A stale link is harmless and cannot be taken.** A pop that reads a head `(M, v)` acquires its
