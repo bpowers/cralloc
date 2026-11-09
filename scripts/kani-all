@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Run every Kani harness in the workspace, each in its own memory-capped scope, and print one
-# line per harness with its result and time. Exits non-zero if any failed.
+# Run every Kani harness in the workspace, several at once, each in a process of its own, and
+# print one line per harness with its result and time as it finishes. Exits non-zero if any failed.
 #
-# Usage: scripts/kani-all [PATTERN]
+# Usage: scripts/kani-all [-j JOBS] [PATTERN]
 #   PATTERN  only harnesses whose full path contains it, e.g. `verify_slow` or `space::`.
+#   -j       harnesses at once (KANI_JOBS, default 3)
+#   KANI_ALL_MEM      the cap on the whole run, which the harnesses share, default 12G
+#   KANI_ALL_TIMEOUT  the wall-clock limit on the whole run, default 4h
+#   KANI_TIMEOUT      the wall-clock limit on one harness, default 30m
 #
-# Why one scope per harness: a single `cargo kani` runs its harnesses in one cgroup, and CBMC's
-# memory use accumulates across them, so a set whose members each fit under the cap can still
-# be killed as a whole.
+# Why one process per harness: a single `cargo kani` runs its harnesses one after another, and
+# CBMC's memory use accumulates across them, so a set whose members each fit under the cap can
+# still be killed as a whole. Run apart they fit together (docs/research/verification.md).
 #
 # Harnesses are found from their `#[kani::proof]` attributes, so the list never goes stale. The
 # convention this relies on: harnesses live in `verify.rs` (quick: the merge gate runs them all
@@ -17,7 +21,23 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 cd "$root"
+
+jobs="${KANI_JOBS:-3}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -j) jobs="$2"; shift 2 ;;
+    -*) echo "usage: scripts/kani-all [-j JOBS] [PATTERN]" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -le 1 ] || { echo "usage: scripts/kani-all [-j JOBS] [PATTERN]" >&2; exit 2; }
 pattern="${1:-}"
+
+if [ -z "${KANI_ALL_INSIDE_CAP:-}" ]; then
+  export KANI_ALL_INSIDE_CAP=1
+  MEMLIMIT_QUIET=1 exec "$here/memlimit" -m "${KANI_ALL_MEM:-12G}" -t "${KANI_ALL_TIMEOUT:-4h}" -- \
+    "$0" -j "$jobs" "$pattern"
+fi
 
 # Prints "package<TAB>module::path::harness" for every harness. Fails if a proof attribute has no
 # function after it, or a harness lives outside a verify.rs or verify_slow.rs file, rather than
@@ -51,20 +71,34 @@ list() {
 all=$(list) || exit 2
 mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
 [ "${#harnesses[@]}" -gt 0 ] || { echo "kani-all: no harnesses match '$pattern'" >&2; exit 2; }
-failed=0
-for entry in "${harnesses[@]}"; do
-  pkg="${entry%%$'\t'*}"; harness="${entry#*$'\t'}"
+# one PACKAGE HARNESS: runs a harness, prints its line, and returns whether it passed.
+one() {
+  local pkg="$1" harness="$2" start out status=ok line why
   start=$(date +%s)
-  if out=$(MEMLIMIT_QUIET=1 "$here/kani" -p "$pkg" --harness "$harness" --exact \
-             --output-format terse 2>&1); then
-    status=ok
-  else
-    status=FAILED; failed=$((failed + 1))
-  fi
-  printf '%-72s %-6s %5ds\n' "$harness" "$status" "$(( $(date +%s) - start ))"
+  out=$(timeout --signal=TERM --kill-after=30s "${KANI_TIMEOUT:-30m}" \
+          cargo kani -p "$pkg" --harness "$harness" --exact --output-format terse 2>&1) || status=FAILED
+  line=$(printf '%-72s %-6s %5ds' "$harness" "$status" "$(( $(date +%s) - start ))")
   if [ "$status" = FAILED ]; then
-    printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5
+    why=$(printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5)
+    line+="${why:+$'\n'$why}"
   fi
+  printf '%s\n' "$line"
+  [ "$status" = ok ]
+}
+
+failed=0
+running=0
+for entry in "${harnesses[@]}"; do
+  one "${entry%%$'\t'*}" "${entry#*$'\t'}" &
+  running=$((running + 1))
+  if [ "$running" -ge "$jobs" ]; then
+    wait -n || failed=$((failed + 1))
+    running=$((running - 1))
+  fi
+done
+while [ "$running" -gt 0 ]; do
+  wait -n || failed=$((failed + 1))
+  running=$((running - 1))
 done
 echo "kani-all: ${#harnesses[@]} harnesses, $failed failed"
 [ "$failed" -eq 0 ]

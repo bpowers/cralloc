@@ -15,9 +15,9 @@
 //! on real threads (`crate::stress`).
 //!
 //! A run can also simulate `fork`: at a switch point every thread but the running one stops
-//! for good (it is "killed" and later unwound out of its body), and a callback wipes what the
-//! child would see wiped. What the killed threads held privately is lost, as in a forked
-//! child.
+//! for good (it is "killed", and unwound out of its body before the forking thread goes on), and
+//! a callback wipes what the child would see wiped. What the killed threads held privately is
+//! lost, as in a forked child.
 
 use crate::fingerprint::{self, Fingerprint};
 use crate::turns::{Team, with_team};

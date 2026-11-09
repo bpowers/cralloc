@@ -11,7 +11,8 @@
 #   KANI_MEM=12G KANI_TIMEOUT=1h scripts/kani -p cralloc --harness some_slow_harness
 #
 # One invocation runs its harnesses one after another in one cgroup, and CBMC's memory use
-# accumulates across them, so run large harnesses one per invocation (scripts/kani-all does).
+# accumulates across them, so run large harnesses one per invocation (scripts/kani-all does, under
+# a cap they share).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/.."
