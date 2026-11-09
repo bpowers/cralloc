@@ -25,6 +25,7 @@
 
 use super::testhost::TestWord;
 use super::word::Word;
+use crate::fingerprint::{self, Fingerprint};
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -34,6 +35,7 @@ use std::string::String;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
+use std::time::Instant;
 use std::vec::Vec;
 
 /// How to explore.
@@ -85,6 +87,8 @@ struct Inner {
     last: Option<usize>,
     prefix: Vec<usize>,
     trace: Vec<(usize, usize)>,
+    /// Every decision of this schedule: how many options, which was taken, what it was.
+    fingerprint: Fingerprint,
     preemptions: usize,
     config: Config,
     crashed: bool,
@@ -155,6 +159,12 @@ impl Sched {
             let pos = inner.trace.len();
             let pick = inner.prefix.get(pos).copied().unwrap_or(0);
             inner.trace.push((options.len(), pick));
+            inner.fingerprint.mix(options.len() as u64);
+            inner.fingerprint.mix(pick as u64);
+            inner.fingerprint.mix(match options[pick] {
+                Choice::Run(t) => (t as u64) << 1,
+                Choice::Kill(t) => (t as u64) << 1 | 1,
+            });
             match options[pick] {
                 Choice::Run(t) => {
                     if last_can_run && Some(t) != inner.last {
@@ -329,6 +339,9 @@ impl TestWord for TWord {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Stats {
     pub(crate) schedules: usize,
+    /// Every decision of every schedule, in order ([`crate::fingerprint`]).
+    #[allow(dead_code)]
+    pub(crate) fingerprint: Fingerprint,
 }
 
 /// Runs `body(state, thread)` on `threads` threads under every schedule `config` allows, each
@@ -342,6 +355,8 @@ pub(crate) fn explore<S: Sync>(
     body: impl Fn(&S, usize) + Sync,
     check: impl Fn(&S, &Outcome),
 ) -> Stats {
+    let began = Instant::now();
+    let mut fingerprint = Fingerprint::new();
     let mut prefix: Vec<usize> = Vec::new();
     let mut schedules = 0;
     loop {
@@ -359,6 +374,7 @@ pub(crate) fn explore<S: Sync>(
                 last: None,
                 prefix: prefix.clone(),
                 trace: Vec::new(),
+                fingerprint: Fingerprint::new(),
                 preemptions: 0,
                 config,
                 crashed: false,
@@ -401,6 +417,7 @@ pub(crate) fn explore<S: Sync>(
                 .collect(),
         };
         let trace = inner.trace.clone();
+        fingerprint.mix(inner.fingerprint.0);
         drop(inner);
         let checked = panic::catch_unwind(AssertUnwindSafe(|| check(&state, &outcome)));
         if let Err(payload) = checked {
@@ -411,7 +428,11 @@ pub(crate) fn explore<S: Sync>(
         }
         // The next schedule: the deepest choice with an untried option, advanced.
         let Some(depth) = trace.iter().rposition(|&(n, pick)| pick + 1 < n) else {
-            return Stats { schedules };
+            fingerprint::log(began, schedules, fingerprint);
+            return Stats {
+                schedules,
+                fingerprint,
+            };
         };
         prefix = trace[..depth].iter().map(|&(_, pick)| pick).collect();
         prefix.push(trace[depth].1 + 1);

@@ -144,6 +144,8 @@ pub mod clock;
 #[cfg(not(feature = "internals"))]
 mod clock;
 pub(crate) mod environment;
+#[cfg(test)]
+mod fingerprint;
 #[cfg(all(test, cralloc_real))]
 mod fresh;
 mod heap;

@@ -19,12 +19,14 @@
 //! child would see wiped. What the killed threads held privately is lost, as in a forked
 //! child.
 
+use crate::fingerprint::{self, Fingerprint};
 use std::boxed::Box;
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::string::{String, ToString};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::thread;
+use std::time::Instant;
 use std::vec::Vec;
 
 /// One choice made during an execution: which of `count` options was taken.
@@ -74,6 +76,9 @@ pub(crate) struct Report {
     pub(crate) forks: usize,
     /// Whether every schedule within the bounds was run.
     pub(crate) complete: bool,
+    /// Every decision of every execution, in order ([`crate::fingerprint`]).
+    #[allow(dead_code)]
+    pub(crate) fingerprint: Fingerprint,
 }
 
 struct State {
@@ -82,6 +87,9 @@ struct State {
     killed: Vec<bool>,
     prefix: Vec<Choice>,
     trail: Vec<Choice>,
+    /// Every decision of this execution, the forced ones too: who was running, how many options
+    /// it had, which it took.
+    fingerprint: Fingerprint,
     preemptions: usize,
     steps: usize,
     forked: bool,
@@ -189,6 +197,14 @@ pub(crate) fn choose(count: usize) -> usize {
 
 impl State {
     fn pick(&mut self, count: usize) -> usize {
+        let taken = self.decide(count);
+        self.fingerprint.mix(self.running as u64);
+        self.fingerprint.mix(count as u64);
+        self.fingerprint.mix(taken as u64);
+        taken
+    }
+
+    fn decide(&mut self, count: usize) -> usize {
         if count <= 1 {
             return 0;
         }
@@ -327,10 +343,17 @@ impl Run<'_> {
     }
 
     /// Hands the turn to some runnable thread after `me` stops running for good.
-    fn hand_off(&self, state: &mut State) {
+    fn hand_off(&self, state: &mut State, me: usize) {
         let runnable = state.runnable();
         if !runnable.is_empty() {
-            let taken = state.pick(runnable.len());
+            // A killed thread unwinds beside the survivor, whenever the OS runs it, and has no
+            // say: at most the survivor is left to choose. Only a finished thread's choice goes
+            // into the fingerprint, which would otherwise depend on when the unwinding ran.
+            let taken = if state.killed[me] {
+                state.decide(runnable.len())
+            } else {
+                state.pick(runnable.len())
+            };
             state.running = runnable[taken];
         }
         self.turn.notify_all();
@@ -356,7 +379,7 @@ impl Run<'_> {
                 .unwrap_or_else(|| "a non-string panic".to_string());
             self.fail(&mut state, std::format!("thread {me} panicked: {message}"));
         }
-        self.hand_off(&mut state);
+        self.hand_off(&mut state, me);
     }
 }
 
@@ -374,6 +397,8 @@ pub(crate) fn explore<S: Sync>(
     on_fork: impl Fn(&S) + Sync,
     after: impl Fn(&S, bool),
 ) -> Report {
+    let began = Instant::now();
+    let mut fingerprint = Fingerprint::new();
     let mut prefix: Vec<Choice> = Vec::new();
     let mut executions = 0;
     let mut forks = 0;
@@ -387,6 +412,7 @@ pub(crate) fn explore<S: Sync>(
                 killed: std::vec![false; threads],
                 prefix: prefix.clone(),
                 trail: Vec::new(),
+                fingerprint: Fingerprint::new(),
                 preemptions: 0,
                 steps: 0,
                 forked: false,
@@ -418,6 +444,9 @@ pub(crate) fn explore<S: Sync>(
         if state.forked {
             forks += 1;
         }
+        fingerprint.mix(state.fingerprint.0);
+        fingerprint.mix(u64::from(state.forked));
+        fingerprint.mix(state.steps as u64);
         let checked = panic::catch_unwind(AssertUnwindSafe(|| after(&world, state.forked)));
         if let Err(payload) = checked {
             std::eprintln!(
@@ -430,10 +459,12 @@ pub(crate) fn explore<S: Sync>(
         loop {
             match next.last_mut() {
                 None => {
+                    fingerprint::log(began, executions, fingerprint);
                     return Report {
                         executions,
                         forks,
                         complete: true,
+                        fingerprint,
                     };
                 }
                 Some(choice) if choice.taken + 1 < choice.count => {
@@ -447,10 +478,12 @@ pub(crate) fn explore<S: Sync>(
         }
         prefix = next;
         if executions >= bounds.max_executions {
+            fingerprint::log(began, executions, fingerprint);
             return Report {
                 executions,
                 forks,
                 complete: false,
+                fingerprint,
             };
         }
     }
