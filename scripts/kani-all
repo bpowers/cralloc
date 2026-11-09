@@ -40,7 +40,7 @@ shared="${parent%.slice}-kani$$.slice"
 if systemctl --user set-property --runtime "$shared" \
      MemoryMax="${KANI_ALL_MEM:-12G}" MemorySwapMax=0 2>/dev/null; then
   export CRALLOC_HEAVY_SLICE="$shared"
-  trap 'systemctl --user revert "$shared" 2>/dev/null || true' EXIT
+  trap 'systemctl --user stop "$shared" 2>/dev/null; systemctl --user revert "$shared" 2>/dev/null || true' EXIT
 else
   jobs=1
 fi
