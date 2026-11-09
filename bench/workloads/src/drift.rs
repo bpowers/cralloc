@@ -58,8 +58,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{Barrier, Mutex};
 use std::time::{Duration, Instant};
 
-/// A cache slot packs a block's address (8-aligned, below 2^47) and its size in units.
-const ADDR_BITS: u32 = 44;
+/// A cache slot packs a block's address (8-aligned, below 2^47 on x86-64 and 2^48 on aarch64,
+/// where a process's mappings start just under the top) and its size in units.
+const ADDR_BITS: u32 = if cfg!(target_arch = "aarch64") { 45 } else { 44 };
 const SIZE_BITS: u32 = 64 - ADDR_BITS;
 /// Bytes a thread's count of a cache's live bytes may drift from the shared count before it
 /// is added in: the budget holds to within this times the threads.
