@@ -7,8 +7,8 @@ The trait's contract (`core::alloc::Allocator`): a block passed in is *currently
 by this allocator and the layout passed with it *fits* it: the same alignment it was
 allocated with, and a size from the one asked for up to the length `allocate` returned. Here
 that length is the usable size (`Heap::usable_size`: the class size for a small block, the
-size asked for rounded up to a page for a large one). A zero-size layout gets a dangling
-pointer and no block (`dangling`), so a zero-size "block" is never passed on.
+size asked for carried to the end of the page it ends in for a large one). A zero-size layout gets
+a dangling pointer and no block (`dangling`), so a zero-size "block" is never passed on.
 
 ## ALLOCATOR-01: `self.dealloc(ptr.as_ptr(), layout)` in `deallocate`
 
@@ -48,4 +48,4 @@ gives the old block up.
 - `new` not empty: `shrink_block`'s contract is `Allocator::shrink`'s with `new` not empty,
   which the branch has just checked.
 
-Reviewed: a09c36e
+Reviewed: 0a92f0b

@@ -885,8 +885,13 @@ fn splitmix(state: &AtomicU64) -> u64 {
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
 //   construction except the formatting of a panic message.
 unsafe impl<S: Shape> Os for SimOs<S> {
+    type Found = ();
+
     #[inline(always)]
-    fn geometry() -> Geometry {
+    fn found() {}
+
+    #[inline(always)]
+    fn geometry_of((): ()) -> Geometry {
         S::GEOMETRY
     }
 

@@ -31,5 +31,9 @@ Then run the portable tools, which find the CPUs and PMU from sysfs:
 - **`membarrier` in a VM:** 49 ms in a microVM on a busy host, against 6.3 us on this one, and a drain
   waits for it. Does a cloud instance with dedicated vCPUs see this?
 - **The timer:** the rounding that keeps an interval near a second is computed for a rate near 1 GHz.
+- **SVE across a system call.** The M1 has no SVE, so nothing has run with SVE state live. `syscall`
+  declares what the kernel discards (`docs/safety/cralloc/os/linux/syscall-safety.md`, item 3), and
+  only the compiler's output says that this is enough. Build for `neoverse-v2` and run the gate, then
+  write a test that keeps a predicate and a long vector live across a call.
 - **Memory order:** the ordering tests on another core (`scripts/measure --both-l3`). A pass here says
   little on V2, so this is worth doing even though the arguments rest on Arm's model.

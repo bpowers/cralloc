@@ -1,7 +1,7 @@
 # Safety ledger: `crates/cralloc/src/os/linux/syscall.rs`
 
 The system-call instruction, the lasting exception CLAUDE.md allows to "all assembly comes from
-Lean", once for each architecture, and on aarch64 the reads of two registers Rust has no stable way
+Lean", once for each architecture, and on aarch64 the reads of three registers Rust has no stable way
 to name. Neither Kani nor Miri can execute them; the unit tests in the same file and in `kernel.rs`
 run them on the real kernel.
 
@@ -55,24 +55,19 @@ instruction, and the compiler's model of what it does.
 **Call numbers.** The constants in `nr` are the x86-64 numbers of
 `arch/x86/entry/syscalls/syscall_64.tbl`: `read` 0, `write` 1, `close` 3, `mmap` 9, `mprotect`
 10, `munmap` 11, `rt_sigaction` 13, `rt_sigprocmask` 14, `mincore` 27, `madvise` 28, `getpid`
-39, `gettid` 186, `futex` 202, `exit_group` 231, `tgkill` 234, `openat` 257, `getrandom` 318, `membarrier` 324. A wrong
-number would make a different call with the same arguments, so each is checked against the
-table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10),
-and its tests in `kernel.rs` read real files through them.
+39, `prctl` 157, `gettid` 186, `futex` 202, `exit_group` 231, `tgkill` 234, `openat` 257,
+`getrandom` 318, `membarrier` 324, and on musl `rseq` 334. A wrong number would make a different
+call with the same arguments, so each is checked against the table.
 
 **Machine checks** (of this entry and SYSCALL-02). `os::linux::syscall::tests::a_call_reaches_the_kernel` (getpid agrees with
 `std::process::id`) and `results_decode_errors`. Every `LinuxOs` test in `kernel.rs` goes
 through this block.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: accepted (register convention, clobbers,
-`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers). 2026-10-18,
-another: the sixteen call numbers against `asm/unistd_64.h`, and items 5 and 7 as they now
-read for `openat` and `read`.
-
 ## SYSCALL-02: the `svc #0` instruction in `syscall()`, on aarch64
 
 **Block.** `asm!("svc #0", in("x8") number, inlateout("x0") a0 => ret, in("x1") a1, in("x2") a2,
-in("x3") a3, in("x4") a4, in("x5") a5, options(nostack, preserves_flags))`.
+in("x3") a3, in("x4") a4, in("x5") a5, lateout("p0") _, ... lateout("p15") _, lateout("v0") _, ...
+lateout("v31") _, options(nostack, preserves_flags))`, in a function that is never inlined.
 
 **Preconditions.** As SYSCALL-01.
 
@@ -81,11 +76,22 @@ in("x3") a3, in("x4") a4, in("x5") a5, options(nostack, preserves_flags))`.
 1. *Register convention.* aarch64 Linux takes the number in `x8` and arguments in `x0` to `x5`, and
    returns the result in `x0` (`syscall(2)`, "Architecture calling conventions";
    `arch/arm64/kernel/syscall.c`, `el0_svc_common`). The operands name exactly those.
-2. *Clobbers.* The kernel restores every general-purpose register but `x0` from its saved frame
-   on the way back (`kernel_exit` in `arch/arm64/kernel/entry.S`), so none other is declared.
-3. *Flags.* The condition flags are in `SPSR_EL1`, saved at the exception and restored by `eret`, so
+2. *General-purpose registers.* The kernel restores every one but `x0` from its saved frame on the
+   way back (`kernel_exit` in `arch/arm64/kernel/entry.S`), so none other is declared.
+3. *SVE.* If the thread has used SVE, the kernel zeroes `P0` to `P15`, `FFR` and every bit of `Z0` to
+   `Z31` above the low 128 on the way in (`fpsimd_syscall_enter` in
+   `arch/arm64/kernel/entry-common.c`; `Documentation/arch/arm64/sve.rst`, "System call behaviour").
+   A build for Graviton or Grace has SVE, and a compiler with SVE keeps such state across a block
+   that does not declare it: given `+sve`, `resident`'s counting loop would form `ptrue p0.d` before
+   the call and load through it after, and read nothing. So the predicates are declared, and the
+   vectors through `v`, which covers more than is lost but is the only name a vector's top half has.
+   `FFR` is not: LLVM reserves it, keeps no value there and warns of a clobber that names it, and
+   nothing in the crate reads it. The declarations are the same with SVE or without. A function
+   that clobbers `v8` to `v15` saves their low halves, so this one is never inlined and that cost
+   stays with the call. The kernel also leaves streaming mode, in which no Rust code runs.
+4. *Flags.* The condition flags are in `SPSR_EL1`, saved at the exception and restored by `eret`, so
    `preserves_flags` holds.
-4. *Stack.* `svc` neither reads nor writes the user stack; the kernel runs on its own, and a signal
+5. *Stack.* `svc` neither reads nor writes the user stack; the kernel runs on its own, and a signal
    frame goes below `sp`, this architecture having no red zone. So `nostack` holds.
 
 **Call numbers.** The constants in the aarch64 `nr` are those of `/usr/include/asm-generic/unistd.h`:
@@ -94,21 +100,32 @@ in("x3") a3, in("x4") a4, in("x5") a5, options(nostack, preserves_flags))`.
 `mmap` 222 (`__NR3264_mmap`), `mprotect` 226, `mincore` 232, `madvise` 233, `getrandom` 278,
 `membarrier` 283, `rseq` 293.
 
-Nobody has reviewed this entry.
+No test here has a thread with SVE state, since the M1 has none. Item 3 rests on the kernel's source
+and on reading what the compiler emits for `+sve,+sve2`.
 
 ## SYSCALL-03: `mrs` of the timer's registers and the thread pointer, on aarch64
 
-**Blocks.** `generic_timer`, of `cntvct_el0` and `cntfrq_el0`, and `thread_register`, of
-`tpidr_el0`.
+**Blocks.** `timer_register`, of `cntvct_el0` for `timer_count` and `cntfrq_el0` for `timer_rate`,
+and `thread_register`, of `tpidr_el0`.
 
 **Proof.** Each writes the one output register the compiler chose and nothing else, touches no memory
-or stack and leaves the flags alone, as `options(nomem, nostack, preserves_flags)` says. The Linux
-kernel lets EL0 read all three on every aarch64 machine: it sets `CNTKCTL_EL1.EL0VCTEN` and `EL0PCTEN`
-(`arch_counter_set_user_access` in `drivers/clocksource/arm_arch_timer.c`), or traps and emulates the
-read where an erratum requires, and `tpidr_el0` is a register of the thread's own. The values are
-integers the callers only compute with: no promise rests on `ticks` (KERNEL-09), and the thread
-pointer is `thread_pointer`'s to return (RSEQ-01).
+or stack and leaves the flags alone, as `options(nomem, nostack, preserves_flags)` says.
 
-Nobody has reviewed this entry.
+`tpidr_el0` is a register of the thread's own, always readable from user mode. Linux opens the
+virtual counter by `CNTKCTL_EL1.EL0VCTEN` (`arch_counter_set_user_access` in
+`drivers/clocksource/arm_arch_timer.c`, `update_cntkctl_el1` in `arch/arm64/kernel/process.c`), and
+that bit opens `cntfrq_el0` too. It stays clear in two cases, and then both reads trap:
 
-Reviewed: 6439180
+- Where an erratum needs the counter read another way, the kernel emulates each read
+  (`cntvct_read_handler`, `cntfrq_read_handler` in `arch/arm64/kernel/traps.c`): the same one register
+  written, slowly.
+- A thread that asked for `PR_TSC_SIGSEGV`, as a record-and-replay tool does for its tracee, gets
+  SIGSEGV on the instruction, as on x86-64 (KERNEL-09). Unhandled, the process stops, which is no
+  memory-safety violation.
+
+The timer's two values are integers, and no promise rests on `ticks` (KERNEL-09). The thread pointer
+comes back typed as a pointer, as an `mmap` result does (SYSCALL-01, item 6): the address the C
+library set, of memory Rust never allocated. `front::area` offsets it to the area and makes the
+4-byte atomic access AREA-02 argues for.
+
+Reviewed: 0bc95dc

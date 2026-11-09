@@ -24,4 +24,4 @@ for v in "$@"; do
 done
 cd "$copy/bench"
 "$scripts/measure" --both-l3 target/runner/release/benchrun run --suite "${BENCH_SUITE:-full}" --only "$only" \
-  --allocators "${allocs%,}" --rounds "$rounds" --out "$out"
+  --allocators "${allocs%,}" --rounds "$rounds" --out "$out" ${BENCH_ARGS:-}

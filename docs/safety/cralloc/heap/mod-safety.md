@@ -34,25 +34,34 @@ One construction ships, and it discharges (B); the simulated heap's (`heap/sim.r
 scaffolding, outside the ledger.
 
 **The process's heap** (`unsafe { Bound::new(&HEAP, Real) }` in `global::process`).
-`Real::slabs()` is `front::SLABS`. `Real` is private to the crate, and `SLABS`'s type `Front`
-has no public field or method, so code outside the crate can neither run the routines nor reach
-the slab array to build a twin on it. Inside the crate, nothing writes `SLABS` except `Real`'s
-routines (and the generated C routines, which are the same routines on the same array and
-complete their misses through `c_alloc_small` and `c_free_small`, so through this `Bound`) and
-the slow paths and drain of a `Cache` made from a `Bound`. The only `Bound` with `Real` is
-`process()`'s, and its heap is always `HEAP`, the one `static` heap over Linux.
+`Real::slabs()` is the slab array in `front::SLABS`. `Real` is private to the crate. `SLABS` is
+public, hidden, so that the C routines `export_c_abi!` defines in another crate can name it, and
+its type `Front` has no public field or method, so code outside the crate can take its address
+and neither run the routines nor reach the slab array to build a twin on it. Inside the crate,
+nothing writes the slab array except `Real`'s routines (and the generated C routines, which are
+the same routines on the same array and complete their misses through `c_alloc_small` and
+`c_free_small`, so through this `Bound`) and the slow paths and drain of a `Cache` made from a
+`Bound`. What else `Front` holds, the masks and the C frees' mirror, is written by `publish_masks`
+and `c::mirror`, and is no slab word. The only `Bound` with `Real` is `process()`'s, and its heap
+is always `HEAP`, the one `static` heap over Linux.
 
-## HEAP-03: `write_bytes(0, n)` on a new block (`grant_small` here, `alloc_large` in `large.rs`)
+## HEAP-03: `write_bytes(0, n)` on a new block (`grant_small` here, `alloc_large_using` in `large.rs`)
 
 **Preconditions.** The `n` bytes at the pointer are valid for writes, and nothing else reads or
 writes them concurrently.
 
-**Proof.** The block was just handed to this thread by the heap and nobody else has it. For a
+**Proof.** The block was just handed to this thread by the heap and nobody else has it, and its
+last owner's accesses are ordered before this one's on every route a block takes from a free to
+an allocation, on a weakly ordered CPU too (`docs/research/memory-ordering.md`, "From a free to
+the next allocation"); the destinations of HEAP-04 and HEAP-07 rest on the same. For a
 small class `n` is at most the class size: the layout's size, or the class size itself. A
 small block is a whole slot of its class in carved, committed memory (the back end commits
 before it hands a slot out; magazines hold only slots that `fill` handed out). For a large slot
-`n` is the layout's size or `len`, both at most the class size, the slot's length. Runs are not
-written. The pointer carries the reservation's provenance (`Space::slot`).
+`n` is the size the block records, `used`, or its usable size, `len`, counted from where the block
+starts, or zero for a slot known to read as zero; both lie in the slot and are committed (L2 and
+L3 in `heap/large-safety.md`). Runs are not written. The pointer carries the reservation's
+provenance: the back end builds what it hands out from `Space::region`, and a pop takes it back
+from the address the slow path exposed (REAL-03).
 
 ## HEAP-11: the slow free after a push that missed (`free_small` here, `resize_small` in `resize.rs`)
 
@@ -97,8 +106,10 @@ which the caller owns and gives up.
 out, which the caller owns and gives up, described by `layout`: the layout it was allocated
 with, or one with the same alignment and a size between that one's and the length the heap
 returned. The class passed is the small class of `layout`: `SmallClass::of_nonzero_layout`
-in `dealloc`, `small(layout)` in `dealloc_other` (the same class function for a layout the
-inlined lookup turns away; `small` is `Class::of_layout` restricted to small classes). A
+in `dealloc`, `small_of_other(layout)` in `dealloc_other` (the same class function for a layout the
+inlined lookup turns away; `small` is `Class::of_layout` restricted to small classes, and
+`small_of_other` is `small` with a first look at the size, since rounding a size up to its alignment
+never takes one past the largest small class back under it). A
 block allocated with a layout of a small class is a slot of that layout's class, since the
 allocation took its class from the same function of the layout (`Bound::alloc`, `alloc_other`,
 `alloc_grant`). And every layout that describes the block has that same class: the fit rule,
@@ -108,4 +119,4 @@ and any size from the request's up to the class size has the class of the reques
 length the heap returns for a small block is its class size. So `object` is a block of
 `class`.
 
-Reviewed: a09c36e
+Reviewed: 0bc95dc

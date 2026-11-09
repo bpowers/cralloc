@@ -22,6 +22,7 @@ were read at tag v7.2.
 | The twins' field loads were acquire and their commits release (`front/twin.rs`), as a `mov` is, and an `ldr` or `str` is not | Every test on a simulated heap had a release/acquire chain through each slab word that the real routines lack, so no test could show a protocol leaning on one | The same blindness, no effect on the allocator |
 | The simulated fence of every CPU had no barrier (`os/sim`) | The parking protocol's fence was only a count under Miri | As above |
 | The C free reads the mirror's shift and base index in any order (`c/mirror.rs`) | A new shift with a zero base index gives `ptr >> shift` for an index. For a heap with base index under 4,096, that is in range and names another region's class: the block goes on the wrong class's magazine. It takes a heap that low, as a small reservation on a small address space may be, and a block freed from C during the first publish. Such a heap is no longer mirrored, so every mix on every target is out of range or right | Not reachable: the routine reads the shift first and the stores stay in order |
+| The sized free has no test for null, and with the base index old a null pointer's index was 0, region 0's entry (`c/mirror.rs`) | A `free_sized(NULL, n)` that read the words before the first publish and the byte after it, with `n` of region 0's class, put null on a magazine: the next `malloc` of the class returned null, or a launder aborted. Region `r` now has entry `r + 1`, and entry 0 is never written | The same, in one interleaving: the two loads before the other thread's stores, the third after |
 | `membarrier`'s shortcut (one user of the address space, or one CPU online) returns with no barrier (`kernel/sched/membarrier.c:357-359`) | A drain's re-read and its reads of what it took rest on the exited thread's full barrier at its decrement of `mm_users`, and on the caller's load of that count staying before them. Arm orders that if the kernel's return is a context synchronization event (`SCTLR_EL1.EOS`, `IFB-ob`), and the language does not. An acquire fence after the call settles it | Not reachable; no instruction emitted |
 | The clocked pass's start was a release compare-and-swap, the thread's look before it sleeps a sequentially consistent read (`back/purge.rs`) | In Rust's model the look could miss the start and the starter miss the thread's mark, and the thread would sleep out its half second. Arm's mapping orders it anyway: the `casl`, the `stlr` of the pass word and the `ldar` of the thread's word cannot pass each other. No block is at stake | No: the same instruction |
 
@@ -93,7 +94,7 @@ Each route keeps the block's bytes and the magazine's contents in one happens-be
 | A drain | The fence, to the drainer; then the depot's or a launder's release. Nothing reads a slot or link before the fence returns, because the exchange in step 2 can read a commit before the slots it covers are visible |
 | Launder, then fill | The launderer has the chain above; its atomic OR of the leaf word releases, and the fill's compare-and-swap acquires, through any other ORs of that word |
 | Large block, single slot | The holder's stores of the size word (release), the free's OR and the next claim's compare-and-swap |
-| Purge | The claim acquires the last owner's stores, `madvise` runs under the claim, and the release of the claim carries that to the next owner, who then reads zero |
+| Purge | The claim acquires the last owner's stores, `madvise` runs under the claim, and each word's atomic OR of the release carries that to the next owner, who then reads zero. The batch shares only the walk up the summary bits, which orders nothing a block needs: a fill's compare-and-swap of the leaf word is its acquire, however it was led there |
 | Run of regions | `free_run` purges and then gives each tag back by compare-and-swap; the next `claim_run`'s compare-and-swap acquires it |
 
 **A stale link is harmless and cannot be taken.** A pop that reads a head `(M, v)` acquires its
@@ -128,7 +129,7 @@ something we tested.
 | Magazine area's committed mark | `fetch_max` with release after `mprotect`; acquire load | See below |
 | Generation | Compare-and-swap; any reader that finds zero draws and tries it, and a compare-and-swap reads the latest | All threads agree on one value at once |
 | Masks and the region bytes the C routines read | Relaxed, value or zero | Any mix is safe: a zero sends the routine to its slow path, and a value is right |
-| Mirror's shift and base index | Base index, then the shift with release; the routine reads both plainly | See "What was wrong": any mix is out of range now |
+| Mirror's shift and base index | Base index, then the shift with release; the routine reads both plainly | See "What was wrong": for a block any mix is out of range now, and for null out of range or entry 0, which is never written |
 
 **The committed mark and a slab word read without protection.** A slow path reads a slab word to
 name what it will compare, and checks that the word names an admitted magazine, aborting if not. The
@@ -229,8 +230,9 @@ same in `mov`s), and these stand in for a proof:
   barrier between (see "The slots a routine wrote").
 - **The C entry points' loads are independent:** the shift, the base index, the region byte by
   address on those, then the mask and the hot word by address on the byte. x86-64 keeps these
-  loads in order and AArch64 does not, and nothing needs it. Any mix of the shift and base index is
-  out of range or right (`c/mirror.rs`). A region byte is zero or its class, which does not change
+  loads in order and AArch64 does not, and nothing needs it. For a block, any mix of the shift and
+  base index is out of range or right, and for the null a sized free may be given, out of range or
+  an entry that stays zero (`c/mirror.rs`). A region byte is zero or its class, which does not change
   while a block of the region lives, and a zero is position 0, whose mask is zero, so a miss. A mask
   is zero, a miss, or its one value, and it says nothing about any other word. The size tables are
   constants.

@@ -7,10 +7,15 @@ Kani does not cover these blocks. It does cover the address arithmetic they depe
 **The `Space` invariant.** The `plan.size()` bytes at `base` are one reservation that `os` (the
 value the `Space` borrows) returned and that has not been unmapped, and `base` is aligned to the
 plan's region size, which is the size the reservation got (regions shrink, keeping their number,
-when the OS refuses the largest). A `Space` stores the plan's region shift and rebuilds the plan
-as `Plan::new(O::GEOMETRY, shift)` (`Space::plan`); every plan it is built from is
-`O::GEOMETRY.plan(shift)`, which is that same value, so "the plan" below is one plan whichever
-way it is read.
+when the OS refuses the largest). A `Space` stores the plan's region shift and `O::found()`, read
+when the `Space` was made, and rebuilds the plan as `Plan::new(O::geometry_of(found), shift)`
+(`Space::plan`); every plan it is built from is `O::geometry().plan(shift)`, which is that same
+value, since `Os::geometry` is `geometry_of(found())` and the same at every call in a process, so
+"the plan" below is one plan whichever way it is read. `LinuxOs` keeps that promise with a constant
+on x86-64, where nothing is found, and on aarch64 with the page shift it publishes once by
+compare-and-swap (KERNEL-14). A thread that reads the word stale finds a shift of its own, loses the
+compare-and-swap and takes the first, so every `Space` of a process holds one answer, even where
+threads sit under different seccomp filters.
 
 Three places construct a `Space`:
 
@@ -47,7 +52,10 @@ made by the same `Os` value. None of the four changes contents in this process.
   page-aligned, so the start is page-aligned and the length is whole pages.
 
 The call goes to `self.os`, the value that made the reservation, which is live by the
-invariant. `check` calls `os.abort` on failure, which does not return.
+invariant. `check` calls `os.abort` on failure, which does not return. `advise_huge` makes no call
+for advice in favour of huge pages in a plan that uses none (`Geometry::huge_pages_usable`), where
+the range is only a region's unit and no huge page to the kernel; it says the OS agreed, which is
+safe since advice changes nothing a caller relies on.
 
 ## RESERVATION-02: `os.purge` in `Space::purge`
 
@@ -99,7 +107,12 @@ reservation. So every pointer is inside the reservation, at the place its name s
 the memory there may be read or written (committed, owned by the caller) is the obligation of
 whoever dereferences it, in their own ledger.
 
-**Machine checks.** The `Space` unit tests, natively and under Miri with strict provenance
+`metadata_at` is `metadata` plus a byte offset, as a raw pointer from `wrapping_byte_add` of the
+first block's address, so it too keeps the provenance and is safe to form whatever the offset.
+That the offset stays in the block is its caller's to show (BACK-HOST-01, point 1).
+
+**Machine checks.** The `Space` unit tests, natively and, all but
+`a_stale_count_costs_bounded_patience_and_then_halves`, under Miri with strict provenance
 (`scripts/miri`):
 
 - `commit_makes_memory_writable_and_purge_zeroes_it`;
@@ -115,4 +128,4 @@ whoever dereferences it, in their own ledger.
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 
-Reviewed: a09c36e
+Reviewed: 0bc95dc

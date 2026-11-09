@@ -78,7 +78,7 @@ Connect server holding 1M records.
 | Tail rule | Wandering peaks 1.23 to 1.14, troughs 4.29 to 3.27 | 1 to 1.5% on the job; huge pages at peaks 1.7 to about 0.7 GiB |
 | A 32 MiB floor | Fewer `madvise` calls and refaults: with the rule that a silence ages no frontier, the log store's first 5 ms of a burst 370 to 25 faults, its remaining cost the idle drains | 33 MiB kept after a peak |
 | Magazines of 64 KiB, not 128 | Mixed pipeline's peak 7.07 to 5.12 MiB | +5.1% on that job, nothing resolved elsewhere |
-| Background thread, on by default | Memory returns in a silence; requests take no clocked, hold or growth steps | 35 us a wake-up; 9.8 s of CPU in 10.6 hours of Qdrant |
+| Background thread, on by default | Memory returns in a silence; requests take no clocked or hold steps, and growth steps only when growth outruns it | 35 us a wake-up; 9.8 s of CPU in 10.6 hours of Qdrant |
 
 ## What resident memory is made of
 
@@ -523,14 +523,71 @@ does under glibc.
 A request that returns memory makes every request queued behind it wait: at 25k requests a second on
 a worker, a millisecond once a second is the p99.9.
 
-**Every step on a request's path is bounded, whatever the unit.** A large slot used to be one unit.
-A step now returns at most 0.5 MiB (a hold's look 2 MiB), a large slot going back in pieces from its
-top, whole huge pages in a class of a huge page or more. DataFusion, five rounds, 2026-10-21:
-longest heartbeat 0.98 to 3.0 ms becomes 0.29 to 0.51, longest growth payment 1.5 to 3.4 ms becomes
-0.38 to 1.6, peak 842 to 864 MiB becomes 863 to 870 (jemalloc 851 to 883). The bound on growth is
-what costs the peak: left for the next carve, peaks reach 870 to 940; owed and paid by heartbeats,
-863 to 870. A hold look of 0.5 MiB let two runs in six over jemalloc, so it stays at 2 MiB. One to
-five steps a run still pass 0.25 ms, nearly all growth payments reading up to 16,384 bitmap words.
+**A step on a request's path returns a bounded amount, unless its unit is a whole huge page.** A
+large slot used to be one unit. A step now returns at most 0.5 MiB (a hold's look 2 MiB), a large
+slot going back in pieces from its top, whole huge pages in a class of a huge page or more.
+DataFusion, five rounds, 2026-10-21: longest heartbeat 0.98 to 3.0 ms becomes 0.29 to 0.51, longest
+growth payment 1.5 to 3.4 ms becomes 0.38 to 1.6, peak 842 to 864 MiB becomes 863 to 870 (jemalloc
+851 to 883). The bound on growth is what costs the peak: left for the next carve, peaks reach 870 to
+940; owed and paid by heartbeats, 863 to 870. A hold look of 0.5 MiB let two runs in six over
+jemalloc, so it stays at 2 MiB. One to five steps a run still pass 0.25 ms, nearly all growth
+payments reading up to 16,384 bitmap words.
+
+**At 32 MiB, a step that reaches a wholly free huge page takes about 100 us or more for slots of 64
+bytes and under.** A huge page goes back whole, so the step claims and releases every leaf word under
+it, at 10.5 ns a word against about 9 us for the `madvise`:
+
+| Slot | Leaf words | A step, no thread | Slowest request, no thread | Thread, clocked | Thread, growth outruns it |
+|---:|---:|---:|---:|---:|---:|
+| 8 bytes | 65,536 | 700 us (683 to 1,054) | 1.06 to 1.31 ms | 8 to 19 us | 0.81 to 1.06 ms |
+| 16 bytes | 32,768 | 354 us (346 to 704) | 0.73 to 0.74 ms | 7 to 14 us | under 5 us |
+| 64 bytes | 8,192 | 96 us (94 to 132) | 0.41 to 0.45 ms | 7 to 14 us | 100 to 127 us |
+| 1 KiB | 512 | 15 us (15 to 25) | 58 to 191 us | 6 to 7 us | under 5 us |
+
+*2026-11-08 at `dae32d5`, 16 KiB pages, CPU 8, `rules step`: 641 MiB carved and freed, then requests
+in another class, each timed, with what the thread spent off its CPU set aside; requests alone reach 11
+to 31 us. Median and 10th to 90th percentile of 39 clocked steps over 3 runs, a step being a request
+in which resident memory fell by one huge page. A run counts only with the class wholly on huge pages,
+13 of 13 by `smaps`, and the others were thrown away. A growth payment's median and a `maintain_step`'s
+are within 4%, and a session on a busier machine read 5 to 10% higher throughout. The last column's growers
+write nothing or carve 64 MiB at a time, and at 16 bytes and 1 KiB only one that writes was run.
+`strace` shows 13 `madvise` of 32 MiB, all on the request's thread with no background thread, and all on
+the background thread when it runs the clocked pass.*
+
+- **The time is the words, and batching took most of it.** Interleaved against each word clearing its
+  own summary bit and walking up on its own to release, a word falls from 38.8 to 10.5 ns: 2.55 ms to
+  700 us at 8 bytes, 1.28 ms to 354 us at 16, 327 to 96 us at 64, 28 to 15 us at 1 KiB. The claim is
+  about half of what is left, the release a quarter, and two looks the rest.
+- **A fill does not wait for it.** A purge clears its words' summary bits a group at a time before it
+  returns the pages, so a fill with nothing else free takes 42 ns once the purge holds them and under 5
+  us while it claims them. Rejected: leaving the bits set, as a large class's claim does, at 9.5 ns a
+  word. A fill then clears one stale bit, walks every group and goes back to the top for the next word,
+  for as long as the purge holds: 3.9 ms at 8,192 words and 229 ms at 65,536, if the purge stays. That
+  is a wait, however cheap it makes the step (`what_a_fill_takes_beside_a_purge`, three runs).
+- **It comes in bursts.** One request for each huge page, on successive heartbeats. Growth does not
+  wait for the frontier: its payment takes a huge page at once.
+- **One request can take more than a step.** A carve's payment and its heartbeat's step can make two,
+  and `top_up` runs in the same step as the huge page it fills.
+- **The thread takes the clocked pass off requests, but not growth that outruns it.** Past 16 MiB
+  unpaid a grower pays, and at 8 bytes a thread's step pays 2 MiB of debt in 0.7 ms. A grower at 7.6 MiB a
+  ms (8 KiB blocks, written, nothing else) took 0 to 2 such steps a run at 8 bytes. One that writes
+  nothing, or carves 64 MiB at a time, took 6 or 7. Crediting a payment with the 32 MiB it returned
+  changed neither, so it is not built.
+- **A shortage of free blocks moves cost to the kernel.** A class carved past the free blocks is mapped
+  by small pages at its top, which the walk reaches first. There a unit is a `madvise` of 2,048 pages,
+  180 to 750 us more: 1.45 ms at 8 bytes, 1.09 ms at 16, 272 us at 64 and 426 at 1 KiB, the process
+  forbidden huge pages, three runs. Mapped whole, some calls still take 125 to 430 us, from one step in
+  three at 8 bytes to one in forty at 1 KiB, not traced further.
+- **Payments over small pages come near 100 us too.** At 128 pages a payment takes 65 to 131 us at 8
+  bytes, and under 65 at 64.
+- **At 2 MiB** the same arithmetic gives 52 us for 8-byte slots on this core, **computed**. Zen 5 has
+  not been measured ([docs/todo/for_x86-64.md](../todo/for_x86-64.md)).
+
+So where there is no thread, slots of 8 to 56 bytes stay over 100 us on a request's path, by that rate
+(107 us at 56), and 64-byte slots sit at it. Passing their huge pages on a request, as a split of 32
+MiB is passed, would hold the bound, but those huge pages would then stay resident until `collect`: 641
+MiB of 8-byte slots would end at about 459 MiB, not 43. Not built, since returning the memory matters
+more than a pause only a shrinking heap of tiny objects pays.
 
 **While the thread runs, the clocked, hold and growth steps are its work.** A slow path records what
 is due and wakes it if it sleeps. What a request still returns is what its own call decides: the
@@ -605,6 +662,63 @@ Rejected: `MADV_COLLAPSE` at the switch, which at 16 MiB buys 3% on BTreeMap and
 to 0.4 ms of synchronous work per 2 MiB in a slow path, and adds nothing at a lower threshold.
 Populate-ahead: faults cut three to five times, kernel time by at most a tenth, about 1 MiB at every
 peak.
+
+**On 32 MiB huge pages the threshold stays at 8 huge pages, 256 MiB, and not because it counts huge
+pages.** Fewer buy about 1% where they buy anything, and the worst case costs them far more. Every value
+from one binary, switched at run time, so that placement cancels (`bench/roofline/aarch64/hopjob`,
+variant `hugen`, which does not ship), interleaved, on an M1 Max with 16 KiB pages, at `e779fa0`,
+2026-11-08. Change in cycles from 8, and the second allocator at 8 as the control, 7 rounds, 15 on JSON, 3
+on the programs and 2 on the servers, at 70% of what this machine saturates at:
+
+| Job | 1 | 2 | 4 | Control | Peak at 1, 2, 4, 8, MiB |
+|---|---:|---:|---:|---:|---|
+| Tree, depth 20 | −0.68% | 0.00% | +0.04% | −0.05% | 65, 52, 52, 52 |
+| JSON, 32 MiB | −0.27% | −0.56% | −0.59% | +0.46% | 382 at each |
+| B-tree map, 1 M | +0.13% | +0.73% | +0.29% | −0.04% | 146, 126, 126, 126 |
+| Hash map, 1 M | +0.15% | +0.29% | −0.13% | +0.30% | 208 at each |
+| Churn, 100 k live, mixed | −0.36% | −0.08% | +0.19% | +0.20% | 54 at each |
+| Churn, 1 M live | +0.27% | +0.98% | +0.36% | +0.40% | 111 at each |
+| Churn, 10 M live | −1.67% | −0.92% | −0.39% | −0.34% | 1,221, 1,157, 1,084, 1,063 |
+| boa, the V8 suite | −0.25% | −0.43% | −0.09% | | 309, 309, 309, 276 |
+| ruff, 4 threads | +0.09% | +0.09% | +0.09% | | 66, 65, 66, 62 |
+| DataFusion, TPC-H at 3 | −0.09% | −0.14% | +0.01% | | 940, 942, 941, 942 |
+| miniredis, 2 GiB heap | −0.04% | −0.23% | −0.29% | | 2,062, 2,045, 2,045, 2,044 |
+| miniredis, 4 GiB heap | +0.17% | +0.22% | +0.50% | | 4,147, 4,090, 4,047, 4,046 |
+
+Those are with the huge pages in hand: JSON held 256 MiB of them at 1 and 32 at 8. Its kernel time halves,
+0.34 to 0.17 cycles a byte, and its own code gives back half of that. Churn at 10 M live has the most
+to gain, with 736 MiB of them: its fill falls from 15.5 cycles an object to 11.8, and its steady state
+1.7%. One build for each value read JSON as −2.3%, which was where its code landed. The servers' 99th
+percentile is 2.2 to 2.4 ms at every value, with deep idle off.
+
+**The worst case on purpose:** 24 dense classes, each holding just past a threshold, where its first huge
+page is up to half of what it holds. Peak in MiB, with huge pages free:
+
+| Each class holds | In objects | 1 | 2 | 4 | 8 | mimalloc | jemalloc |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 33 MiB | 792 | 1,489 | 794 | 794 | 794 | 930 | 828 |
+| 65 MiB | 1,560 | 2,257 | 2,257 | 1,562 | 1,562 | 1,794 | 1,628 |
+| 129 MiB | 3,096 | 3,533 | 3,707 | 3,793 | 3,098 | 3,522 | 3,229 |
+| 257 MiB | 6,168 | 6,865 | 6,865 | 6,865 | 6,865 | 7,012 | 6,431 |
+
+Each value's worst is the same 695 MiB, so the share falls as the threshold rises: +87% at 1, +44% at 2,
++22% at 4 and +11% at 8, against the leanest incumbent +80%, +39%, +17% and +7%. That last is the eighth
+of a class the constant allows, and 8 is the only value that stays near the goal on memory on a heap of
+gigabytes. A real program pays much less: the most here is 158 MiB at 1, on churn at 10 M live.
+
+**A shortage does not change the answer, and it adds to it.** With the free blocks used up first
+(`hopjob/fragment.c`), each allocation and first write of 1 KiB blocks, three runs at each value:
+
+| Class carved to | 1 | 2 | 4 | 8 |
+|---:|---:|---:|---:|---:|
+| 128 MiB, slowest request of each run | 2.6 to 4.1 ms | 0.38 to 3.1 ms | 0.38 to 0.92 ms | 44 to 178 us |
+| 128 MiB, ns a request over all | 139 to 157 | 123 to 164 | 143 to 149 | 131 to 141 |
+| 384 MiB, slowest request of each run | 0.64 to 3.3 ms | 0.88 to 40 ms | 1.7 to 3.5 ms | 0.38 to 41 ms |
+| 384 MiB, ns a request over all | 111 to 127 | 116 to 244 | 123 to 153 | 129 to 249 |
+
+A class past 256 MiB meets a stall at any value. A class under it meets one only at the lower values, once
+for each huge page on the way, at most seven more a class in a process's life. With blocks free the same
+growth costs 111, 110, 115 and 129 ns a request at 384 MiB: 15% off a phase of growth, and nothing after it.
 
 ## The rules are bytes, on a kernel of any page
 

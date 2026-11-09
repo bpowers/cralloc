@@ -368,6 +368,21 @@ The placement sweep and the run-time switch are under the first trap. Beside the
   glibc's rseq registration fails; a valgrind with `aspacem_maxAddr` raised and a preloaded
   constructor that writes 0 into `cpu_id` fix both. Do not sample on instructions: 25% of one
   profile piled onto the instruction after a locked one.
+- **Exact instruction counts on aarch64, by stepping:** `bench/tools/stepcount.c` single-steps one
+  thread of a running program, and `stepsum.py` sums what it ran by function or inline chain. Step to
+  learn how many instructions a path runs and where, and sample for cycles, of which stepping knows
+  nothing. Sampling on instructions misreads a function here by up to three times: `slot_in` read 6.3%
+  of `largepair` for 2.1%. A step costs 9 to 25 us, so 5 million instructions, about 3,500 large
+  allocations and frees, take one to two minutes; it wants no quiet machine, only `scripts/heavy` and
+  `scripts/memlimit`. A ptrace stop counts as a preemption, which would abort a sequence at its next
+  instruction, so the tool clears the thread's `rseq_cs` at each stop. That is sound only if nothing a
+  sequence guards can change under it. So the thread must be pinned, which the tool checks, and alone
+  on its CPU, and it must reach a slow path at least every 50,000 steps or so, an interval at this
+  rate, or another thread's idle check may drain its slab with no abort to stop the sequence. The
+  program is killed at the end, so nothing outlives a run. A stepped thread runs over 100,000 times
+  slower against the clock, so it meets chores the clock drives far more often: in `largepair` they
+  added about 100 instructions to the 1,780 a pair the hardware counter reads. Do not read those rows
+  directly; take them as what the counter's total leaves.
 - **Lining up requests with the CPUs:** `perf record -e dummy --switch-events -k mono` takes no
   hardware counter and costs nothing measurable; idle counters from sysfs every 5 ms; all on
   `CLOCK_MONOTONIC`.

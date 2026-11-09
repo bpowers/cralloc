@@ -90,7 +90,8 @@ Whether real jobs feel the hop, `aarch64/hopjob/`. `variant.py` rewrites the inl
 chain, so that the two are one placement and their difference is what the hop alone costs, `kept`
 keeps the slab's address in `x18` at the sites whose class the compiler knows, `area` reads the rseq
 area in a block the compiler may hoist, `relaxed` sizes what the bitmap words' order costs one thread,
-and `nostretch` takes away the dense launder and fill. All of it happens in a scratch copy of the
+`nostretch` takes away the dense launder and fill, and `hugen` reads the huge-page threshold from
+`CRALLOC_HUGE_N`, each value an allocator of the copy by its `env`, read back by `hugen.py`. All of it happens in a scratch copy of the
 repository, so the checkout stays as it is. COPY belongs on a disk, such as `target/hop` of the
 checkout: `/tmp` here is memory, and each build is a gigabyte:
 
@@ -104,6 +105,8 @@ cd aarch64/hopjob
 ./analyze.py OUT.jsonl --calls 'tree depth=20=2,json 32Mi=0.224'    # calls per unit of the metric
 ```
 
+`classes/` is the threshold's worst case for memory, and `fragment.c` uses up the free huge pages for what
+a shortage costs, one trial at a time under `scripts/measure --both-l3`, since it takes them from everyone.
 `stale/probe.so` counts allocator calls for `--calls`. `count.py COPY` adds counters to a copy, for what
 a job asks of the slow paths: each class's exchanges, its laundered objects and how they lie, its
 fills.

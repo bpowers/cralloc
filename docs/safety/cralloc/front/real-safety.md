@@ -23,13 +23,19 @@ below are those sections, discharged once here for every call in the file.
   keep this at all times.
 - For `slab_stack_push`: the magazine is the caller's and its address a non-zero multiple of 8.
 
+One more that no section names, since it outlives the call: a routine leaves `rseq_cs` naming its
+descriptor, the kernel reads that at the thread's next preemption, and the process dies if the
+descriptor has been unmapped. So code that holds a routine stays mapped: the preload library is linked
+`-z nodelete`, anyone else who builds the crate into a shared object must do the same (`docs/design.md`,
+"Unloading"), and a musl build is an executable.
+
 **Why they hold.**
 
 - (R): glibc 2.35 and later set `__rseq_offset` before any user code runs, for every thread,
   whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "glibc"); an
   unregistered thread reads `cpu_id = -2`, which the routines' unsigned compare sends to the
-  miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl the word and the area
-  are the crate's own (FRONT-01, `front/area-safety.md`): each thread's area reads -1 until
+  miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl the area, and on x86-64
+  the word, are the crate's own (FRONT-01, `front/area-safety.md`): each thread's area reads -1 until
   `cpu` registers it (AREA-04), and -2 if refused or retired, both of which the unsigned compare
   sends to the miss path. A registration made during a routine breaks "for the whole call": a
   signal handler that allocates for the first time on a thread at -1, between a routine's arming
@@ -40,8 +46,9 @@ below are those sections, discharged once here for every call in the file.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
   `SLABS`'s first slab plus `Field::hot(class).offset()` (formed as a pointer offset, then taken
   as an address), which is 8 times the class's word
-  position, `4 c + 3` for class index `c`: bytes 24 to 31 of chunk `c`, below 184
-  (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
+  position, `4 c + 3` for class index `c`: bytes 24 to 31 of chunk `c`, below the slab's pointer
+  fields' end, 184 on x86-64 and 192 on aarch64's longer lines (`front/slab.rs`, with compile-time
+  assertions), so a word of slab 0 below the
   specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
 - (C): the mask is `SmallClass::mask`, the entry of the class lookup's mask table
@@ -116,8 +123,8 @@ The slow paths that write a slab array all hold the one depot and space that arr
 with (`Cache::new`'s contract, CACHE-01 in `depot/mod-safety.md`), so every magazine a slab
 word or link names is in that space's area, and admitted by that depot's committed mark.
 
-A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
-page, aligned to its size and inside the committed bytes (`depot::verify::
+A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the area's first
+unit, aligned to its size and inside the committed bytes (`depot::verify::
 an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to
 the region size (`Plan::magazines_offset`), which `Geometry::try_new` requires to be at least
 the largest magazine at every region size the geometry allows, so an aligned offset is an
@@ -157,10 +164,10 @@ and the assembly's are the same memory.
 
 **Provenance.** The routines take and return addresses as integers. `push` exposes the object's
 provenance; `pop` takes the exposed provenance back. Every object address lies in the heap's
-reservation, whose provenance the heap exposes when it starts (`Heap::start`), and objects that
+reservation, whose provenance every slow path exposes (`exposed` in `heap/mod.rs`), and objects that
 enter magazines through the slow paths come from that reservation. Words that are not objects
 (slab words, stack heads) are turned back into references only through the magazine area
 (`Area::magazine`), so the pointers built for them with `without_provenance_mut` are never
 dereferenced.
 
-Reviewed: 602428b
+Reviewed: 0bc95dc

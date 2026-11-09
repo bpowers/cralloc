@@ -434,10 +434,8 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId, floor: u32) -> (usize,
         return (0, words);
     };
     let until = first + count - 1;
-    for w in first / BITS..=until / BITS {
-        tree::release(host, region, w, bits_in_word(w, first, until));
-        words += 1;
-    }
+    release_range(host, region, first, until, first / BITS, until / BITS + 1);
+    words += (until / BITS + 1 - first / BITS) as usize;
     (layout.bytes_of(count), words)
 }
 
@@ -484,8 +482,21 @@ pub(crate) const fn extent_of(
     size: usize,
     huge: bool,
 ) -> u32 {
+    extent_past(layout, slot, layout.stagger(slot), unit, size, huge)
+}
+
+/// [`extent_of`] for a caller that has the slot's stagger, `layout.stagger(slot)`: a claim needs
+/// the extent of two tenants, and a stagger by pages divides.
+const fn extent_past(
+    layout: &Layout,
+    slot: u32,
+    stagger: usize,
+    unit: Unit,
+    size: usize,
+    huge: bool,
+) -> u32 {
     let page = layout.page_size();
-    let written = layout.slot_bytes(slot) + layout.stagger(slot) + size;
+    let written = layout.slot_bytes(slot) + stagger + size;
     let end = written.div_ceil(page);
     let end = if end > unit.end as usize {
         unit.end
@@ -659,12 +670,13 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32, into: usize)
 pub(crate) const fn keep_from(
     layout: &Layout,
     slot: u32,
+    stagger: usize,
     unit: Unit,
     size: usize,
     last: Recorded,
 ) -> u32 {
-    let new = extent_of(layout, slot, unit, size, last.huge);
-    let old = extent_of(layout, slot, unit, last.size, last.huge);
+    let new = extent_past(layout, slot, stagger, unit, size, last.huge);
+    let old = extent_past(layout, slot, stagger, unit, last.size, last.huge);
     if new > old { new } else { old }
 }
 
@@ -715,10 +727,11 @@ pub(crate) fn settle_slot<H: Host>(
     // each word held before this claim cleared any of it, clear those under the block, and find
     // the pages past what the claim keeps that are not clean. `keep` is at or past `end`, so
     // the bits cleared and the slack found never overlap.
-    let end = extent_of(layout, slot, unit, size, false);
+    let stagger = layout.stagger(slot);
+    let end = extent_past(layout, slot, stagger, unit, size, false);
     let first = layout.first_page(slot, unit, into);
     let keep = match last {
-        Some(last) => keep_from(layout, slot, unit, size, last),
+        Some(last) => keep_from(layout, slot, stagger, unit, size, last),
         None => unit.end,
     };
     let mut clean = 0usize;
@@ -974,12 +987,16 @@ pub(crate) fn purge_unit_as<H: Host>(
         }
     }
     let read = (high - low + 1) as usize;
+    let mut claims = tree::ExactRun::new();
     for w in low..=high {
-        if !tree::claim_exact(host, region, w, bits_in_word(w, first, last)) {
+        if !claims.claim(host, region, w, bits_in_word(w, first, last)) {
+            claims.finish(host);
             release_range(host, region, first, last, low, w);
             return (Purge::Busy, read);
         }
     }
+    // Before anything that can take long, so that no fill finds these words under set bits.
+    claims.finish(host);
     let outgrown = outgrown_dirty(host, region, unit, first, last);
     let page = layout.page_size();
     let (offset, len) = (
@@ -1148,9 +1165,11 @@ fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
 }
 
 /// Releases the bits of slots `first..=last` in leaf words `from..to`, which this thread
-/// claimed.
+/// claimed: one atomic OR a word, and one walk up the tree for words that share summary words.
 fn release_range<H: Host>(host: &H, region: RegionId, first: u32, last: u32, from: u32, to: u32) {
+    let mut release = tree::Release::new(host, region);
     for w in from..to {
-        tree::release(host, region, w, bits_in_word(w, first, last));
+        release.leaf(region, w, bits_in_word(w, first, last));
     }
+    release.finish();
 }

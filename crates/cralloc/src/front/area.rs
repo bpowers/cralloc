@@ -54,12 +54,13 @@
 //! - Destructors that run after ours, which in practice include Rust's thread-local
 //!   destructors, run without rseq, on the slow path: a thread that exits holding many blocks in
 //!   thread-locals frees them more slowly than on glibc.
-//! - A seccomp filter that fails `arch_prctl(ARCH_GET_FS)` leaves the thread at -1, so every
-//!   slow path tries again (one failed system call each); one that kills the process on
+//! - On x86-64, a seccomp filter that fails `arch_prctl(ARCH_GET_FS)` leaves the thread at -1, so
+//!   every slow path tries again (one failed system call each). One that kills the process on
 //!   `arch_prctl` or `rseq` kills it at the thread's first slow path.
 //! - The first registration of the process makes the key, and `pthread_key_create` takes musl's
 //!   key lock: a signal handler that allocates for the first time in the process while the same
-//!   thread holds that lock (inside `pthread_key_create` or `pthread_key_delete`) deadlocks.
+//!   thread holds that lock (inside `pthread_key_create`, or running destructors as it exits)
+//!   deadlocks.
 //!
 //! These are, with `__errno_location`, the crate's only calls into the C library; the ledger
 //! entry for the unsafe blocks here is `docs/safety/cralloc/front/area-safety.md`.

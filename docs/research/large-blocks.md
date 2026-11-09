@@ -5,8 +5,8 @@ pages decide faults and peak. The rules are in `docs/design.md`, "Large objects"
 memory and huge pages". The whole heap, and terms such as heartbeat, floor, cap and frontier, are in
 [memory.md](memory.md), and the jobs in [workloads.md](workloads.md). A *slot* is one block's place
 in a class's region, and to *claim* one is to take its bit in the bitmap. *Advice* is
-`MADV_HUGEPAGE`. Measured on one machine (Ryzen 9 9950X, Linux 7.2.9, transparent huge pages
-`madvise`), 2026-10-17 to 28.
+`MADV_HUGEPAGE`. Measured on a Ryzen 9 9950X (Linux 7.2.9, transparent huge pages `madvise`),
+2026-10-17 to 28, but for what a section says is the M1 Max's.
 
 ## The answer
 
@@ -31,6 +31,11 @@ in a class's region, and to *claim* one is to take its bit in the bitmap. *Advic
   with cycles inside the runs' spread. HashMap's peak is 204 MiB against jemalloc's 182 to 184.
   Blocks of 4 to 32 MiB under churn hold 1.53 times live against jemalloc's 1.28, which returns
   every free of 8 MiB or more at once.
+- **Past 32 KiB nothing is cached, and that is the kernel suite's two largest gaps on the M1 Max.**
+  `largepair` is 64 KiB against snmalloc's free list, and the large pipeline four times mimalloc's
+  instructions at half the Ryzen's clock. The port and some idle layers had added a sixth of the path,
+  now gone. Magazines of at least six objects would take 16% off the pipeline for up to 584 KiB a CPU,
+  and caching to 256 KiB would pass the incumbents on both, which the design stands against.
 - **The large-buffer cache has no one winner.** Geomean of its phases, the rules beat tcmalloc,
   mimalloc and glibc at every size. Against jemalloc they lose at 0.5 GiB (1.82 against 1.46), lead
   at 1 GiB on one phase (1.41 against 1.52), and tie at 2 and 5 GiB (1.27, 1.19).
@@ -386,23 +391,140 @@ peak; cralloc returns it, 3,008 faults and a quarter less user time.
 
 ## What one large allocation and free cost
 
-Alone, a 64 KiB and a 1 MiB block in a loop, per allocation and free (2026-10-19 at `bff181b` and
-after): 271 cycles, 1,290 instructions, 4 atomic instructions, 48 ns (tcmalloc 62, jemalloc 134,
-glibc 8 on its top-of-heap case). The floor for this design is about 140 cycles and 300
-instructions; about a thousand instructions of layering remain, left because the job leads every
-incumbent but glibc and the pipeline is not bound by instructions. Across two threads, a pipeline of
-4 to 256 KiB objects takes 656 cycles an allocation against tcmalloc's 402 to 459.
+**On the M1 Max a large block costs about 85 ns and 1,340 instructions an allocation and free, at any
+size from 40 KiB to 1 MiB, and the kernel suite's two largest gaps are that path against a cache. The
+machine does not charge more for it: the path takes about the cycles it took on the Ryzen. The port and
+some idle layers had added a sixth of them, and that is gone.** cralloc caches nothing past 32 KiB. By
+their sources snmalloc caches to 64 KiB per thread, tcmalloc to 256 KiB per CPU and mimalloc to 512 KiB
+per thread.
 
+| Alone, ns an allocation and free | 40 KiB | 64 KiB | 128 KiB | 256 KiB | 1 MiB | `largepair`: 64 KiB and 1 MiB |
+|---|---:|---:|---:|---:|---:|---:|
+| cralloc | 81.7 | 83.8 | 84.1 | 86.2 | 87.1 | 85.6 |
+| Before these fixes | 99.8 | 100.8 | 101.0 | 103.7 | 105.3 | 102.7 |
+| snmalloc | 4.9 | 5.6 | 30.5 | 44.0 | 96.6 | 51.1 |
+| tcmalloc, per CPU | 14.2 | 19.1 | 31.9 | 56.3 | 170 | 94.8 |
+| mimalloc | 19.0 | 19.0 | 19.0 | 19.0 | 183 | 113 (109 to 120) |
+
+*2026-11-08, `e926817` against `8e5acdf`, CPU 8, five interleaved rounds, medians, ranges under 1% but
+where stated. `largepair` with `sizes=`.*
+
+- **`largepair`'s gap is 64 KiB against a free list.** Of the 51.6 ns between cralloc and snmalloc
+  before the fixes, 64 KiB held 92% and 1 MiB 8%. At 1 MiB, where snmalloc has no such cache, cralloc
+  now leads everyone. The Ryzen's table could not show this, since its snmalloc was a Debug build
+  ([measuring.md](measuring.md), "An incumbent may not be what you think").
+- **In cycles it is the Ryzen's path.** There it took about 284 cycles (49.9 ns at 5.7 GHz, `c7f5c21`),
+  here 312 before the fixes and 260 after. The Ryzen's last count of its instructions is 1,290 at
+  `bff181b`, before the claim's trim and the free's stamp.
+- **What the port had added.** The page size is found at run time on aarch64, so each look at a plan
+  read it again: a relaxed load no compiler merges, a test for zero and a choice among three geometries.
+  Single-stepping put 256 of the path's 1,780 instructions there, where x86-64 folds them to a constant,
+  and a `Space` that keeps the page shift it read when it was made takes 12% off `largepair`. The timer's
+  rate was read at each clock read, and `cntfrq_el0` takes 8.5 cycles to `cntvct_el0`'s one: keeping the
+  shift takes 1% more. The page stagger stays, at about 4% (81.9 ns with the term compiled out).
+- **16 KiB pages cost nothing here.** The same binary under a 4 KiB kernel, by the clock, takes 90.8 ns
+  at 64 KiB against 88.8, 101.7 at 1 MiB against 92.3 and 155.7 at 4 MiB against 109.4, since a claim and
+  a free walk a slot's clean words, and a page of 16 KiB means a quarter of them (`muvm`, no PMU, a build
+  before the timer's shift, the fastest of six in each of two rounds; a third read 5% higher in the VM).
+- **Layers that did nothing:** a plan built for the layout's memo, which needs one only at a class's
+  first call; `place` out of line, with its plan written to memory a byte at a time; the class worked
+  out of a layout already known to be large; registers saved for a beat's chores on the calls that only
+  count; a slot's stagger worked out three times a claim.
+
+| `largepair`, exact instructions a pair | Before | Now |
+|---|---:|---:|
+| From the request to its class (`alloc_other`, `place`) | 222 | 131 |
+| The claim: layout, tree, clean words, frontier, size word | 684 | 576 |
+| The free: layout, slot, charge, stamp, release, tally | 668 | 460 |
+| The heartbeat's count, two calls | 104 | 65 |
+| Chores of the one call in sixteen that beats | 67 | 71 |
+| The job's own loop | 35 | 35 |
+
+*Single-stepped with ptrace, the thread's `rseq_cs` cleared at each stop so that no sequence aborts
+([measuring.md](measuring.md), "Exact instruction counts on aarch64"). A stepped thread meets the clock's
+chores far more often, so that row is what the hardware counter's total leaves. Sampling on instructions
+misattributes by up to three times at a function's level on this core: `slot_in` read 6.3% for 2.1%.*
+
+Of what is left the clean words take 279 and the walk up the summary levels 120. The floor for this
+design is about 300.
+
+**Over five placements** (2026-11-08, three rounds, mean over pads, with the range): `largepair` went
+from 103.3 (102.6 to 103.8) to 86.1 (85.7 to 86.7) ns and from 313 to 261 cycles; `pipeline t2 sizes=large`
+from 112.9 (112.7 to 113.2) to 104.9 (104.2 to 105.5). As controls the 64-byte pipeline went from 4.30 to
+4.25, overlapping, and `tree depth=18` from 28.81 to 28.53, the 1% the same loads cost its slow paths.
+
+**Relaxing the retained tallies buys nothing** (85.6 against 85.5 ns), though `ldaddal` repeats at 22
+cycles and `ldadd` at 7: at 60 cycles apart the repeat does not bind.
+
+### Across two threads
+
+**`pipeline t2 sizes=large` takes the cycles it took on the Ryzen, at half the clock, and mimalloc, which
+waits on memory, did not slow down. Lines do not separate them; four times the instructions do. Caching
+would close the gap, at a price in parked memory.** Over both threads cralloc took 684 cycles an object,
+700 to 711 on the Ryzen, so 113 ns against 60.6 is the clock's 1.88. mimalloc took about 475 cycles
+there and 276 here, 41.7 and 45.7 ns, at 1.6 instructions a cycle. L1 load and store misses an object are
+6.6 and 3.2 against mimalloc's 6.3 and 2.8, and its instructions 440 against 1,829. The allocating thread
+sets the pace: it spends 45% of its cycles on the large path, 25% on the job's own first write and random
+sizes, 19% on exchanges and 11% on chores, and the freeing thread spins 36% of its own.
+
+Half the job's objects are large, a quarter fall in classes of 12 to 32 KiB, whose magazines hold two
+objects, and the rest in deeper ones. Exact instructions an object, both threads, at `8e5acdf`: the job's
+own 173 (in mimalloc's 440 too), the large path 858, exchanges 471, chores 255. A magazine of two is
+worse than no cache by this count: 24 KiB alone takes 88 ns and 1,960 instructions, every second object
+paying an exchange and a beat on each thread, where 64 KiB takes 100 ns and 1,413. A magazine of six takes
+31 ns and 723.
+
+Each cause, one scratch build at a time. Single builds, five interleaved rounds, medians, ranges under 1%,
+so a difference under about 2% says nothing:
+
+| Against `e926817` | Pipeline, ns | `largepair`, ns | Instructions, pipeline | Job's peak, MiB |
+|---|---:|---:|---:|---:|
+| `8e5acdf` | 112.7 | 102.7 | 1,829 | 9.1 |
+| `e926817` | 104.4 | 85.5 | 1,568 | 8.8 |
+| No trim at the claim | 95.7 | | 1,484 | 9.0 |
+| Chores on one heartbeat in eight | 99.5 | | 1,430 | 9.5 |
+| No stamp at the free | 103.8 | 84.6 | 1,567 | 9.0 |
+| No page stagger | 103.6 | 81.9 | 1,554 | 8.8 |
+| Magazines of at least 8 slots, so six objects | 87.5 | 85.5 | 1,226 | 9.5 |
+| A magazine budget of 256 KiB in place of 64 | 81.3 | 85.5 | 1,085 | 11.4 |
+| At least 8 slots, and classes to 64 KiB | 72.7 | 44.8 | 1,100 | 10.7 |
+| At least 8 slots, and classes to 256 KiB | 39.8 | 44.1 | 796 | 12.1 |
+| mimalloc | 45.7 | 113 | 440 | 67 |
+| tcmalloc, per CPU | 60.3 | 94.8 | 844 | 12.8 |
+| snmalloc | 145 | 51.1 | 2,585 | 57 |
+
+*Peak is the process's high-water mark, which moves by up to 0.5 MiB between runs.*
+
+So of the 67 ns between cralloc and mimalloc before the fixes, the port's code and the layers held 8 ns,
+12%; magazines of two objects 17, 25%; and the uncached path past 32 KiB 48, 71%, with the trim's 9 in it.
+That passes the gap by 6 ns, since the cached build beats mimalloc.
+
+- **The trim** is one `madvise` to 13 large allocations here, of pages this job never wrote. It stays: on
+  the large-buffer cache's phase of these sizes it takes 2.14 times live to 1.32 ("Slack").
+- **The free's stamp** moves the size word's line a second time: 14% of the job at 64 KiB alone (86 ns
+  against 100), and under 1% in the mix, whose slots lie on more lines.
+- **Crossing threads adds about 50 ns to the allocating thread at 64 KiB:** one thread takes 84 ns for
+  both halves and the pipeline 100 for one, as the leaf word, the size word and the block's first line
+  each change hands twice an object. This is reasoned from those figures and from sampled misses, which
+  fall on those words and have a skid. On the Ryzen, taking the leaf's line exclusive first cost 16
+  cycles alone and gained nothing; separate lines for a large class's leaf bitmap, and tallies 128 bytes
+  apart, changed nothing.
 - **The retained count is two tallies that only grow, on lines of their own.** As one word its line
   went to the other thread twice per large object, and every heartbeat took it to see if a pass
   could start: 0.7 of the 0.9 lines an allocation saved. A heartbeat now reads the clock first and
   the tallies only when a pass is due.
-- **The floor across threads is the leaf word.** A slot freed on one thread and claimed on another
-  moves the leaf's line twice, about 100 cycles a move. Taking the line exclusive first cost 16
-  cycles alone and gained nothing; separate lines for a large class's leaf bitmap, and tallies 128
-  bytes apart, changed nothing. Going lower parks memory: magazines of 8 slots for the 12 to 32 KiB
-  classes take 530 cycles for up to 584 KiB more a CPU, and tcmalloc's figure needs large objects
-  batched per CPU. Not built.
+
+**What caching would cost, and why it is not built.** Magazines of at least 8 slots hold six objects where
+the classes of 12 to 32 KiB hold two: up to 584 KiB more a CPU, and up to twice that in a domain's stacks.
+Caching to 256 KiB is up to 8.7 MiB a CPU in loaded magazines and 17 MiB a domain in stacks, if every
+class is warm and every block written, against 2.8 and 5.6 for all the classes today. The design stands
+against the second: a large block's class comes from its address, because it may sit in a slot with room
+to grow, and a magazine's comes from the layout; a block in a magazine has no stagger, which keeps buffers
+written in turn apart; and the C routines' limit of 32 KiB and the slab's layout are in the Lean proofs. The
+scratch builds took those limits off for the Rust path alone, so they give what it would buy and show
+nothing about those costs. No profiled server makes such a flow. The floor of 8 slots needs one constant
+and is the one to try, after the server suite and the memory jobs, since the budget it passes was halved for
+memory ([memory.md](memory.md), "Magazine budget"). On the Ryzen it took this job from 656 cycles to 530.
 
 ## A doubling's tail is the purge that falls on it
 
@@ -438,3 +560,7 @@ glibc remaps large chunks and unmaps them at free.
   as the order service's 1.25 MiB table shards.
 - **The median of a doubling**, 2 to 4% over jemalloc, inside the run-to-run spread.
 - **Meilisearch while indexing** peaks over jemalloc ([memory.md](memory.md)), not attributed.
+- **Magazines of at least 8 slots on real programs.** Measured on the pipelines alone: neither the
+  servers nor the memory jobs have run them.
+- **The Ryzen at today's code.** Its instruction count and its gap to a Release snmalloc are not known;
+  nothing here could run it.

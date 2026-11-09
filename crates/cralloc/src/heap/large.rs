@@ -26,9 +26,9 @@
 //! zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that size rounded
-//! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
-//! been asked for.
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that
+//! size carried to the end of the page it ends in, so a block with headroom never reports, or
+//! makes anyone touch, the room it has not been asked for.
 
 use super::{Bound, Grant, Heap, Zero, small};
 use crate::back::Move;
@@ -114,6 +114,7 @@ pub(crate) const fn shrink_moves_below_for(len: usize, plan: Plan) -> usize {
 /// and the lines' room, or where that class's slots stagger by pages and the block with their room
 /// does not fit, the next one that does. That is the next class up, and never more: a class is at
 /// least 8/7 of the one below, and its pages' room at most an eighth of it (`policy::stagger_pages`).
+#[inline(always)]
 fn roomy_class(size: usize, mask: usize, plan: Plan) -> Option<Class> {
     let with_room = |room: usize| size.saturating_add(room).saturating_add(mask) & !mask;
     let class = Class::of_size(with_room(STAGGER_LINES))?;
@@ -169,6 +170,10 @@ enum Place {
 /// pages that changes nothing, every large class being a multiple of them; with larger pages the
 /// classes that are not (56 KiB on 16 KiB pages, 160 KiB on 64 KiB) are not used, which costs no
 /// memory, since a block's last page is resident whole either way.
+///
+/// Inlined into its one caller on the allocation path: out of line, its plan was written to memory
+/// a byte at a time on every large allocation.
+#[inline(always)]
 fn place(layout: Layout, plan: Plan) -> Place {
     let slot = |class: Option<Class>| class.filter(|&c| plan.fits_region(c));
     let align = layout.align().max(plan.geometry().page_size());
@@ -269,8 +274,9 @@ impl<O: Os> Heap<O> {
         }
     }
 
-    /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small
-    /// layout, else its whole slot or run. Aborts if no large block starts there.
+    /// The bytes the block at `ptr`, described by `layout`, may reach without moving: its class
+    /// for a small layout, else from where it starts to its slot's or run's end (`Back::room`).
+    /// Aborts if no large block starts there.
     fn block_len(&self, ptr: NonNull<u8>, layout: Layout) -> usize {
         if let Some(class) = small(layout) {
             return class.size();

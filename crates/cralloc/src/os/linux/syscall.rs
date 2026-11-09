@@ -1,4 +1,4 @@
-//! The one system-call instruction in the allocator, and on aarch64 the two registers the OS
+//! The one system-call instruction in the allocator, and on aarch64 the registers the OS
 //! interface reads, which Rust has no stable way to name.
 //!
 //! Every system call goes through [`syscall`]. Arguments and results travel as pointers, as in
@@ -114,18 +114,22 @@ pub(super) unsafe fn syscall(number: usize, args: [Reg; 6]) -> Reg {
 /// Makes system call `number` with six argument registers; the kernel ignores the ones a call
 /// does not take.
 ///
+/// Never inlined: naming the vectors makes the function that holds this block save `d8` to `d15`,
+/// a cost that belongs to a call about to enter the kernel and not to the slow path around it.
+///
 /// # Safety
 ///
 /// As for the x86-64 form.
 #[cfg(target_arch = "aarch64")]
-#[inline(always)]
+#[inline(never)]
 pub(super) unsafe fn syscall(number: usize, args: [Reg; 6]) -> Reg {
     let ret: Reg;
     // SAFETY: SYSCALL-02. this block is the system-call instruction and nothing else. The register
     // assignment is the aarch64 Linux convention (number in x8, arguments in x0 to x5, result in
-    // x0). The kernel restores every other register and the condition flags on the way back, and
-    // does not touch the user stack (`nostack`, `preserves_flags`). Memory is not declared
-    // untouched, as on x86-64.
+    // x0). The kernel restores every other general-purpose register and the condition flags on the
+    // way back, and does not touch the user stack (`nostack`, `preserves_flags`). In a thread that
+    // has used SVE it zeroes the predicates and all of each vector but its low half, and only `v`
+    // names a vector's top half. Memory is not declared untouched, as on x86-64.
     unsafe {
         asm!(
             "svc #0",
@@ -136,29 +140,54 @@ pub(super) unsafe fn syscall(number: usize, args: [Reg; 6]) -> Reg {
             in("x3") args[3],
             in("x4") args[4],
             in("x5") args[5],
+            lateout("p0") _, lateout("p1") _, lateout("p2") _, lateout("p3") _,
+            lateout("p4") _, lateout("p5") _, lateout("p6") _, lateout("p7") _,
+            lateout("p8") _, lateout("p9") _, lateout("p10") _, lateout("p11") _,
+            lateout("p12") _, lateout("p13") _, lateout("p14") _, lateout("p15") _,
+            lateout("v0") _, lateout("v1") _, lateout("v2") _, lateout("v3") _,
+            lateout("v4") _, lateout("v5") _, lateout("v6") _, lateout("v7") _,
+            lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
+            lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
+            lateout("v16") _, lateout("v17") _, lateout("v18") _, lateout("v19") _,
+            lateout("v20") _, lateout("v21") _, lateout("v22") _, lateout("v23") _,
+            lateout("v24") _, lateout("v25") _, lateout("v26") _, lateout("v27") _,
+            lateout("v28") _, lateout("v29") _, lateout("v30") _, lateout("v31") _,
             options(nostack, preserves_flags),
         );
     }
     ret
 }
 
-/// The generic timer's count and its rate in Hz (`cntvct_el0`, `cntfrq_el0`), which every
-/// aarch64 Linux lets a program read.
+/// The value of one of the generic timer's registers.
+#[cfg(target_arch = "aarch64")]
+macro_rules! timer_register {
+    ($name:literal) => {{
+        let value: u64;
+        // SAFETY: SYSCALL-03. A read of a register, which touches no memory, the stack or the flags.
+        unsafe {
+            asm!(
+                concat!("mrs {value}, ", $name),
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        value
+    }};
+}
+
+/// The generic timer's count (`cntvct_el0`), which every aarch64 Linux lets a program read, unless
+/// the program has asked otherwise (`PR_SET_TSC`).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-pub(super) fn generic_timer() -> (u64, u64) {
-    let (count, rate): (u64, u64);
-    // SAFETY: SYSCALL-03. Two reads of registers, which touch no memory, the stack or the flags.
-    unsafe {
-        asm!(
-            "mrs {count}, cntvct_el0",
-            "mrs {rate}, cntfrq_el0",
-            count = out(reg) count,
-            rate = out(reg) rate,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (count, rate)
+pub(super) fn timer_count() -> u64 {
+    timer_register!("cntvct_el0")
+}
+
+/// The generic timer's rate in Hz (`cntfrq_el0`), which is as readable as its count.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(super) fn timer_rate() -> u64 {
+    timer_register!("cntfrq_el0")
 }
 
 /// The calling thread's thread pointer (`tpidr_el0`).

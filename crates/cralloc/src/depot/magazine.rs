@@ -22,7 +22,7 @@ use super::Depot;
 use crate::classes::{MagazineSize, SLOT_BYTES};
 use crate::front::sync::AtomicPtr;
 use crate::os::Os;
-use crate::space::Space;
+use crate::space::{Plan, Space};
 use core::marker::PhantomData;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::{self, NonNull};
@@ -233,6 +233,14 @@ pub(super) const fn admits(
         && size.bytes() <= committed - offset
 }
 
+/// Where the magazine area of `plan` ends: its size, capped so that every offset in it has a
+/// 32-bit number. The last offset below `2^32` units has the number `u32::MAX`, so that is the
+/// cap, and it is a page boundary on every kernel, as a commit up to the end must be
+/// ([`Space::is_callable_range`]).
+fn area_end(plan: Plan) -> usize {
+    plan.magazine_area_size().min((1usize << 32) * UNIT)
+}
+
 /// The magazine area of a heap, with the depot's counters for it.
 pub(crate) struct Area<'a, O: Os> {
     space: Space<'a, O>,
@@ -257,13 +265,9 @@ impl<'a, O: Os> Area<'a, O> {
         UNIT
     }
 
-    /// The area's size in this reservation, capped so that every offset in it has a 32-bit
-    /// number.
+    /// Where the area ends in this reservation ([`area_end`]).
     fn end(&self) -> usize {
-        self.space
-            .plan()
-            .magazine_area_size()
-            .min(u32::MAX as usize * UNIT)
+        area_end(self.space.plan())
     }
 
     /// The pointer `offset` bytes into the area, with the reservation's provenance.
@@ -412,5 +416,32 @@ impl<'a, O: Os> Area<'a, O> {
             .created
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(magazine)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::space::Geometry;
+
+    /// The commit that reaches the end of the area asks for a whole number of pages, or
+    /// `Space::commit` aborts where the area's being used up should only cost a magazine. And
+    /// every offset below the end has a number, at the largest regions too.
+    #[test]
+    fn the_area_ends_on_a_page_and_every_offset_in_it_has_a_number() {
+        for geometry in [
+            Geometry::DESIGN,
+            Geometry::of_kernel(12),
+            Geometry::of_kernel(14),
+            Geometry::of_kernel(16),
+        ] {
+            for shift in geometry.min_region_shift()..=geometry.max_region_shift() {
+                let plan = geometry.plan(shift).unwrap();
+                let end = area_end(plan);
+                assert_eq!(end, plan.magazine_area_size());
+                assert!(end.is_multiple_of(geometry.page_size()), "{shift}");
+                assert!(u32::try_from((end - UNIT) / UNIT).is_ok(), "{shift}");
+            }
+        }
     }
 }

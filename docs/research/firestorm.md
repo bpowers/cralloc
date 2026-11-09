@@ -355,22 +355,10 @@ rounds at one placement: `vecgrow` of one 256 MiB vector 1.22 cycles an element 
 of 4 MiB 2.42 against 3.20, and a B-tree map 761 cycles an entry against 759. Neither depends on the rest
 of this section.
 
-**The huge-page switch counts huge pages, and they are 32 MiB here.** A class switches after 8, which is
-16 MiB on x86-64 and a 4 KiB kernel on aarch64, and 256 MiB on this 16 KiB kernel, so most classes here
-never switch. Switching after one, 32 MiB, on one placement and three rounds, with the peak from the
-kernel's high-water mark:
-
-| Job | Change | Peak, MiB |
-|---|---:|---|
-| JSON, 32 MiB | −2.3% | 382 and 382, 256 of it huge against 32 |
-| Tree, depth 20 | −1.0% | 52 to 65 |
-| B-tree map, 1 M | +0.2% | 126 to 146 |
-| Hash map, 1 M | +0.3% | 207 and 208 |
-| `vecgrow`, 256 MiB | −1.8%, its rounds spread 2.5% | 261 and 261 |
-
-The rule that set 8 was that the page above the watermark costs at most an eighth of the class, and at
-32 MiB that is what 8 gives, so it is not simply wrong here. Nothing was changed: it would suit this
-kernel only, and the machines this is for have 4 KiB pages.
+**The huge-page switch at 256 MiB stays.** A class switches after 8 huge pages, 16 MiB on x86-64 and 256
+MiB here, so that the page above its watermark is at most an eighth of it. Over one binary with the switch
+at run time, one page instead gives JSON 0.3%, a tree 0.7% and churn at 10 M live 1.7%, for peaks up to
+24% higher and up to 87% in the worst case ([memory.md](memory.md), "The huge-page threshold").
 
 ## How a load gets a value a store just wrote
 

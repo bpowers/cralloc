@@ -17,7 +17,9 @@ free(ptr);
 When the old block is large the two steps are one call, `process::move_large(old, to, n,
 why)`, which copies the same `n` bytes in pieces, returns the old block's pages behind the copy
 and frees it (BACK-CLASS-03 in `back/class-safety.md`); `why` says whether the block outgrew
-its slot, which decides only what becomes of the freed slot. Its contract is the preconditions below.
+its slot, which decides only what becomes of the freed slot. Its contract is the preconditions
+below. `to` may be a small block, when the new size has a small class: what the move purges of
+it is whole pages inside its first `n` bytes, which are this call's.
 
 **Preconditions.** `old` is readable for `n = kept.min(size)` bytes and `new` writable for
 `n`; the two ranges do not overlap; `free(ptr)`'s contract holds (a block of the heap that the
@@ -31,14 +33,15 @@ caller owns and gives up).
   the block is a whole slot of `class`, all of it the block's and committed. For
   `Found::Large { size: used }`, the block's usable size, `process::usable_size(old)`: `used`,
   the size the back end recorded when the block was last allocated or resized
-  (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`), rounded up to a page (or `used` itself
-  if no block were found, which cannot happen for the address `find` just found). It is
-  within the slot or run: `used` is (`Back::alloc` and `Back::resize_in_place` abort on a size larger
-  than the slot or run, and `alloc_run` records the size it was asked to hold), and the slot
-  or run is a whole number of pages (every class above the small ones is a quarter step of a
-  power of two of at least 32 KiB, so a multiple of 8 KiB; a run is whole regions), so
-  rounding `used` up to a page stays inside it. This is the same bound GLOBAL-03 relies on
-  for the length `Allocator` returns. All of the slot or run is
+  (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`), to the end of the page it ends in
+  (or `used` itself if no block were found, which cannot happen for the address `find` just
+  found). It is within the slot or run: the block's start in its slot, zero or the slot's
+  stagger, plus `used` is (`Back::alloc` takes the stagger only where that holds and aborts on a
+  size larger than the slot, `Back::resize_in_place` aborts on a size past the slot or run, and
+  `alloc_run` records the size it was asked to hold), and the slot or run is a whole number of
+  pages on every kernel (`heap::large::place` takes no class that is not, with a test on each page
+  size; a run is whole regions), so the end of that page stays inside it. This is the same bound
+  GLOBAL-03 relies on for the length `Allocator` returns. All of the slot or run is
   committed: a carve hands out a slot only after the pages up to the slot's end are writable
   (`back/region.rs`, `carve`), `alloc_run` commits the whole run before returning it, and
   nothing makes committed memory inaccessible again (a purge is `MADV_DONTNEED`, which keeps
@@ -121,11 +124,11 @@ whatever the outcome of a zero-size call.
   signature is the C declaration's, it keeps the C contract, and defining the symbol replaces
   no other definition the program relies on.
 
-**Proof.** Each exported function is `unsafe extern "C"` with the C signature (`size_t` is
-`usize`, `int` is `c_int`, `void *` is `*mut c_void`; rustc's
-`suspicious_runtime_symbol_definitions` lint checks `malloc` and friends against the signatures
-it expects), and its body passes its arguments to the function of the same name in
-`cralloc::c` unchanged. A C caller of `free(p)`, `realloc(p, n)`, `posix_memalign(&q, ..)` or
+**Proof.** Each exported function is `extern "C"`, `unsafe` where it takes a pointer, with the C
+signature (`size_t` is `usize`, `int` is `c_int`, `void *` is `*mut c_void`; rustc's
+`invalid_runtime_symbol_definitions` lint, an error by default, rejects a `malloc`, `free` or
+`realloc` of any other type), and its body passes its arguments to the function of the same
+name in `cralloc::c` unchanged. A C caller of `free(p)`, `realloc(p, n)`, `posix_memalign(&q, ..)` or
 `malloc_usable_size(p)` has made the C promise for that call, which is the Rust function's
 `# Safety` section: a pointer argument is null or a block the caller owns (for `free` and the
 frees, given up), or for `posix_memalign` a writable `void *`. The functions without pointer
@@ -147,22 +150,25 @@ these names (the design's non-goal: one instance per process).
 
 ## C-EXPORT-02: the generated routines `export_c_abi!` defines
 
-`$crate::cralloc_exports_c_x86_64!()` defines `malloc`, `calloc`, `free` and `free_sized`,
+`$crate::cralloc_exports_c!()`, which is `cralloc_exports_c_x86_64!` or
+`cralloc_exports_c_aarch64!`, defines `malloc`, `calloc`, `free` and `free_sized`,
 each a `#[unsafe(no_mangle)]` naked function whose body is a generated routine's code
 (`c_malloc`, `c_calloc`, `c_free`, `c_free_sized`), written by the Lean
-emitter and checked against it (`Rust.exportsFile`).
+emitter and checked against it (`Rust.exportsFile`). On aarch64 each has one form for glibc and
+one for musl, by `target_env`.
 
 **Obligations.** As C-EXPORT-01 for each symbol: its ABI is the C declaration's, it keeps the
 C contract, and it replaces nothing the program relies on; and the routine's own obligations
 hold whoever calls it.
 
-**Proof.** The routines take their arguments in `rdi` and `rsi` and return in `rax` (System V,
-which is C's on x86-64 Linux), and keep the callee-saved registers (proved). The routine's
+**Proof.** The routines take their arguments in `rdi` and `rsi` and return in `rax` on x86-64
+(System V), and in `x0` and `x1` and return in `x0` on aarch64, which are C's on Linux, and keep
+the callee-saved registers (proved). They declare an address as `usize`, which is how C's
+`void *` is passed in those registers. The routine's
 obligations are discharged in `routines-safety.md` for any thread of the process, so for a C
 caller as for Rust; a C caller of `free(p)` or `free_sized(p, n)` has made the free's
 promise. The copies name the crate's statics and slow paths through `$crate`, so they are the
 same memory and functions as the routines in the crate. The rest of C-EXPORT-01 (what the
 symbols replace) is unchanged.
 
-
-Reviewed: 6439180
+Reviewed: 5a8ade1
