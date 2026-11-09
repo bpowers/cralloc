@@ -354,7 +354,8 @@ impl Machine for SimCpu {
 /// A heap for tests: a simulated OS, a depot, `N` slabs, and a test source.
 pub(crate) struct Rig<O: Os, const N: usize> {
     pub(crate) cell: SpaceCell<O>,
-    pub(crate) depot: Depot,
+    /// Boxed, since it is about a megabyte, and an exploration builds and moves a rig per schedule.
+    pub(crate) depot: Box<Depot>,
     pub(crate) slabs: Box<Slabs<[Slab; N]>>,
     pub(crate) source: TestSource,
     pub(crate) tuning: Tuning,
@@ -371,8 +372,8 @@ impl<O: Os, const N: usize> Rig<O, N> {
     pub(crate) fn with_os(os: O, classes: &[SmallClass], count: usize, tuning: Tuning) -> Self {
         let rig = Rig {
             cell: SpaceCell::new(os),
-            depot: Depot::new(),
-            slabs: Box::new(Slabs::new()),
+            depot: Box::new(const { Depot::new() }),
+            slabs: Box::new(const { Slabs::new() }),
             source: TestSource::new(classes, count),
             tuning,
         };

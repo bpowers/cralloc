@@ -8,8 +8,8 @@
 //! stagger by lines alone and one whose blocks stagger by pages too. The random runs and the
 //! threaded ones also hold the count of kept outgrown slots to the charge of the slots marked kept.
 //!
-//! The slow runs do less in a debug build, which is what `scripts/gate --all` runs, than in a
-//! release one: `cargo test --release -p cralloc --lib large_charge -- --include-ignored`
+//! The slow runs do less with debug assertions on, as `scripts/gate --all` builds them, than in a
+//! release build: `cargo test --release -p cralloc --lib large_charge -- --include-ignored`
 //! runs them in full in about a minute.
 
 use super::super::layout::Grow;
@@ -541,9 +541,8 @@ fn run<S: Shape>(seed: u64, steps: usize, faults: bool) -> Met {
     met
 }
 
-/// How much less a slow run does in a debug build, where a step costs several times what it
-/// does in a release one: `scripts/gate --all` runs debug builds under a time limit, and each
-/// of these then takes ten seconds or less.
+/// How much less a slow run does with debug assertions on, where a step costs more than in a
+/// release build: `scripts/gate --all` builds them on and runs under a time limit.
 const DEBUG_LESS: u64 = if cfg!(debug_assertions) { 4 } else { 1 };
 
 /// `seeds` runs, every other one on each shape, the first [`Staggered`]; they must between them have

@@ -67,21 +67,25 @@ mod checked {
             unsafe { &*(atomic::AtomicPtr::from_ptr(ptr) as *const atomic::AtomicPtr<T>).cast() }
         }
 
+        #[inline]
         pub(crate) fn load(&self, order: Ordering) -> *mut T {
             switch_point();
             self.0.load(order)
         }
 
+        #[inline]
         pub(crate) fn store(&self, value: *mut T, order: Ordering) {
             switch_point();
             self.0.store(value, order)
         }
 
+        #[inline]
         pub(crate) fn swap(&self, value: *mut T, order: Ordering) -> *mut T {
             switch_point();
             self.0.swap(value, order)
         }
 
+        #[inline]
         pub(crate) fn compare_exchange(
             &self,
             current: *mut T,
@@ -108,21 +112,25 @@ mod checked {
                     $name(atomic::$name::new(value))
                 }
 
+                #[inline]
                 pub(crate) fn load(&self, order: Ordering) -> $int {
                     switch_point();
                     self.0.load(order)
                 }
 
+                #[inline]
                 pub(crate) fn store(&self, value: $int, order: Ordering) {
                     switch_point();
                     self.0.store(value, order)
                 }
 
+                #[inline]
                 pub(crate) fn swap(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.swap(value, order)
                 }
 
+                #[inline]
                 pub(crate) fn compare_exchange(
                     &self,
                     current: $int,
@@ -134,21 +142,25 @@ mod checked {
                     self.0.compare_exchange(current, new, success, failure)
                 }
 
+                #[inline]
                 pub(crate) fn fetch_add(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_add(value, order)
                 }
 
+                #[inline]
                 pub(crate) fn fetch_max(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_max(value, order)
                 }
 
+                #[inline]
                 pub(crate) fn fetch_or(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_or(value, order)
                 }
 
+                #[inline]
                 pub(crate) fn fetch_and(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_and(value, order)

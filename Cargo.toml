@@ -14,6 +14,16 @@ unsafe_op_in_unsafe_fn = "deny"
 [profile.dev]
 panic = "abort"
 
+# What `scripts/gate --all` builds its tests with: optimized, because the explorations are mostly
+# work the optimizer removes, and with every debug check on, because the tests are there to fail.
+[profile.gate]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+debug = "line-tables-only"
+incremental = true
+
 # The allocator's fast paths only reach their callers through link-time optimization, so our
 # own tests and benchmarks are built the way we recommend users build.
 [profile.release]
