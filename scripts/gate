@@ -15,8 +15,8 @@
 #
 # The tests and the proofs run at once. Each test binary runs under the workspace's 4 GiB cap
 # (scripts/run-capped), the quick proofs under Kani's 6 GiB one (scripts/kani) and then the slow
-# proofs under a cap of 12 GiB that they share (scripts/kani-all), so together they stay within the
-# machine's 16 GiB limit for one job.
+# proofs under that one each and 12 GiB between them (scripts/kani-all), so together they stay
+# within the machine's 16 GiB limit for one job.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/.."

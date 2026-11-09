@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Run every Kani harness in the workspace, several at once, each in a process of its own, and
-# print one line per harness with its result and time as it finishes. Exits non-zero if any failed.
+# Run every Kani harness in the workspace, several at once, each in its own memory-capped scope
+# (scripts/kani: KANI_MEM, KANI_TIMEOUT), and print one line per harness with its result and time
+# as it finishes. Exits non-zero if any failed.
 #
 # Usage: scripts/kani-all [-j JOBS] [PATTERN]
 #   PATTERN  only harnesses whose full path contains it, e.g. `verify_slow` or `space::`.
 #   -j       harnesses at once (KANI_JOBS, default 3)
-#   KANI_ALL_MEM      the cap on the whole run, which the harnesses share, default 12G
-#   KANI_ALL_TIMEOUT  the wall-clock limit on the whole run, default 4h
-#   KANI_TIMEOUT      the wall-clock limit on one harness, default 30m
+#   KANI_ALL_MEM  the cap that the scopes share, default 12G
 #
-# Why one process per harness: a single `cargo kani` runs its harnesses one after another, and
-# CBMC's memory use accumulates across them, so a set whose members each fit under the cap can
-# still be killed as a whole. Run apart they fit together (docs/research/verification.md).
+# Why one scope per harness: a single `cargo kani` runs its harnesses in one cgroup, and CBMC's
+# memory use accumulates across them, so a set whose members each fit under the cap can still
+# be killed as a whole, and a harness that runs away fails alone. Why a cap they share: the machine
+# has a limit for one job (CLAUDE.md), and only a few gigabytes' worth of harnesses run at once
+# (docs/research/verification.md). Without it, as where systemd cannot set it, one runs at a time.
 #
 # Harnesses are found from their `#[kani::proof]` attributes, so the list never goes stale. The
 # convention this relies on: harnesses live in `verify.rs` (quick: the merge gate runs them all
@@ -33,10 +34,15 @@ done
 [ $# -le 1 ] || { echo "usage: scripts/kani-all [-j JOBS] [PATTERN]" >&2; exit 2; }
 pattern="${1:-}"
 
-if [ -z "${KANI_ALL_INSIDE_CAP:-}" ]; then
-  export KANI_ALL_INSIDE_CAP=1
-  MEMLIMIT_QUIET=1 exec "$here/memlimit" -m "${KANI_ALL_MEM:-12G}" -t "${KANI_ALL_TIMEOUT:-4h}" -- \
-    "$0" -j "$jobs" "$pattern"
+# A slice of the slice this runs in, or of one of its own, that the harnesses' scopes go in.
+parent="${CRALLOC_HEAVY_SLICE:-cralloc.slice}"
+shared="${parent%.slice}-kani$$.slice"
+if systemctl --user set-property --runtime "$shared" \
+     MemoryMax="${KANI_ALL_MEM:-12G}" MemorySwapMax=0 2>/dev/null; then
+  export CRALLOC_HEAVY_SLICE="$shared"
+  trap 'systemctl --user revert "$shared" 2>/dev/null || true' EXIT
+else
+  jobs=1
 fi
 
 # Prints "package<TAB>module::path::harness" for every harness. Fails if a proof attribute has no
@@ -75,8 +81,8 @@ mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
 one() {
   local pkg="$1" harness="$2" start out status=ok line why
   start=$(date +%s)
-  out=$(timeout --signal=TERM --kill-after=30s "${KANI_TIMEOUT:-30m}" \
-          cargo kani -p "$pkg" --harness "$harness" --exact --output-format terse 2>&1) || status=FAILED
+  out=$(MEMLIMIT_QUIET=1 "$here/kani" -p "$pkg" --harness "$harness" --exact \
+          --output-format terse 2>&1) || status=FAILED
   line=$(printf '%-72s %-6s %5ds' "$harness" "$status" "$(( $(date +%s) - start ))")
   if [ "$status" = FAILED ]; then
     why=$(printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5)
