@@ -361,20 +361,20 @@ pub(super) const BEAT_SHIFT: u32 = 15;
 /// Maintenance is paced by what moves, not by calls. A slow path that installs a magazine adds
 /// the bytes a full magazine of its class holds to its CPU's activity counter, and the
 /// heartbeat's chores run when the counter passes a multiple of this. A call was never a fixed
-/// amount of work: a class whose magazines hold two objects reached a slow path every two, one
+/// amount of work: a class whose magazines hold six objects reached a slow path every six, one
 /// whose magazines hold 1,022 every 1,022, and a swap with a spare that does nothing else costs
 /// less than the chores would add to it. Bytes rather than objects, because what the chores
 /// return is memory, and magazines are already sized in bytes (`MAGAZINE_BUDGET`).
 ///
 /// 32 KiB is the most for which the clocked rules still act within the times the rules tests
-/// assert (`rules.rs`): their busy CPUs exchange magazines of two objects of 24 to 32 KiB, so
-/// one exchange must still be a beat, and at 64 KiB a quiet domain's stacks went back after 8.4
-/// intervals instead of within 7. At 32 KiB most classes beat on each exchange, as before. Seven
-/// move less per exchange and beat on a share of them, the bytes they move over 32 KiB: the 8,
-/// 16, 24 and 32-byte classes (magazines of 1,022: one in four, one in two, three in four, and
-/// all but one in 512), whose swaps with spares are the commonest, and the 5,120, 12,288 and
-/// 14,336-byte classes (magazines of six and two: 94%, 75% and 88%). Measured in
-/// `docs/research/magazines.md`, "What a slow path costs".
+/// assert (`rules.rs`): their busy CPUs, in the crate's tests, exchange magazines of two objects
+/// of 24 to 32 KiB, so one exchange must still be a beat, and at 64 KiB a quiet domain's stacks
+/// went back after 8.4 intervals instead of within 7. At 32 KiB most classes beat on each
+/// exchange, as before. Five move less per exchange and beat on a share of them, the bytes they
+/// move over 32 KiB: the 8, 16, 24 and 32-byte classes (magazines of 1,022: one in four, one in
+/// two, three in four, and all but one in 512), whose swaps with spares are the commonest, and
+/// the 5,120-byte class (magazines of six: 94%). Measured in `docs/research/magazines.md`, "What
+/// a slow path costs".
 pub const BEAT_BYTES: u64 = 1 << BEAT_SHIFT;
 
 /// Adds `bytes` moved by a slow path of `cpu` to its slab's activity counter and, if the

@@ -48,7 +48,7 @@ measurement here ran on four, and what magazines park scales with CPUs, not with
 
 | Tier | Bound (design, "Sizing the caches") | Crossing it costs |
 |---|---|---|
-| Loaded magazine | 64 KiB of objects, 4 to 1,024 slots | a pair 5 cycles in a bench, 11 to 18 on servers |
+| Loaded magazine | 64 KiB of objects, 8 to 1,024 slots | a pair 5 cycles in a bench, 11 to 18 on servers |
 | CPU's spares | 1 MiB of objects a CPU; fixed full spares for 8 B (two) and 16 B (one) only; four empties; the rest earned as stock | 271 cycles in a loop, about 640 on a server |
 | Domain's depot stack | 32 KiB a class, at least one magazine | two atomics; when contended about 560 cycles of stack operations, in a slow path of about 1,600 |
 | Shared depot stack | 96 KiB a class, at least one magazine | the same, plus lines from the other L3 |
@@ -155,8 +155,9 @@ over as every thread recycles the same few hundred slots at the bottom of the he
 
 ## What magazine size buys
 
-A class's magazine is the most slots whose objects fit in 64 KiB, at most 1,024 and at least 4:
-1,022 objects up to 64 bytes, 510 for 80 to 128, 254 for 160 to 256, and on down to 2.
+A class's magazine is the most slots whose objects fit in 64 KiB, at most 1,024 and at least 8:
+1,022 objects up to 64 bytes, 510 for 80 to 128, 254 for 160 to 256, and on down to 6, which passes
+64 KiB from 12 KiB ([large-blocks.md](large-blocks.md)).
 
 **Slots.** Each size a constant change against 254 slots, three to seven rounds; change in the job's
 metric, then cgroup peak in MiB (2026-10-19 at 31b46f4). A *pipeline* has threads that allocate and

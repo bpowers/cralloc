@@ -19,13 +19,13 @@
 /// Bytes per magazine slot: one pointer.
 pub const SLOT_BYTES: usize = crate::spec::WORD_BYTES;
 
-/// The most bytes of objects a magazine holds, unless that would leave it fewer than
-/// `MagazineSize::MIN` slots.
+/// The most bytes of objects a magazine holds, unless that would leave it fewer than 8 slots.
 ///
 /// It bounds the memory one cached magazine can pin against the cost of exchanging magazines.
-/// With [`MagazineSize::MAX`] it is the whole rule for a class's magazine: up to 64 KiB of
-/// objects, at most 1,024 slots, at least 4. That gives 1,022-object magazines up to 64-byte
-/// classes, 254 objects to 256-byte ones and two objects from 16 KiB. Halving the budget from
+/// With [`MagazineSize::MAX`] and the floor of 8 slots it is the whole rule for a class's
+/// magazine: up to 64 KiB of objects, at most 1,024 slots, at least 8. That gives 1,022-object
+/// magazines up to 64-byte classes, 254 objects to 256-byte ones and six objects from 5,120
+/// bytes, which from 12 KiB is past the budget, up to 192 KiB. Halving the budget from
 /// 128 KiB brought the mixed-size pipeline down to jemalloc's memory for a few percent on that
 /// job and no resolvable cost elsewhere (`docs/research/memory.md`, "Magazine budget").
 pub const MAGAZINE_BUDGET: usize = 64 << 10;
@@ -93,6 +93,19 @@ impl Marker {
 }
 
 const MIN_LOG2: u8 = 2;
+
+/// `log2` of the fewest slots a class's magazine has: 8, so six objects. A magazine of two sends
+/// every second object through an exchange and a heartbeat on each thread of a pipeline, which
+/// costs more than no cache at all (`docs/research/large-blocks.md`, "What one large allocation and
+/// free cost").
+///
+/// Tests of the crate take [`MIN_LOG2`] instead, so that the largest classes have the smallest
+/// magazines that work, and the depot's scenarios cross a slow path every few calls and stay small
+/// enough to explore. Nothing in the depot depends on a magazine's size, and the classes of 5 to
+/// 10 KiB have 8 slots in every build.
+pub(super) const LEAST_LOG2: u8 = 3;
+#[cfg(not(test))]
+const _: () = assert!(MagazineSize::for_class_size(1 << 20).slots() == 1 << LEAST_LOG2);
 /// `log2` of the most slots a magazine has: 1,024, so that the smallest classes' magazines hold
 /// what a 64-byte class's does, 64 KiB of objects, and no more objects than that. Up to 1,024
 /// slots, larger magazines halved sh8bench's gap and took 10 to 18% off the cross-thread
@@ -111,7 +124,8 @@ const _: () = assert!(MAX_LOG2 as u32 <= crate::spec::MAG_LOG_MAX);
 pub struct MagazineSize(u8);
 
 impl MagazineSize {
-    /// The smallest magazine: 4 slots, 2 objects.
+    /// The smallest magazine the slot tests allow: 4 slots, 2 objects. A class has it only in
+    /// the crate's tests ([`LEAST_LOG2`]), or under a heap's cap.
     pub(crate) const MIN: MagazineSize = MagazineSize(MIN_LOG2);
 
     /// The largest magazine: 1,024 slots, 1,022 objects, 8 KiB.
@@ -144,14 +158,24 @@ impl MagazineSize {
         }
     }
 
-    /// The size for a class of `size` bytes: the most slots whose objects fit in
-    /// [`MAGAZINE_BUDGET`], within [`MagazineSize::MIN`] and [`MagazineSize::MAX`]. `size` must
-    /// not be zero. Evaluated at compile time into a table; it divides.
+    /// The size for a class of `size` bytes, as [`MagazineSize::of_budget`] finds it with this
+    /// build's floor ([`LEAST_LOG2`]). `size` must not be zero. Evaluated at compile time into a
+    /// table; it divides.
     pub(super) const fn for_class_size(size: usize) -> MagazineSize {
+        #[cfg(not(test))]
+        let least = LEAST_LOG2;
+        #[cfg(test)]
+        let least = MIN_LOG2;
+        Self::of_budget(size, least)
+    }
+
+    /// The most slots whose objects fit in [`MAGAZINE_BUDGET`], at least `2^least` and at most
+    /// [`MagazineSize::MAX`].
+    const fn of_budget(size: usize, least: u8) -> MagazineSize {
         let fit = MAGAZINE_BUDGET / size + 2;
         let log2 = (usize::BITS - 1 - fit.leading_zeros()) as u8;
-        if log2 < MIN_LOG2 {
-            Self::MIN
+        if log2 < least {
+            MagazineSize(least)
         } else if log2 > MAX_LOG2 {
             Self::MAX
         } else {
@@ -332,5 +356,17 @@ mod tests {
         assert_eq!(MagazineSize::for_class_size(1024).slots(), 64);
         assert_eq!(MagazineSize::for_class_size(64).slots(), 1024);
         assert_eq!(MagazineSize::for_class_size(80).slots(), 512);
+    }
+
+    /// What ships: at least 8 slots, past the budget from 12 KiB.
+    #[test]
+    fn a_shipped_class_has_at_least_six_objects() {
+        let shipped = |size| MagazineSize::of_budget(size, LEAST_LOG2);
+        assert_eq!(shipped(8), MagazineSize::MAX);
+        assert_eq!(shipped(4 << 10).slots(), 16);
+        assert_eq!(shipped(5 << 10).slots(), 8);
+        assert_eq!(shipped(12 << 10).slots(), 8);
+        assert_eq!(shipped(32 << 10).slots(), 8);
+        assert_eq!(shipped(32 << 10).capacity(), 6);
     }
 }

@@ -640,7 +640,9 @@ with a 95% bootstrap interval, 2026-10-17 at `ae689e1`.
 64 KiB is the largest setting at or under jemalloc's memory on the mixed pipeline, and it costs what
 it costs only there, about 55 ns per extra slow path, still 30% faster than jemalloc on that job.
 Heaps of 100 MiB or more moved under 0.5 MiB at every setting: a fixed cost, not a share. Magazines
-have since grown to 1,024 slots ([magazines.md](magazines.md)), which reaches only classes to 128 B.
+have since grown to 1,024 slots ([magazines.md](magazines.md)), which reaches only classes to 128 B,
+and have at least 8, which passes the budget from 12 KiB and moved no large peak
+([large-blocks.md](large-blocks.md)).
 
 ## The huge-page threshold
 
