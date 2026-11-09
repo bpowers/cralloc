@@ -27,3 +27,5 @@
 "router graphql fast" = 4980
 # cralloc 238895, mimalloc 241048, glibc 241524, tcmalloc-percpu 241566, snmalloc 241986, jemalloc 242366
 "sozu proxy" = 167000
+# glibc 5826, jemalloc 7204, mimalloc 7400, tcmalloc-percpu 7595, cralloc 7743, snmalloc 7815
+"surrealdb mem" = 4080
