@@ -341,6 +341,35 @@ fn threads<H: GlobalAlloc + Sync>(heap: &H, ops: usize) {
     }
 }
 
+/// The compare that sends a layout the inlined lookup turned away to the large path says what
+/// working out its class says, on both sides of the limit and at every alignment.
+#[test]
+fn a_layouts_size_tells_it_is_large_as_its_class_does() {
+    for shift in 0..40 {
+        let align = 1usize << shift;
+        for size in [
+            0,
+            1,
+            8,
+            4096,
+            MAX_SMALL_SIZE - 8,
+            MAX_SMALL_SIZE - 1,
+            MAX_SMALL_SIZE,
+            MAX_SMALL_SIZE + 1,
+            MAX_SMALL_SIZE + 8,
+            1 << 20,
+            1 << 33,
+        ] {
+            let layout = layout(size, align);
+            assert_eq!(
+                super::small_of_other(layout),
+                super::small(layout),
+                "{size} {align}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_simulated_heap_serves_every_class() {
     let heap = SimHeap::<Shape>::new();

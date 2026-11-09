@@ -158,23 +158,36 @@ pub(super) unsafe fn syscall(number: usize, args: [Reg; 6]) -> Reg {
     ret
 }
 
-/// The generic timer's count and its rate in Hz (`cntvct_el0`, `cntfrq_el0`), which every
-/// aarch64 Linux lets a program read, unless the program has asked otherwise (`PR_SET_TSC`).
+/// The value of one of the generic timer's registers.
+#[cfg(target_arch = "aarch64")]
+macro_rules! timer_register {
+    ($name:literal) => {{
+        let value: u64;
+        // SAFETY: SYSCALL-03. A read of a register, which touches no memory, the stack or the flags.
+        unsafe {
+            asm!(
+                concat!("mrs {value}, ", $name),
+                value = out(reg) value,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        value
+    }};
+}
+
+/// The generic timer's count (`cntvct_el0`), which every aarch64 Linux lets a program read, unless
+/// the program has asked otherwise (`PR_SET_TSC`).
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-pub(super) fn generic_timer() -> (u64, u64) {
-    let (count, rate): (u64, u64);
-    // SAFETY: SYSCALL-03. Two reads of registers, which touch no memory, the stack or the flags.
-    unsafe {
-        asm!(
-            "mrs {count}, cntvct_el0",
-            "mrs {rate}, cntfrq_el0",
-            count = out(reg) count,
-            rate = out(reg) rate,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (count, rate)
+pub(super) fn timer_count() -> u64 {
+    timer_register!("cntvct_el0")
+}
+
+/// The generic timer's rate in Hz (`cntfrq_el0`), which is as readable as its count.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(super) fn timer_rate() -> u64 {
+    timer_register!("cntfrq_el0")
 }
 
 /// The calling thread's thread pointer (`tpidr_el0`).

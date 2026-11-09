@@ -409,14 +409,13 @@ impl<'a, O: Os> Back<'a, O> {
         host: &ClassHost<'a, O>,
         region: RegionId,
         slot: u32,
-        class: Class,
     ) -> (usize, bool) {
         let resident = |charge: usize| (charge, charge != 0);
-        if self.return_unwritten(host, region, slot, class) {
+        if self.return_unwritten(host, region, slot) {
             return (0, false);
         }
         // Only a slot that holds a whole huge page can have been advised.
-        if class.size() < self.space.plan().geometry().huge_page_size() {
+        if host.layout().size() < host.layout().huge_page_size() {
             return resident(region::charge(host, region, slot));
         }
         let (word, bit) = position(slot);
@@ -490,17 +489,11 @@ impl<'a, O: Os> Back<'a, O> {
     /// part, or refused by the OS) is an ordinary free.
     ///
     /// [`UNWRITTEN_RESIDENT_ONE_IN`]: super::policy::UNWRITTEN_RESIDENT_ONE_IN
-    fn return_unwritten(
-        &self,
-        host: &ClassHost<'a, O>,
-        region: RegionId,
-        slot: u32,
-        class: Class,
-    ) -> bool {
+    fn return_unwritten(&self, host: &ClassHost<'a, O>, region: RegionId, slot: u32) -> bool {
         // A slot smaller than the floor never holds a marked block: one compare here, not a
         // load of the size word. The free loads and writes that word later, to stamp the slot
         // (`stamp_slot`), only if it stays resident.
-        if class.size() < unwritten_floor(self.space.plan().geometry()) {
+        if host.layout().size() < unwritten_floor(host.geometry()) {
             return false;
         }
         let Some(now) = region::recorded(host, region, slot).filter(|r| r.unwritten && !r.huge)
@@ -552,7 +545,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// resident. The heap above beats
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
-        let (charge, resident) = self.purge_before_release(host, region, slot, class);
+        let (charge, resident) = self.purge_before_release(host, region, slot);
         if resident {
             self.stamp_slot(host, region, slot);
         }

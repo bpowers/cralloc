@@ -367,7 +367,7 @@ fn a_kept_layout_is_whole_once_its_last_word_is_there() {
         let gate = Gate::new(2);
         spread(2, |_| {
             gate.pass();
-            assert_eq!(std::format!("{:?}", memo.layout(plan, class)), want);
+            assert_eq!(std::format!("{:?}", memo.layout(|| plan, class)), want);
         });
     }
 }

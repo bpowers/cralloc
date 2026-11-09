@@ -162,35 +162,61 @@ fn getrandom() -> Option<u64> {
     }
 }
 
-/// The heap's geometry on x86-64, whose pages are always 4 KiB: a constant that folds away.
+/// What x86-64's geometry needs found: nothing, its pages being always 4 KiB.
+#[cfg(target_arch = "x86_64")]
+type Found = ();
+
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-const fn geometry() -> Geometry {
+const fn found() -> Found {}
+
+/// The heap's geometry on x86-64: a constant that folds away.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+const fn geometry_of((): Found) -> Geometry {
     Geometry::DESIGN
 }
 
-/// `log2` of the kernel's page size once found, and zero until then. All slow paths read it, and
-/// no fast path does.
+/// `log2` of the kernel's page size once found, and zero until then. Slow paths read it when they
+/// make a `Space`, and no fast path does.
 #[cfg(target_arch = "aarch64")]
 static PAGE_SHIFT: AtomicU8 = AtomicU8::new(0);
 
-/// The heap's geometry on aarch64, where a kernel's pages are 4, 16 or 64 KiB: one load once the
-/// page size is known.
+/// What aarch64's geometry needs found: `log2` of the kernel's page size, as a whole word (see
+/// `Space`).
+#[cfg(target_arch = "aarch64")]
+type Found = usize;
+
+/// One load once the page size is known, which no optimizer merges with another, so a `Space` makes
+/// it once and keeps the answer (`docs/research/large-blocks.md`, "What one large allocation and
+/// free cost").
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn geometry() -> Geometry {
+fn found() -> Found {
+    (match PAGE_SHIFT.load(Relaxed) {
+        0 => find_page_shift(),
+        known => known,
+    }) as Found
+}
+
+/// The heap's geometry on aarch64, where a kernel's pages are 4, 16 or 64 KiB.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+const fn geometry_of(page_shift: Found) -> Geometry {
     const SMALL: Geometry = Geometry::of_kernel(12);
     const MEDIUM: Geometry = Geometry::of_kernel(14);
     const LARGE: Geometry = Geometry::of_kernel(16);
-    let shift = match PAGE_SHIFT.load(Relaxed) {
-        0 => find_page_shift(),
-        known => known,
-    };
-    match shift {
+    match page_shift {
         12 => SMALL,
         14 => MEDIUM,
         _ => LARGE,
     }
+}
+
+/// The heap's geometry, for this file's own calls.
+#[inline(always)]
+fn geometry() -> Geometry {
+    geometry_of(found())
 }
 
 /// Finds the kernel's page size and keeps the process's first answer, which a thread that raced
@@ -230,6 +256,15 @@ fn page_shift_by_probing() -> u8 {
     }
     16
 }
+
+/// How far [`Os::ticks`] shifts the generic timer's count, once a call has worked it out
+/// ([`timer_shift`]), and zero until then. The rate is fixed at boot, and its register is not free
+/// to read: `cntfrq_el0` takes 8.5 cycles in a tight loop where `cntvct_el0` takes one, and it
+/// took about 1% off `largepair` to stop reading it at each heartbeat (`docs/research/large-blocks.md`,
+/// "What one large allocation and free cost"). Every thread that works it out gets the same answer.
+/// A rate so high that the shift is zero is read each time, which costs only that.
+#[cfg(target_arch = "aarch64")]
+static TIMER_SHIFT: AtomicU8 = AtomicU8::new(0);
 
 /// How far to shift the generic timer's count so that it runs at a few gigahertz, as the rest of
 /// the crate takes [`Os::ticks`] to: `32 - log2(rate)`, to the nearest whole number, which keeps an
@@ -491,9 +526,16 @@ fn unblock_sigabrt() {
 // - None of the calls allocates or depends on thread state, so any thread may make them,
 //   in a signal handler too.
 unsafe impl Os for LinuxOs {
+    type Found = Found;
+
     #[inline(always)]
-    fn geometry() -> Geometry {
-        geometry()
+    fn found() -> Found {
+        found()
+    }
+
+    #[inline(always)]
+    fn geometry_of(found: Found) -> Geometry {
+        geometry_of(found)
     }
 
     fn reserve(&self, len: usize, align: usize) -> Result<NonNull<u8>, OsError> {
@@ -705,8 +747,15 @@ unsafe impl Os for LinuxOs {
 
     #[cfg(target_arch = "aarch64")]
     fn ticks(&self) -> u64 {
-        let (count, rate) = super::syscall::generic_timer();
-        count << timer_shift(rate)
+        let shift = match TIMER_SHIFT.load(Relaxed) {
+            0 => {
+                let found = timer_shift(super::syscall::timer_rate());
+                TIMER_SHIFT.store(found as u8, Relaxed);
+                found
+            }
+            known => known as u32,
+        };
+        super::syscall::timer_count() << shift
     }
 
     fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize> {
@@ -902,6 +951,21 @@ mod tests {
         assert!(!append(&mut path, &mut at, b"1"));
         let len = LinuxOs.topology(Topology::Online, &mut buf).unwrap();
         assert!(crate::depot::domain::each_cpu(&buf[..len], |_| {}));
+    }
+
+    /// What a `Space` keeps gives it the geometry it would have read, whatever the page.
+    #[test]
+    fn what_is_found_gives_the_geometry() {
+        assert_eq!(LinuxOs::geometry_of(LinuxOs::found()), LinuxOs::geometry());
+        #[cfg(target_arch = "aarch64")]
+        for shift in [12, 14, 16] {
+            assert_eq!(geometry_of(shift), Geometry::of_kernel(shift as u32));
+        }
+        let cell = crate::space::SpaceCell::new(LinuxOs);
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(space.plan().geometry().page_size(), page());
+        let shift = space.plan().region_shift();
+        assert_eq!(Some(space.plan()), LinuxOs::geometry().plan(shift));
     }
 
     #[test]

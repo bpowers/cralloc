@@ -301,9 +301,46 @@ one session of `quick`, 405 runs, 2026-11-07 at `dff7993`.
   suspect. `rpc log c64` spreads 0.6% on tcmalloc, inside
   its noise, and 3.4% on jemalloc, 2.6% of it instructions. So fewer jobs measure where their code
   landed than on the Ryzen, but too few have been swept to drop the rule.
-- **Other work is low enough for the same limits.** A run's other work had a median of -0.01 CPUs. Of
-  402 valid runs the highest was 0.15, and three runs went over the limit of 0.25 and were left out.
-  The gate waited at most 6 s.
+- **A server's meter for other work is off by more than the Ryzen's limit, so the limit here is 0.3,
+  and it is a weak guard.** With heavy work frozen, the median reading of a job's segment still runs
+  from -0.10 to 0.16 CPUs, alike across allocators, and 4 of 1,200 segments exceed 0.25 (six server
+  jobs, three rounds, `870d687`, 2026-11-08). Against a log of every context switch over 60 segments
+  of `connect log grpc h2`, the meter reads 0.11 low at 30% load, 0.03 high at 70%, and about right
+  at saturation and with no load. It also misses: the largest real burst, 0.21 CPUs and nearly all
+  Chromium, read 0.06, so no limit would catch it, and 0.06 CPUs once read 0.17. A limit of 0.1 threw
+  out a third of runs for the offset alone. The time ranking does not show what passes: runs reading
+  over 0.03 above their job's usual take a median 0.996 of the cycles of the same allocator's other
+  runs (0.98 to 1.05). A kernel job's limit stands: its median is -0.01, of 402 valid runs the highest
+  was 0.15, and three exceeded 0.25.
+- **A tail here belongs to the browser and the agents unless the run was quiet, and no limit on CPU
+  time can tell.** Heavy work is frozen and the generator's cluster is nearly clean: 19 runs of other
+  work over 0.5 ms in 273 s, the longest 2.0 ms. The server's is not. Six runs of one build of
+  `connect log grpc h2`, logged by process (`ed4dab4`, 2026-11-08), on CPUs 6-9 while the generator ran:
+
+  | Who | CPUs | Runs over 0.5 ms | Longest, ms |
+  |---|---:|---:|---:|
+  | Chromium, half of it service-worker processes it starts about once a minute | 0.011 | 588 | 112 |
+  | The agent process, `claude`: `mi-scavenger`, `JITWorker`, `HeapHelper` (its JavaScript runtime's garbage collector) | 0.005 | 367 | 33 |
+  | Kernel threads: writeback `kworker`s, and `kcompactd0` the longest | 0.002 | 168 | 88 |
+  | Other desktop, `gnome-shell` the longest | 0.001 | 40 | 4.9 |
+  | The agent's tools: `zsh`, `git`, `pgrep` | 0.0003 | 41 | 3.4 |
+  | The runner | 0 | 0 | |
+
+  The slowest request follows these. In five of the six its latency at 70% is within 0.5 ms of the
+  longest run of other work on the two clusters, from 1.7 to 25 ms, with p99.9 from 0.6 to 9.0 ms at
+  no more than 0.06 CPUs; the sixth had 3.6 ms of a kernel thread and a slowest request of 1.1 ms,
+  p99.9 98 us. Three of the four runs with p99.9 near or over 1 ms had no Chromium run over 0.5 ms in
+  that segment; `claude` had one in five of the six and kernel threads in three. Over 90 earlier runs,
+  39 exceed 1 ms, on every allocator, at rates this few runs cannot separate (3 to 10 of 15). This noise
+  only adds, so a job's tail is its quietest run, and ranking tails takes a session with both the
+  browser and the agents quiet. The log needs no root here: `perf record -a --switch-events -e dummy`,
+  with `perf_event_paranoid` at -1.
+- **`orders axum` and mini-redis have a tail of about 2 ms that is not this noise.** It shows in every
+  run under every allocator. In one logged run of `orders axum` at its fixed rate, the server has one
+  or two CPUs busy in 30% of milliseconds and three or four in the rest, with p99 1.8 ms; at 30% load
+  one CPU suffices and p99 is 26 us, and at saturation p99 is 368 us. So a backlog forms and clears
+  while its workers come and go. That points at the program's scheduling on four workers, which the
+  Ryzen's eight do not show, but no test has isolated it.
 
 ## Reusable techniques
 
@@ -331,6 +368,21 @@ The placement sweep and the run-time switch are under the first trap. Beside the
   glibc's rseq registration fails; a valgrind with `aspacem_maxAddr` raised and a preloaded
   constructor that writes 0 into `cpu_id` fix both. Do not sample on instructions: 25% of one
   profile piled onto the instruction after a locked one.
+- **Exact instruction counts on aarch64, by stepping:** `bench/tools/stepcount.c` single-steps one
+  thread of a running program, and `stepsum.py` sums what it ran by function or inline chain. Step to
+  learn how many instructions a path runs and where, and sample for cycles, of which stepping knows
+  nothing. Sampling on instructions misreads a function here by up to three times: `slot_in` read 6.3%
+  of `largepair` for 2.1%. A step costs 9 to 25 us, so 5 million instructions, about 3,500 large
+  allocations and frees, take one to two minutes; it wants no quiet machine, only `scripts/heavy` and
+  `scripts/memlimit`. A ptrace stop counts as a preemption, which would abort a sequence at its next
+  instruction, so the tool clears the thread's `rseq_cs` at each stop. That is sound only if nothing a
+  sequence guards can change under it. So the thread must be pinned, which the tool checks, and alone
+  on its CPU, and it must reach a slow path at least every 50,000 steps or so, an interval at this
+  rate, or another thread's idle check may drain its slab with no abort to stop the sequence. The
+  program is killed at the end, so nothing outlives a run. A stepped thread runs over 100,000 times
+  slower against the clock, so it meets chores the clock drives far more often: in `largepair` they
+  added about 100 instructions to the 1,780 a pair the hardware counter reads. Do not read those rows
+  directly; take them as what the counter's total leaves.
 - **Lining up requests with the CPUs:** `perf record -e dummy --switch-events -k mono` takes no
   hardware counter and costs nothing measurable; idle counters from sysfs every 5 ms; all on
   `CLOCK_MONOTONIC`.
