@@ -145,9 +145,19 @@ struct Interrupt {
 
 std::thread_local! {
     static INTERRUPT: std::cell::RefCell<Option<Interrupt>> = const { std::cell::RefCell::new(None) };
+    /// Whether `INTERRUPT` holds one: what most switch points look at, outside a run, since a
+    /// census makes thousands of them per execution.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
+#[inline]
 fn interrupt_point() {
+    if ARMED.with(Cell::get) {
+        fire_interrupt();
+    }
+}
+
+fn fire_interrupt() {
     let due = INTERRUPT.with(|slot| {
         let mut slot = slot.borrow_mut();
         let interrupt = slot.as_mut()?;
@@ -155,6 +165,7 @@ fn interrupt_point() {
             interrupt.remaining -= 1;
             return None;
         }
+        ARMED.with(|armed| armed.set(false));
         slot.take().map(|interrupt| interrupt.action)
     });
     if let Some(action) = due {
@@ -169,6 +180,7 @@ struct Disarm;
 
 impl Drop for Disarm {
     fn drop(&mut self) {
+        ARMED.with(|armed| armed.set(false));
         INTERRUPT.with(|slot| slot.borrow_mut().take());
     }
 }
@@ -187,6 +199,7 @@ pub(crate) fn interrupt_at<R>(at: usize, action: &dyn Fn(), body: impl FnOnce() 
             action,
         })
     });
+    ARMED.with(|armed| armed.set(true));
     let disarm = Disarm;
     let result = body();
     let fired = INTERRUPT.with(|slot| slot.borrow().is_none());
