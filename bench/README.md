@@ -178,7 +178,9 @@ cannot be rebuilt under a session.
   investigations, a workload run by hand with `BENCH_EVENTS=name=config,...` also counts up
   to three raw PMU events per phase, in user mode, in place of user cycles (for example
   `dtlb_miss=0xff45,walk_4k=0x1045,walk_2m=0x4045` on Zen 5; `perf list --details` gives the
-  codes).
+  codes). `BENCH_PROCESS_EVENTS`, set for the runner, does the same for the whole process, also in
+  user mode, for a program with no measured phase or a server; the results are in `process` and,
+  for each of a server's segments, `extra_per_req`.
 - **Memory.** Each run records its cgroup's `memory.peak`, which ranks memory: everything charged to it, which
   excludes file pages already cached by an earlier run (the binary, shared libraries) and
   includes page tables. The runner samples the resident set and `VmHWM` every 50 ms from
