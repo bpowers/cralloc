@@ -732,6 +732,11 @@ impl ExactRun {
         bits: u64,
     ) -> bool {
         let spot = Spot::leaf(region, index);
+        // Before it touches a word of the next group, as a fill's run does.
+        if let Some(at) = self.at.filter(|at| at.group != index / BITS) {
+            clear_group(host, at);
+            self.at = None;
+        }
         let leaf = spot.word(host);
         let mut seen = leaf.load();
         loop {
@@ -750,8 +755,7 @@ impl ExactRun {
         }
     }
 
-    /// Notes that this run has emptied the word `leaf`, clearing the bits of the last group if
-    /// the word is in another.
+    /// Notes that this run has emptied the word `leaf`, in the group it is in.
     #[inline]
     fn emptied<H: Host>(&mut self, host: &H, leaf: Spot) {
         if host.layout().height() == 0 {
@@ -759,14 +763,7 @@ impl ExactRun {
             clear(host, leaf);
             return;
         }
-        let mut at = match self.at {
-            Some(at) if at.group == leaf.index / BITS => at,
-            Some(at) => {
-                clear_group(host, at);
-                Cursor::at(leaf)
-            }
-            None => Cursor::at(leaf),
-        };
+        let mut at = self.at.unwrap_or_else(|| Cursor::at(leaf));
         at.emptied |= 1 << (leaf.index % BITS);
         self.at = Some(at);
     }
