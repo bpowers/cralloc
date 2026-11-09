@@ -37,6 +37,7 @@ plan.sh DIR OUTDIR 1 servers "connect log" 00-16 cra,jem,tcm,mim,gli >> DIR/queu
 | Saturated rates, three rounds of pad-0 builds | `session.sh`: the `sat` jobs of `servers-sat` and `servers-large-sat` | `servers.py` |
 | Large heaps, three rounds | `session.sh`: `servers-thread` jobs `orders axum cache 2G thread`, `connect store 1M thread`, `meilisearch hn thread`, normal builds, `--mem-cap 8G` or `12G` | `threadsum.py`, `heapsum.py` |
 | Real servers | `plan.sh`: `router graphql`; `session.sh`: `servers-thread` jobs of SurrealDB and Qdrant, `--mem-cap 10G` or `12G` | `servers.py`, `heapsum.py` |
+| Tails on a machine with nothing else running | `quiet-session.sh`, which needs no agent running until it exits and logs every context switch beside the results | `whoran.py` says which runs were quiet; `servers.py` |
 | Long-run memory | `drift/` (below) | `drift/summary.py`, `drift/redis_summary.py` |
 | Batch programs | `session.sh`: `apps` job `datafusion tpch sf3 t4`, six rounds; `tpch.py OUT WORKDIR --rounds 4` under `scripts/measure --both-l3` | `benchrun report`; `tpch.py` prints its table as it runs |
 | Kernel suite, five to ten rounds | `session.sh`: `full`, two groups of jobs a session, every allocator | `compare.py`, `groups.py` |
