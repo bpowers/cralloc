@@ -113,7 +113,7 @@ impl Cralloc {
     ///
     /// Two kinds of step take longer. A step of the purge pass finishes a wholly free huge page,
     /// claiming and releasing every bitmap word under it: at huge pages of 32 MiB, about 15 us for
-    /// slots of 1 KiB, 100 us for 64 bytes and 730 us for 8, and a millisecond or so where the
+    /// slots of 1 KiB, 100 us for 64 bytes and 700 us for 8, and a millisecond or so where the
     /// kernel is slow to take the page. And on a kernel whose huge pages are over 2 MiB and at most
     /// 64 MiB (32 MiB, on pages of 16 KiB), a step of the purge pass may split one huge page, one a
     /// step, and that holds the caller for 1 to 2 ms. It is the price of ever returning that

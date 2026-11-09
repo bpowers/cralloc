@@ -173,8 +173,8 @@ decides where it lands. [program-effects.md](program-effects.md)
   p50, p99 and p99.9 as a geometric mean over ten jobs, and up to 16% on the log store.
 - **The tails we caused were maintenance on a request's path.** The magazine-end lock is gone, and
   so is the clocked purge while the background thread runs, though growth that outruns the thread
-  still pays on a request. A step finishes a wholly free huge page: at 32 MiB, 100 us for 64-byte slots
-  and 747 us for 8-byte, where there is no thread ([memory.md](memory.md)). On the log store the first
+  still pays on a request. A step finishes a wholly free huge page: at 32 MiB, about 100 us for 64-byte
+  slots and 700 us for 8-byte, where there is no thread ([memory.md](memory.md)). On the log store the first
   5 ms after a silence still reach 581 us against jemalloc's 279, from idle drains. Large-block
   trims still run on the request's own path, about 40,500 a run on the order service, the slowest 2
   to 5.6 ms, which its percentiles do not show. [servers.md](servers.md)

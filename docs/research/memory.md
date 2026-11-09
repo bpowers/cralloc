@@ -535,27 +535,29 @@ payments reading up to 16,384 bitmap words.
 
 **At 32 MiB, a step that reaches a wholly free huge page takes about 100 us or more for slots of 64
 bytes and under.** A huge page goes back whole, so the step claims and releases every leaf word under
-it, at 11.0 ns a word against about 9 us for the `madvise`:
+it, at 10.5 ns a word against about 9 us for the `madvise`:
 
 | Slot | Leaf words | A step, no thread | Slowest request, no thread | Thread, clocked | Thread, growth outruns it |
 |---:|---:|---:|---:|---:|---:|
-| 8 bytes | 65,536 | 747 us (727 to 1,144) | 1.08 to 1.27 ms | 9 to 10 us | 0.75 to 1.46 ms |
-| 16 bytes | 32,768 | 371 us (368 to 707) | 0.74 to 0.90 ms | 8 to 13 us | up to 0.74 ms |
-| 64 bytes | 8,192 | 100 us (99 to 138) | 0.42 to 0.47 ms | 8 to 17 us | 102 to 132 us |
-| 1 KiB | 512 | 15 us (15 to 25) | 108 to 134 us | 7 to 10 us | under 5 us |
+| 8 bytes | 65,536 | 700 us (683 to 1,054) | 1.06 to 1.31 ms | 8 to 19 us | 0.81 to 1.06 ms |
+| 16 bytes | 32,768 | 354 us (346 to 704) | 0.73 to 0.74 ms | 7 to 14 us | under 5 us |
+| 64 bytes | 8,192 | 96 us (94 to 132) | 0.41 to 0.45 ms | 7 to 14 us | 100 to 127 us |
+| 1 KiB | 512 | 15 us (15 to 25) | 58 to 191 us | 6 to 7 us | under 5 us |
 
-*2026-11-08 at `04789ae`, 16 KiB pages, CPU 8, `rules step`: 641 MiB carved and freed, then requests
-in another class, each timed, with what the thread spent off its CPU set aside; requests alone reach 9
-to 18 us. Median and 10th to 90th percentile of 39 clocked steps over 3 runs, a step being a request
+*2026-11-08 at `dae32d5`, 16 KiB pages, CPU 8, `rules step`: 641 MiB carved and freed, then requests
+in another class, each timed, with what the thread spent off its CPU set aside; requests alone reach 11
+to 31 us. Median and 10th to 90th percentile of 39 clocked steps over 3 runs, a step being a request
 in which resident memory fell by one huge page. A run counts only with the class wholly on huge pages,
 13 of 13 by `smaps`, and the others were thrown away. A growth payment's median and a `maintain_step`'s
-are within 3%. `strace` shows 13 `madvise` of 32 MiB, all on the request's thread with no background
-thread, and all on the background thread when it runs the clocked pass.*
+are within 4%, and a session on a busier machine read 5 to 10% higher throughout. The last column's growers
+write nothing or carve 64 MiB at a time, and at 16 bytes and 1 KiB only one that writes was run.
+`strace` shows 13 `madvise` of 32 MiB, all on the request's thread with no background thread, and all on
+the background thread when it runs the clocked pass.*
 
 - **The time is the words, and batching took most of it.** Interleaved against each word clearing its
-  own summary bit and walking up on its own to release, a word falls from 42.5 to 11.0 ns: 2.79 ms to
-  747 us at 8 bytes, 1.40 ms to 371 us at 16, 357 to 100 us at 64, 29 to 15 us at 1 KiB. Of the 11.0,
-  the claim is 5.4, the release 2.9, and two looks 1.3 each. By that rate 80-byte slots take 81 us.
+  own summary bit and walking up on its own to release, a word falls from 38.8 to 10.5 ns: 2.55 ms to
+  700 us at 8 bytes, 1.28 ms to 354 us at 16, 327 to 96 us at 64, 28 to 15 us at 1 KiB. The claim is
+  about half of what is left, the release a quarter, and two looks the rest.
 - **A fill does not wait for it.** A purge clears its words' summary bits a group at a time before it
   returns the pages, so a fill with nothing else free takes 42 ns once the purge holds them and under 5
   us while it claims them. Rejected: leaving the bits set, as a large class's claim does, at 9.5 ns a
@@ -567,25 +569,25 @@ thread, and all on the background thread when it runs the clocked pass.*
 - **One request can take more than a step.** A carve's payment and its heartbeat's step can make two,
   and `top_up` runs in the same step as the huge page it fills.
 - **The thread takes the clocked pass off requests, but not growth that outruns it.** Past 16 MiB
-  unpaid a grower pays, and at 8 bytes a thread's step pays 2 MiB of debt in 0.73 ms. A grower at 7.6 MiB
-  a ms (8 KiB blocks, written, nothing else) took 0 to 2 such steps a run at 8 bytes. One that writes
-  nothing, or carves 64 MiB at a time, took 6. Crediting a payment with the 32 MiB it returned took the
-  writer to 0 or 1 and left those two where they were, so it is not built.
+  unpaid a grower pays, and at 8 bytes a thread's step pays 2 MiB of debt in 0.7 ms. A grower at 7.6 MiB a
+  ms (8 KiB blocks, written, nothing else) took 0 to 2 such steps a run at 8 bytes. One that writes
+  nothing, or carves 64 MiB at a time, took 6 or 7. Crediting a payment with the 32 MiB it returned
+  changed neither, so it is not built.
 - **A shortage of free blocks moves cost to the kernel.** A class carved past the free blocks is mapped
   by small pages at its top, which the walk reaches first. There a unit is a `madvise` of 2,048 pages,
-  160 to 460 us more: 1.20 ms at 8 bytes, 640 us at 16, 420 at 64 and 177 at 1 KiB, the process forbidden
-  huge pages, three runs. Mapped whole, some calls still take 125 to 430 us, from one step in three at 8
-  bytes to one in forty at 1 KiB, not traced further.
+  180 to 750 us more: 1.45 ms at 8 bytes, 1.09 ms at 16, 272 us at 64 and 426 at 1 KiB, the process
+  forbidden huge pages, three runs. Mapped whole, some calls still take 125 to 430 us, from one step in
+  three at 8 bytes to one in forty at 1 KiB, not traced further.
 - **Payments over small pages come near 100 us too.** At 128 pages a payment takes 65 to 131 us at 8
   bytes, and under 65 at 64.
-- **At 2 MiB** the same arithmetic gives 54 us for 8-byte slots on this core, **computed**. Zen 5 has
+- **At 2 MiB** the same arithmetic gives 52 us for 8-byte slots on this core, **computed**. Zen 5 has
   not been measured ([docs/todo/for_x86-64.md](../todo/for_x86-64.md)).
 
-So slots of 8 to 64 bytes stay at or over 100 us on a request's path where there is no thread. Passing
-their huge pages on a request, as a split of 32 MiB is passed, would hold the bound, but those huge
-pages would then stay resident until `collect`: 641 MiB of 8-byte slots would end at about 459 MiB, not
-44. Not built, since returning the memory matters more than a pause only a shrinking heap of tiny
-objects pays.
+So where there is no thread, slots of 8 to 56 bytes stay over 100 us on a request's path, by that rate
+(107 us at 56), and 64-byte slots sit at it. Passing their huge pages on a request, as a split of 32
+MiB is passed, would hold the bound, but those huge pages would then stay resident until `collect`: 641
+MiB of 8-byte slots would end at about 459 MiB, not 43. Not built, since returning the memory matters
+more than a pause only a shrinking heap of tiny objects pays.
 
 **While the thread runs, the clocked, hold and growth steps are its work.** A slow path records what
 is due and wakes it if it sleeps. What a request still returns is what its own call decides: the
