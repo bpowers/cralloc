@@ -473,10 +473,11 @@ impl<O: Os, const N: usize> Rig<O, N> {
             }
         }
         // Every domain, used or not, and the shared pool: a magazine must not be anywhere a
-        // census misses.
+        // census misses. A pool nothing has reached holds nothing, by `Depot::reached`.
         let pools = (0..super::MAX_DOMAINS)
             .map(|n| Pool::Domain(super::Domain::folded(n)))
-            .chain([Pool::Shared]);
+            .chain([Pool::Shared])
+            .filter(|&pool| self.depot.reached(pool));
         for pool in pools {
             for class in SmallClass::all() {
                 let stack = self.depot.full(pool, class);
