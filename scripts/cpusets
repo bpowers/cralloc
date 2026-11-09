@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Which CPUs the benchmarks and heavy work use on this machine, derived from sysfs.
+
+Usage: scripts/cpusets [NAME]    (without NAME, one `NAME LIST` line for each)
+
+  a         up to four cores of one cache domain: multi-threaded jobs and servers
+  b         up to four cores of another: jobs across domains, load generators
+  single    the core single-threaded jobs use, the third of a
+  heavy     builds, tests and proofs (scripts/heavy), hardware threads included
+  runner    the benchmark runner's own CPU
+  upstream  up to three cores for a proxy's upstream, in b's domain; may be empty
+
+Only cores of the highest capacity are measured, and only the first hardware thread of each, so
+that SMT siblings stay idle. A cache domain is the CPUs sharing the highest cache index present;
+where one spans every core (Graviton, Grace), its lower and upper halves by core number stand in
+for two domains. a is the first domain and b the second, unless the machine has smaller cores: the
+low numbers then belong to those, and heavy work goes on them and the big domain beside them, so a
+is the last domain, whole, and b the one before it.
+
+Heavy work stays out of a's domain, so that it shares no cache with a job on a alone, and off b.
+With fewer than four cores left that way it takes b as well, which `scripts/measure --both-l3`
+pauses. The runner takes the highest-numbered core that no job uses.
+
+CRALLOC_CPUS_<NAME> overrides a set, a and b before the others are derived from them.
+CRALLOC_SYSFS_CPU is where the CPUs are, default /sys/devices/system/cpu (tests use a tree shaped
+like it).
+"""
+
+import glob
+import os
+import re
+import sys
+
+ROOT = os.environ.get("CRALLOC_SYSFS_CPU", "/sys/devices/system/cpu")
+PER_DOMAIN = 4
+
+
+def parse_list(text):
+    cpus = []
+    for part in text.strip().split(","):
+        if part:
+            lo, _, hi = part.partition("-")
+            cpus.extend(range(int(lo), int(hi or lo) + 1))
+    return cpus
+
+
+def format_list(cpus):
+    """Ascending runs collapse (`12-15,28-31`); any other order is kept, since it can matter."""
+    runs = []
+    for c in cpus:
+        if runs and c == runs[-1][1] + 1:
+            runs[-1][1] = c
+        else:
+            runs.append([c, c])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+def read(cpu, name):
+    try:
+        with open(f"{ROOT}/cpu{cpu}/{name}") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def last_cache_domain(cpu, online):
+    """The CPUs sharing `cpu`'s highest cache index; every CPU when sysfs has no caches."""
+    indexes = glob.glob(f"{ROOT}/cpu{cpu}/cache/index[0-9]*")
+    if not indexes:
+        return frozenset(online)
+    top = max(int(re.search(r"(\d+)$", i).group(1)) for i in indexes)
+    return frozenset(parse_list(read(cpu, f"cache/index{top}/shared_cpu_list") or str(cpu)))
+
+
+def derive():
+    with open(f"{ROOT}/online") as f:
+        online = parse_list(f.read())
+    siblings = {c: parse_list(read(c, "topology/thread_siblings_list") or str(c)) for c in online}
+    cores = [c for c in online if min(siblings[c]) == c]
+    capacity = {c: int(read(c, "cpu_capacity") or 0) for c in cores}
+    big = [c for c in cores if capacity[c] == max(capacity.values())]
+
+    domains = {}
+    for c in big:
+        domains.setdefault(last_cache_domain(c, online), []).append(c)
+    groups = list(domains.values())
+    if len(groups) == 1:
+        half = (len(big) + 1) // 2
+        groups = [big[:half], big[half:]]
+    small_cores = len(big) < len(cores)
+    first, second = (groups[-1], groups[-2]) if small_cores else (groups[0], groups[1])
+
+    def chosen(name, derived):
+        given = os.environ.get(f"CRALLOC_CPUS_{name.upper()}")
+        return parse_list(given) if given else derived
+
+    a = chosen("a", first[:PER_DOMAIN])
+    b = chosen("b", second[:PER_DOMAIN] or a)
+    in_a_domain = next((g for g in groups if a[0] in g), first)
+    in_b_domain = next((g for g in groups if b[0] in g), second)
+
+    measured = set(a + b)
+    free = [c for c in cores if c not in measured]
+    runner = free[-1:] or b[-1:]
+    upstream = [c for c in in_b_domain if c not in measured and c not in runner][:3]
+
+    def threads(chosen_cores):
+        return sorted({t for c in chosen_cores for t in siblings.get(c, [c])})
+
+    avoid = set(threads(in_a_domain)) | set(threads(a)) | set(threads(b))
+    heavy = [c for c in online if c not in avoid]
+    if sum(min(siblings[c]) == c for c in heavy) < PER_DOMAIN:
+        heavy = sorted(set(heavy) | set(threads(b)))
+    if not heavy:
+        heavy = online
+
+    return {
+        "a": a,
+        "b": b,
+        "single": chosen("single", [a[min(2, len(a) - 1)]]),
+        "heavy": chosen("heavy", heavy),
+        "runner": chosen("runner", runner),
+        "upstream": chosen("upstream", upstream),
+    }
+
+
+def main():
+    sets = derive()
+    args = sys.argv[1:]
+    if not args:
+        for name, cpus in sets.items():
+            print(name, format_list(cpus))
+        return 0
+    if len(args) != 1 or args[0] not in sets:
+        print(__doc__, file=sys.stderr)
+        return 2
+    print(format_list(sets[args[0]]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

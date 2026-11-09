@@ -11,7 +11,8 @@ q="$1" out="$2" round="$3" suite="$4" jobs="$5" pads="$6" allocs="$7"
 shift 7
 name() {
   case "$1" in
-    cra) echo cralloc ;; jem) echo jemalloc ;; tcm) echo tcmalloc-percpu ;; mim) echo mimalloc ;; gli) echo glibc ;;
+    cra) echo cralloc ;; cro) echo cralloc-outline ;; jem) echo jemalloc ;; tcm) echo tcmalloc-percpu ;;
+    mim) echo mimalloc ;; gli) echo glibc ;;
     *) echo "plan: unknown allocator $1" >&2; exit 2 ;;
   esac
 }

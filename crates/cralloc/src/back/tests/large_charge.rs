@@ -4,8 +4,9 @@
 //! over a page that holds data or under what a held block may write; and the retained count
 //! is the bytes of the free slots' pages that are not clean. They are checked after every step
 //! of random runs against the back end and against the heap, the second by a program that
-//! fills all it is told it may use, and after threaded runs. The random runs and the threaded
-//! ones also hold the count of kept outgrown slots to the charge of the slots marked kept.
+//! fills all it is told it may use, and after threaded runs, by turns on a shape whose blocks
+//! stagger by lines alone and one whose blocks stagger by pages too. The random runs and the
+//! threaded ones also hold the count of kept outgrown slots to the charge of the slots marked kept.
 //!
 //! The slow runs do less in a debug build, which is what `scripts/gate --all` runs, than in a
 //! release one: `cargo test --release -p cralloc --lib large_charge -- --include-ignored`
@@ -18,8 +19,19 @@ use super::*;
 use crate::SimHeap;
 use crate::classes::{C_ALIGN, MAX_SMALL_SIZE};
 use crate::heap::Found;
+use crate::space::Geometry;
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::Ordering::Relaxed;
+
+/// [`Native`] with blocks that stagger by whole pages as well as by lines, as on every real kernel
+/// but x86-64's, where they stagger by lines alone, as on `Native`. The random runs go over both: a
+/// block staggered by pages passes over pages of its slot, which stay clean, and a tenant at the
+/// slot's start writes those same pages (`region`, "Clean bits").
+enum Staggered {}
+
+impl Shape for Staggered {
+    const GEOMETRY: Geometry = Native::GEOMETRY.with_page_stagger();
+}
 
 /// What the bitmaps and the simulated memory say of the free large slots.
 #[derive(Default, Debug)]
@@ -45,6 +57,9 @@ struct Census {
     outgrown: usize,
     /// How many free slots are so marked.
     kept: usize,
+    /// Carved slots whose stagger passes over two pages or more: a block at such a slot's start
+    /// can shrink below the page its stagger starts in, and grow back over clean pages.
+    paged: usize,
 }
 
 /// Whether the `len` bytes at `at` all equal `byte`. A comparison of whole pages, which is a
@@ -103,6 +118,7 @@ fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
         let page = layout.page_size();
         let carved = Grow::unpack(host.grow(region).load()).carved;
         for slot in 0..carved.min(layout.slots()) {
+            census.paged += usize::from(layout.stagger(slot) >= 2 * page);
             let (word, bit) = (slot / BITS, slot % BITS);
             if tree::word(&host, Node::leaf(region, word)).load() >> bit & 1 == 0 {
                 // Held: no clean bit may stand over a page that holds data.
@@ -180,6 +196,8 @@ struct Met {
     kept: usize,
     /// Bytes the hold returned from regions frees kept young, by the slots' own ages.
     aged: usize,
+    /// The census's `paged`, summed over the steps.
+    paged: usize,
 }
 
 impl Met {
@@ -189,6 +207,7 @@ impl Met {
         self.advised += census.advised;
         self.told += census.told;
         self.kept += census.kept;
+        self.paged += census.paged;
     }
 
     fn join(&mut self, other: Met) {
@@ -198,6 +217,7 @@ impl Met {
         self.told += other.told;
         self.kept += other.kept;
         self.aged += other.aged;
+        self.paged += other.paged;
     }
 }
 
@@ -313,9 +333,12 @@ fn step<O: Os>(
             let at = pick(rng, live);
             let held = &mut live[at];
             let room = back.room(held.ptr.as_ptr()).unwrap();
-            let size = match rng.below(3) {
+            let size = match rng.below(4) {
                 0 => 1 + rng.below(room),
                 1 => (held.shadow.len() * 2).min(room),
+                // A page or two, below the pages a stagger passes over, which the next grow of a
+                // block at its slot's start reaches back over.
+                2 => (1 + rng.below(2 * page)).min(room),
                 _ => 1 + rng.below(held.shadow.len()),
             };
             let old = held.shadow.len();
@@ -403,8 +426,8 @@ fn classes() -> Vec<Class> {
 /// zero bit is set over a byte that is not zero, and the retained count is the bytes of the
 /// free slots' pages that are not marked clean. After a trim, when nothing fails, no free slot
 /// holds data. Returns what the run met.
-fn run(seed: u64, steps: usize, faults: bool) -> Met {
-    let state = state::<Native>();
+fn run<S: Shape>(seed: u64, steps: usize, faults: bool) -> Met {
+    let state = state::<S>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let mut rng = Rng(seed | 1);
@@ -415,6 +438,13 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
         .hold
         .unfloored
         .store(true, core::sync::atomic::Ordering::Relaxed);
+    // Most of the blocks a run may hold, from the first step, so that slots past a class's first
+    // few are in use at once: a stagger by pages grows with a slot's index.
+    for _ in 0..20 {
+        let class = classes[rng.below(classes.len())];
+        let size = some_size(&mut rng, class, S::GEOMETRY.page_size());
+        live.push(take(&back, &mut rng, class, size).0);
+    }
     for at in 0..steps {
         if faults && rng.below(6) == 0 {
             let call = [Call::Purge, Call::AdviseHuge, Call::Resident][rng.below(3)];
@@ -516,14 +546,19 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
 /// of these then takes ten seconds or less.
 const DEBUG_LESS: u64 = if cfg!(debug_assertions) { 4 } else { 1 };
 
-/// `seeds` runs; they must between them have met every kind of free slot these tests are about.
+/// `seeds` runs, every other one on each shape, the first [`Staggered`]; they must between them have
+/// met every kind of free slot these tests are about.
 fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     let mut met = Met::default();
-    for seed in 0..seeds {
-        met.join(run(salt ^ seed, steps, faults));
+    for at in 0..seeds {
+        met.join(if at.is_multiple_of(2) {
+            run::<Staggered>(salt ^ at, steps, faults)
+        } else {
+            run::<Native>(salt ^ at, steps, faults)
+        });
     }
     assert!(
-        met.zero != 0 && met.told != 0 && met.kept != 0 && met.aged != 0,
+        met.zero != 0 && met.told != 0 && met.kept != 0 && met.aged != 0 && met.paged != 0,
         "the runs missed a case: {met:?}"
     );
     // No free slot keeps a grown block's advice: its free and the move that keeps the slot it
@@ -558,74 +593,82 @@ fn the_count_follows_the_clean_bits_when_purges_and_advice_fail() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
     for round in 0..6u64 {
-        let state = state::<Native>();
-        state.get_or_reserve().unwrap();
-        let state = &*state;
-        let classes = classes();
-        let classes = &classes[..];
-        let done = core::sync::atomic::AtomicBool::new(false);
-        thread::scope(|scope| {
-            let workers: Vec<_> = (0..12u64)
-                .map(|t| {
-                    scope.spawn(move || {
-                        let back = state.get().unwrap();
-                        let mut rng = Rng(0x3c6e_f372_fe94_f82b ^ (round << 8) ^ t | 1);
-                        let mut live = Vec::new();
-                        for at in 0..4000usize {
-                            let byte = (at as u8).max(1);
-                            step(&back, &mut rng, classes, &mut live, byte, 6);
-                        }
-                        for held in live {
-                            assert!(intact(&held), "a live block changed");
-                            back.free(held.ptr, held.class);
-                        }
-                    })
-                })
-                .collect();
-            scope.spawn(|| {
-                let back = state.get().unwrap();
-                let mut at = 0u32;
-                while !done.load(Relaxed) {
-                    at += 1;
-                    if at.is_multiple_of(16) {
-                        back.trim();
-                    }
-                    state.os().advance_clock(DECAY_TICKS / 4);
-                    back.heartbeat();
-                    thread::yield_now();
-                }
-            });
-            for worker in workers {
-                worker.join().unwrap();
-            }
-            done.store(true, Relaxed);
-        });
-        let back = state.get().unwrap();
-        let census = census(&back);
-        assert_eq!(census.wrong_zero, 0, "round {round}");
-        assert_eq!(
-            (census.hidden, census.hidden_held),
-            (0, 0),
-            "round {round}: a clean bit over a written page ({census:?})"
-        );
-        assert_eq!(
-            count(state),
-            census.counted as isize,
-            "round {round}: {census:?}"
-        );
-        // Every change to the count of kept outgrown slots raced with every other, and it is
-        // still the charge of the slots marked kept: nothing drifts.
-        assert_eq!(
-            back.outgrown(),
-            census.outgrown,
-            "round {round}: {census:?}"
-        );
-        back.trim();
-        let census = self::census(&back);
-        assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
-        assert_eq!(count(state), 0, "round {round}");
-        assert_eq!(back.outgrown(), 0, "round {round}");
+        if round.is_multiple_of(2) {
+            race::<Staggered>(round);
+        } else {
+            race::<Native>(round);
+        }
     }
+}
+
+fn race<S: Shape>(round: u64) {
+    let state = state::<S>();
+    state.get_or_reserve().unwrap();
+    let state = &*state;
+    let classes = classes();
+    let classes = &classes[..];
+    let done = core::sync::atomic::AtomicBool::new(false);
+    thread::scope(|scope| {
+        let workers: Vec<_> = (0..12u64)
+            .map(|t| {
+                scope.spawn(move || {
+                    let back = state.get().unwrap();
+                    let mut rng = Rng(0x3c6e_f372_fe94_f82b ^ (round << 8) ^ t | 1);
+                    let mut live = Vec::new();
+                    for at in 0..4000usize {
+                        let byte = (at as u8).max(1);
+                        step(&back, &mut rng, classes, &mut live, byte, 6);
+                    }
+                    for held in live {
+                        assert!(intact(&held), "a live block changed");
+                        back.free(held.ptr, held.class);
+                    }
+                })
+            })
+            .collect();
+        scope.spawn(|| {
+            let back = state.get().unwrap();
+            let mut at = 0u32;
+            while !done.load(Relaxed) {
+                at += 1;
+                if at.is_multiple_of(16) {
+                    back.trim();
+                }
+                state.os().advance_clock(DECAY_TICKS / 4);
+                back.heartbeat();
+                thread::yield_now();
+            }
+        });
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        done.store(true, Relaxed);
+    });
+    let back = state.get().unwrap();
+    let census = census(&back);
+    assert_eq!(census.wrong_zero, 0, "round {round}");
+    assert_eq!(
+        (census.hidden, census.hidden_held),
+        (0, 0),
+        "round {round}: a clean bit over a written page ({census:?})"
+    );
+    assert_eq!(
+        count(state),
+        census.counted as isize,
+        "round {round}: {census:?}"
+    );
+    // Every change to the count of kept outgrown slots raced with every other, and it is
+    // still the charge of the slots marked kept: nothing drifts.
+    assert_eq!(
+        back.outgrown(),
+        census.outgrown,
+        "round {round}: {census:?}"
+    );
+    back.trim();
+    let census = self::census(&back);
+    assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
+    assert_eq!(count(state), 0, "round {round}");
+    assert_eq!(back.outgrown(), 0, "round {round}");
 }
 
 /// A tenant whose recorded size is zero, in a slot with no stagger, has an empty extent. A free
@@ -643,7 +686,7 @@ fn a_tenant_that_asked_for_nothing_leaves_a_resident_slot_to_the_purge() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
-    let class = large(Native::GEOMETRY.huge_page_size());
+    let class = large_of(Native::GEOMETRY.huge_page_size());
     let first = back.alloc(class, class.size()).unwrap().ptr;
     paint(first.as_ptr(), class.size(), 0x77);
     back.free(first, class);
@@ -784,7 +827,7 @@ struct Owned {
 /// C's `realloc` of a large block to a large size, as `c::realloc` does it on the process's
 /// heap: in place if the block's room allows, else a new block (with headroom if it grows)
 /// and a move of everything the old one's usable size covered.
-fn c_realloc(sim: &SimHeap<Native>, old: NonNull<u8>, size: usize) -> NonNull<u8> {
+fn c_realloc<S: Shape>(sim: &SimHeap<S>, old: NonNull<u8>, size: usize) -> NonNull<u8> {
     let heap = sim.heap();
     let Some(Found::Large { size: used }) = heap.find(old.as_ptr()) else {
         panic!("not a large block");
@@ -832,11 +875,11 @@ fn large_size(rng: &mut Rng) -> usize {
 /// bit stands over data, the count is the free slots' pages that are not clean, and memory
 /// promised zero is zero. A heap that claimed a slot for less than it then let the program
 /// write fails the check after that step.
-fn fill_all(seed: u64, steps: usize) -> Met {
-    let sim = SimHeap::<Native>::new();
+fn fill_all<S: Shape>(seed: u64, steps: usize) -> Met {
+    let sim = SimHeap::<S>::new();
     let os = sim.os();
     let heap = sim.heap();
-    let page = Native::GEOMETRY.page_size();
+    let page = S::GEOMETRY.page_size();
     let mut rng = Rng(seed | 1);
     let mut live: Vec<Owned> = Vec::new();
     let (mut fill, mut met) = (0u8, Met::default());
@@ -1066,8 +1109,13 @@ fn fill_all(seed: u64, steps: usize) -> Met {
 
 fn fills(seeds: u64, steps: usize) {
     let mut met = Met::default();
-    for seed in 0..seeds {
-        met.join(fill_all(0x510e_527f_ade6_82d1 ^ seed, steps));
+    for at in 0..seeds {
+        let seed = 0x510e_527f_ade6_82d1 ^ at;
+        met.join(if at.is_multiple_of(2) {
+            fill_all::<Staggered>(seed, steps)
+        } else {
+            fill_all::<Native>(seed, steps)
+        });
     }
     assert!(
         met.zero != 0 && met.told != 0 && met.kept != 0,
@@ -1168,6 +1216,9 @@ fn racing_moves_keep_within_the_budget() {
 
 /// The growth headroom rule, on a shape with regions large enough for it.
 mod headroom;
+
+/// One slot through every history its bits have to survive, on each kernel's pages.
+mod one_slot;
 
 /// More seeds of the random runs, which make half their moves not outgrowths, with and without
 /// failing calls.

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # usage: pad-build.sh PART [ALLOC...]
-#   PART: workloads, or one of the servers' programs (orders, sozu, miniredis, router, qdrant)
-#   ALLOC: cra jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64"
-# Builds this checkout's servers at bench-alloc's layout pads 0, 16, 32, 48 and 64
+#   PART: workloads, or a program (orders, sozu, miniredis, router, qdrant, surrealdb, datafusion,
+#   ruff)
+#   ALLOC: cra jem tcm mim gli (default all five), or cro, cralloc out of line; PADS: the pads, default
+#   "00 16 32 48 64", or
+#   on aarch64, where a line can be 128 bytes, "000 032 064 096 128"
+# Builds this checkout's servers at bench-alloc's layout pads
 # (BENCH_LAYOUT_PAD, as `benchrun layout --layouts pads` does) for each allocator: the workloads
 # and rpc-server into bench/target/ALLOC-pNN, a program into bench/target/ALLOC-pNN/apps/PROGRAM.
 # Local allocators.toml entries `NAME@padNN` with `build = "ALLOC-pNN"` (`pad-entries.sh`
@@ -27,13 +30,17 @@ allocs=("$@")
 [ ${#allocs[@]} -gt 0 ] || allocs=(cra jem tcm mim gli)
 feature() {
   case "$1" in
-    cra) echo cralloc ;; jem) echo je ;; tcm) echo tc ;; mim) echo mi ;; gli) echo "" ;;
+    cra) echo cralloc ;; cro) echo cralloc-outline ;; jem) echo je ;; tcm) echo tc ;; mim) echo mi ;; gli) echo "" ;;
     *) echo "pad-build: unknown allocator $1" >&2; exit 2 ;;
   esac
 }
+case "$(uname -m)" in
+  aarch64) default_pads="000 032 064 096 128" ;;
+  *) default_pads="00 16 32 48 64" ;;
+esac
 for a in "${allocs[@]}"; do
   feat=$(feature "$a")
-  for pad in ${PADS:-00 16 32 48 64}; do
+  for pad in ${PADS:-$default_pads}; do
     out="$W/bench/target/$a-p$pad"
     case "$part" in
       workloads)
@@ -42,7 +49,7 @@ for a in "${allocs[@]}"; do
         (cd "$W/bench" && BENCH_LAYOUT_PAD=$((10#$pad)) CARGO_BUILD_BUILD_DIR="$W/bench/target/pad-build-ws" \
            cargo build --release -p bench-workloads -p bench-rpc ${feat:+--features bench-alloc/$feat} \
            --target-dir "$out") ;;
-      orders | sozu | miniredis | router | qdrant | surrealdb)
+      orders | sozu | miniredis | router | qdrant | surrealdb | datafusion | ruff | meilisearch)
         (cd "$W/bench/apps/$part" && PATH="$data/inputs/$part/bin:$PATH" BENCH_LAYOUT_PAD=$((10#$pad)) \
            CARGO_BUILD_BUILD_DIR="$data/build/$part" \
            cargo build --release --locked ${feat:+--features $feat} --target-dir "$out/apps/$part") ;;

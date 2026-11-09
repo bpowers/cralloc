@@ -57,7 +57,7 @@ pub(super) static OPTED_OUT: AtomicBool = AtomicBool::new(false);
 #[repr(C)]
 struct SigSet([u64; 16]);
 
-/// `stack_t` on x86-64.
+/// `stack_t` on x86-64 and aarch64.
 #[repr(C)]
 struct SignalStack {
     sp: *mut c_void,

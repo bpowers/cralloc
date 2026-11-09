@@ -9,7 +9,10 @@ use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
 use core::ffi::CStr;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::Ordering::Acquire;
+#[cfg(target_arch = "aarch64")]
+use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use core::sync::atomic::{AtomicU64, fence};
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -41,10 +44,19 @@ const PR_SET_NAME: usize = 15;
 /// `futex` operations on a word private to the process.
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 1 | 128;
-/// The kernel's `sigset_t` is one 64-bit word on x86-64.
+/// The kernel's `sigset_t` is one 64-bit word on x86-64 and aarch64.
 const SIGSET_SIZE: usize = 8;
+/// The cache indexes sysfs lists for a CPU that may be a last-level cache, from the lowest to the
+/// highest this looks for: the highest present is the one, `index2` on an Apple chip and `index3`
+/// on Zen 5 or Graviton. The first two are the L1s, which say nothing of what CPUs share, so a
+/// machine that lists no more, as a VM may, has no cache domains, and on x86-64 neither has one
+/// without `index3`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const CACHE_INDEXES: core::ops::RangeInclusive<u32> = 3..=3;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const CACHE_INDEXES: core::ops::RangeInclusive<u32> = 2..=7;
 
-/// The kernel's `struct sigaction` on x86-64 (`include/linux/signal_types.h` with
+/// The kernel's `struct sigaction` on x86-64 and aarch64 (`include/linux/signal_types.h` with
 /// `__ARCH_HAS_SA_RESTORER`), not glibc's, which is laid out differently.
 #[repr(C)]
 struct KernelSigaction {
@@ -54,14 +66,14 @@ struct KernelSigaction {
     mask: u64,
 }
 
-/// The kernel's `struct timespec` on x86-64: two 64-bit fields.
+/// The kernel's `struct timespec` on 64-bit machines: two 64-bit fields.
 #[repr(C)]
 struct Timespec {
     seconds: i64,
     nanoseconds: i64,
 }
 
-/// The operating system, through raw Linux system calls on x86-64.
+/// The operating system, through raw Linux system calls.
 ///
 /// A zero-sized handle: every value is the same process's OS.
 #[derive(Clone, Copy, Default, Debug)]
@@ -109,7 +121,7 @@ unsafe fn range_call(
 fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
     // SAFETY: KERNEL-02. membarrier takes no pointers and changes no memory; the rseq commands only
     // restart sequences in flight, which every sequence must tolerate anyway.
-    result(unsafe {
+    let done = result(unsafe {
         syscall(
             nr::MEMBARRIER,
             [
@@ -122,7 +134,14 @@ fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
             ],
         )
     })
-    .map(|_| ())
+    .map(|_| ());
+    // The kernel's barriers lie past a shortcut (`kernel/sched/membarrier.c`): with one user of
+    // the address space or one CPU online the call returns having only read that count. What a
+    // thread that has exited stored came before its decrement of the count, a full barrier, so
+    // the caller sees it as long as its next loads stay behind that read, which this makes sure
+    // of. On x86-64 loads keep their order anyway, and this emits no instruction.
+    fence(Acquire);
+    done
 }
 
 /// Eight bytes from the kernel's random pool, or `None` if the call fails.
@@ -141,6 +160,127 @@ fn getrandom() -> Option<u64> {
         Ok(n) if n.addr() == 8 => Some(value),
         _ => None,
     }
+}
+
+/// What x86-64's geometry needs found: nothing, its pages being always 4 KiB.
+#[cfg(target_arch = "x86_64")]
+type Found = ();
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+const fn found() -> Found {}
+
+/// The heap's geometry on x86-64: a constant that folds away.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+const fn geometry_of((): Found) -> Geometry {
+    Geometry::DESIGN
+}
+
+/// `log2` of the kernel's page size once found, and zero until then. Slow paths read it when they
+/// make a `Space`, and no fast path does.
+#[cfg(target_arch = "aarch64")]
+static PAGE_SHIFT: AtomicU8 = AtomicU8::new(0);
+
+/// What aarch64's geometry needs found: `log2` of the kernel's page size, as a whole word (see
+/// `Space`).
+#[cfg(target_arch = "aarch64")]
+type Found = usize;
+
+/// One load once the page size is known, which no optimizer merges with another, so a `Space` makes
+/// it once and keeps the answer (`docs/research/large-blocks.md`, "What one large allocation and
+/// free cost").
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn found() -> Found {
+    (match PAGE_SHIFT.load(Relaxed) {
+        0 => find_page_shift(),
+        known => known,
+    }) as Found
+}
+
+/// The heap's geometry on aarch64, where a kernel's pages are 4, 16 or 64 KiB.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+const fn geometry_of(page_shift: Found) -> Geometry {
+    const SMALL: Geometry = Geometry::of_kernel(12);
+    const MEDIUM: Geometry = Geometry::of_kernel(14);
+    const LARGE: Geometry = Geometry::of_kernel(16);
+    match page_shift {
+        12 => SMALL,
+        14 => MEDIUM,
+        _ => LARGE,
+    }
+}
+
+/// The heap's geometry, for this file's own calls.
+#[inline(always)]
+fn geometry() -> Geometry {
+    LinuxOs::geometry()
+}
+
+/// Finds the kernel's page size and keeps the process's first answer, which a thread that raced
+/// it takes too: a thread under a sandbox of its own can find another.
+#[cfg(target_arch = "aarch64")]
+#[cold]
+#[inline(never)]
+fn find_page_shift() -> u8 {
+    let shift = page_shift_by_probing();
+    match PAGE_SHIFT.compare_exchange(0, shift, Relaxed, Relaxed) {
+        Ok(_) => shift,
+        Err(first) => first,
+    }
+}
+
+/// `log2` of the kernel's page size, without a C library or `/proc`, which a sandbox may lack.
+/// `madvise` refuses an address that is not page-aligned with `EINVAL`, and given an empty range
+/// at an aligned one it returns 0 having looked at nothing (`mm/madvise.c`: `check_input_range`,
+/// then the return for a length of zero), so no mapping is needed. Anything else, a refused call
+/// among them, is taken for 64 KiB: every range of that size is aligned on every kernel, so a
+/// wrong guess costs memory and never a failed call.
+#[cfg(target_arch = "aarch64")]
+fn page_shift_by_probing() -> u8 {
+    for shift in [12, 14] {
+        let empty = [
+            int(1 << shift),
+            int(0),
+            int(MADV_DONTNEED),
+            int(0),
+            int(0),
+            int(0),
+        ];
+        // SAFETY: KERNEL-14. A range of no bytes touches nothing, whatever the address.
+        if result(unsafe { syscall(nr::MADVISE, empty) }).is_ok() {
+            return shift;
+        }
+    }
+    16
+}
+
+/// How far [`Os::ticks`] shifts the generic timer's count, once a call has worked it out
+/// ([`timer_shift`]), and zero until then. The rate is fixed at boot, and its register is not free
+/// to read: `cntfrq_el0` takes 8.5 cycles in a tight loop where `cntvct_el0` takes one, and it
+/// took about 1% off `largepair` to stop reading it at each heartbeat (`docs/research/large-blocks.md`,
+/// "What one large allocation and free cost"). Every thread that works it out gets the same answer.
+/// A rate so high that the shift is zero is read each time, which costs only that.
+#[cfg(target_arch = "aarch64")]
+static TIMER_SHIFT: AtomicU8 = AtomicU8::new(0);
+
+/// How far to shift the generic timer's count so that it runs at a few gigahertz, as the rest of
+/// the crate takes [`Os::ticks`] to: `32 - log2(rate)`, to the nearest whole number, which keeps an
+/// interval of 2^32 ticks within a factor of the square root of two of a second at any rate. 7 at
+/// Apple's 24 MHz, 2 at Neoverse's 1 GHz, and 2 at 1.1 GHz, where rounding down would make an
+/// interval 1.95 s. `log2(rate)` is past its whole part by a half or more exactly when
+/// `rate^2 >= 2^(2 log + 1)`.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+const fn timer_shift(rate: u64) -> u32 {
+    let Some(log) = rate.checked_ilog2() else {
+        return 0;
+    };
+    let squared = rate as u128 * rate as u128;
+    let up = squared >= 1u128 << (2 * log + 1);
+    32u32.saturating_sub(log + up as u32)
 }
 
 /// A file opened for reading, closed when dropped.
@@ -378,23 +518,34 @@ fn unblock_sigabrt() {
 //   changes nothing.
 // - `fence(cpu)` is MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ with MEMBARRIER_CMD_FLAG_CPU, which
 //   returns after the thread of the process running on that CPU, if any, has been interrupted
-//   out of any rseq critical section; it fails with EPERM unless the process registered.
-// - `ticks` is the timestamp counter, which the trait asks nothing of.
+//   out of any rseq critical section, with the barriers the trait asks for (KERNEL-02); it fails
+//   with EPERM unless the process registered.
+// - `ticks` is the timestamp counter or the generic timer, which the trait asks nothing of.
 // - `abort` ends with exit_group if the signal did not end the process first, so it does not
 //   return.
 // - None of the calls allocates or depends on thread state, so any thread may make them,
 //   in a signal handler too.
 unsafe impl Os for LinuxOs {
-    const GEOMETRY: Geometry = Geometry::DESIGN;
+    type Found = Found;
+
+    #[inline(always)]
+    fn found() -> Found {
+        found()
+    }
+
+    #[inline(always)]
+    fn geometry_of(found: Found) -> Geometry {
+        geometry_of(found)
+    }
 
     fn reserve(&self, len: usize, align: usize) -> Result<NonNull<u8>, OsError> {
-        let page = Self::GEOMETRY.page_size();
+        let page = geometry().page_size();
         if len == 0 || !len.is_multiple_of(page) || !align.is_power_of_two() || align < page {
             return Err(OsError::EINVAL);
         }
-        // mmap returns page-aligned addresses, so `align - page` extra bytes always contain an
-        // aligned run of `len`. The ends are unmapped again below.
-        let span = len.checked_add(align - page).ok_or(OsError::ENOMEM)?;
+        // `align` extra bytes contain an aligned run of `len` wherever the mapping starts, even if
+        // the kernel's pages are smaller than the geometry's. The ends are unmapped again below.
+        let span = len.checked_add(align).ok_or(OsError::ENOMEM)?;
         let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
         let args = [
             ptr::null_mut(),
@@ -412,17 +563,15 @@ unsafe impl Os for LinuxOs {
         };
         let lead = mapped.addr().get().wrapping_neg() & (align - 1);
         let start = mapped.map_addr(|a| a.saturating_add(lead));
-        let tail = span - lead - len;
+        let tail = align - lead;
         // A failed trim leaves an inaccessible range mapped, which costs address space only.
         if lead != 0 {
             // SAFETY: KERNEL-03. `mapped..start` is the unused head of the fresh mapping.
             let _ = unsafe { range_call(nr::MUNMAP, mapped, lead, 0) };
         }
-        if tail != 0 {
-            let end = start.map_addr(|a| a.saturating_add(len));
-            // SAFETY: KERNEL-03. `end..end + tail` is the unused tail of the fresh mapping.
-            let _ = unsafe { range_call(nr::MUNMAP, end, tail, 0) };
-        }
+        let end = start.map_addr(|a| a.saturating_add(len));
+        // SAFETY: KERNEL-03. `end..end + tail` is the unused tail of the fresh mapping.
+        let _ = unsafe { range_call(nr::MUNMAP, end, tail, 0) };
         Ok(start)
     }
 
@@ -460,22 +609,24 @@ unsafe impl Os for LinuxOs {
     }
 
     unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {
-        // One byte a page, a huge page's worth at a time, on the stack.
-        const BATCH: usize = 512;
-        let page = Self::GEOMETRY.page_size();
-        let mut flags = [0u8; BATCH];
+        // The kernel writes one byte for each of its own pages, at least 4 KiB whatever the
+        // geometry says, so this many bytes of the range at a time fill no more than `flags`.
+        const FLAGS: usize = 512;
+        const MOST: usize = FLAGS * 4096;
+        let page = geometry().page_size();
+        let mut flags = [0u8; FLAGS];
         let (mut done, mut count) = (0, 0);
         while done < len {
-            let pages = ((len - done) / page).min(BATCH);
+            let bytes = (len - done).min(MOST);
             let at = start.map_addr(|a| a.saturating_add(done));
             // SAFETY: KERNEL-08. mincore reads no user memory and writes one byte for each of
-            // `pages` pages into `flags`, a live local of at least that many bytes.
+            // the kernel's pages in `bytes` into `flags`, a live local with room for them.
             result(unsafe {
                 syscall(
                     nr::MINCORE,
                     [
                         at.as_ptr(),
-                        int(pages * page),
+                        int(bytes),
                         flags.as_mut_ptr(),
                         int(0),
                         int(0),
@@ -483,8 +634,9 @@ unsafe impl Os for LinuxOs {
                     ],
                 )
             })?;
-            count += flags[..pages].iter().filter(|&&f| f & 1 != 0).count();
-            done += pages * page;
+            let pages = flags.iter().take(bytes / page);
+            count += pages.filter(|&&f| f & 1 != 0).count();
+            done += bytes;
         }
         Ok(count)
     }
@@ -523,7 +675,7 @@ unsafe impl Os for LinuxOs {
         });
         let timeout = timeout.as_ref().map_or(ptr::null(), ptr::from_ref);
         // SAFETY: KERNEL-11. The word is a live `AtomicU64`, aligned to 8, whose first four
-        // bytes, its low half on x86-64, the kernel reads as one 32-bit word and writes
+        // bytes, its low half on a little-endian machine, the kernel reads as one 32-bit word and writes
         // nothing; the timeout is null or a live `Timespec` it only reads. An error (the word
         // differed, a timeout, a signal) is the caller's cue to look at the word again.
         let _ = unsafe {
@@ -587,26 +739,48 @@ unsafe impl Os for LinuxOs {
         mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn ticks(&self) -> u64 {
         // SAFETY: KERNEL-09.
         unsafe { core::arch::x86_64::_rdtsc() }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn ticks(&self) -> u64 {
+        let shift = match TIMER_SHIFT.load(Relaxed) {
+            0 => {
+                let found = timer_shift(super::syscall::timer_rate());
+                TIMER_SHIFT.store(found as u8, Relaxed);
+                found
+            }
+            known => known as u32,
+        };
+        super::syscall::timer_count() << shift
+    }
+
     fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize> {
         let mut path = [0u8; 96];
-        let mut at = 0;
-        let built = match which {
-            Topology::Online => append(&mut path, &mut at, b"/sys/devices/system/cpu/online\0"),
-            Topology::SharedL3(cpu) => {
-                append(&mut path, &mut at, b"/sys/devices/system/cpu/cpu")
-                    && append_number(&mut path, &mut at, cpu)
-                    && append(&mut path, &mut at, b"/cache/index3/shared_cpu_list\0")
+        match which {
+            Topology::Online => {
+                let mut at = 0;
+                if !append(&mut path, &mut at, b"/sys/devices/system/cpu/online\0") {
+                    return None;
+                }
+                read_file(&path[..at], buf)
             }
-        };
-        if !built {
-            return None;
+            Topology::SharedLastLevel(cpu) => CACHE_INDEXES.rev().find_map(|index| {
+                let mut at = 0;
+                let built = append(&mut path, &mut at, b"/sys/devices/system/cpu/cpu")
+                    && append_number(&mut path, &mut at, cpu)
+                    && append(&mut path, &mut at, b"/cache/index")
+                    && append_number(&mut path, &mut at, index)
+                    && append(&mut path, &mut at, b"/shared_cpu_list\0");
+                if !built {
+                    return None;
+                }
+                read_file(&path[..at], buf)
+            }),
         }
-        read_file(&path[..at], buf)
     }
 
     fn environment(&self, buf: &mut [u8], each: impl FnMut(&[u8]) -> bool) -> bool {
@@ -689,7 +863,10 @@ mod tests {
     use std::process::Command;
     use std::string::String;
 
-    const PAGE: usize = 4096;
+    fn page() -> usize {
+        LinuxOs::geometry().page_size()
+    }
+
     const REGION: usize = 1 << 32;
 
     /// A file of `bytes` for `read_file`, and its NUL-terminated path.
@@ -761,7 +938,7 @@ mod tests {
         let mut buf = [0u8; 512];
         // No such CPU: the path is built, the open fails, and nothing is read.
         assert_eq!(
-            LinuxOs.topology(Topology::SharedL3(u32::MAX), &mut buf),
+            LinuxOs.topology(Topology::SharedLastLevel(u32::MAX), &mut buf),
             None
         );
         let mut path = [0u8; 16];
@@ -776,20 +953,40 @@ mod tests {
         assert!(crate::depot::domain::each_cpu(&buf[..len], |_| {}));
     }
 
+    /// What a `Space` keeps gives it the geometry it would have read, whatever the page.
+    #[test]
+    fn what_is_found_gives_the_geometry() {
+        #[cfg(target_arch = "aarch64")]
+        for shift in [12, 14, 16] {
+            assert_eq!(geometry_of(shift), Geometry::of_kernel(shift as u32));
+        }
+        let cell = crate::space::SpaceCell::new(LinuxOs);
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(space.plan().geometry().page_size(), page());
+        let shift = space.plan().region_shift();
+        assert_eq!(Some(space.plan()), LinuxOs::geometry().plan(shift));
+    }
+
     #[test]
     fn reserve_commit_purge_and_unmap() {
         let os = LinuxOs;
+        let page = page();
         let base = os.reserve(4 * REGION, REGION).unwrap();
         assert_eq!(base.addr().get() % REGION, 0);
         let p = base.as_ptr();
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, 2 * PAGE).unwrap();
-            assert_eq!(p.add(PAGE + 1).read(), 0);
-            p.add(PAGE + 1).write(42);
-            os.advise_huge(base, 2 * PAGE, HugePages::Avoid).unwrap();
-            os.purge(base, 2 * PAGE).unwrap();
-            assert_eq!(p.add(PAGE + 1).read(), 0);
+            os.commit(base, 2 * page).unwrap();
+            assert_eq!(p.add(page + 1).read(), 0);
+            p.add(page + 1).write(42);
+            // A kernel built without transparent huge pages refuses the advice, and nothing else.
+            let advised = os.advise_huge(base, 2 * page, HugePages::Avoid);
+            assert!(
+                matches!(advised, Ok(()) | Err(OsError::EINVAL)),
+                "{advised:?}"
+            );
+            os.purge(base, 2 * page).unwrap();
+            assert_eq!(p.add(page + 1).read(), 0);
             os.unmap(base, 4 * REGION).unwrap();
         }
     }
@@ -799,31 +996,33 @@ mod tests {
     fn resident_counts_written_pages() {
         let os = LinuxOs;
         let pages = 1100;
+        let page = page();
         let base = os.reserve(REGION, REGION).unwrap();
         let p = base.as_ptr();
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
-            os.commit(base, pages * PAGE).unwrap();
-            os.advise_huge(base, pages * PAGE, HugePages::Avoid)
-                .unwrap();
-            assert_eq!(os.resident(base, pages * PAGE), Ok(0));
+            os.commit(base, pages * page).unwrap();
+            // So that the pages are small, where the kernel has any other kind.
+            let _ = os.advise_huge(base, pages * page, HugePages::Avoid);
+            assert_eq!(os.resident(base, pages * page), Ok(0));
             for i in [0, 3, 600, 1099] {
-                p.add(i * PAGE).write(1);
+                p.add(i * page).write(1);
             }
-            assert_eq!(os.resident(base, pages * PAGE), Ok(4));
-            os.purge(base, pages * PAGE).unwrap();
-            assert_eq!(os.resident(base, pages * PAGE), Ok(0));
+            assert_eq!(os.resident(base, pages * page), Ok(4));
+            os.purge(base, pages * page).unwrap();
+            assert_eq!(os.resident(base, pages * page), Ok(0));
             os.unmap(base, REGION).unwrap();
         }
     }
 
     #[test]
     fn bad_arguments_are_errors_not_calls() {
-        assert_eq!(LinuxOs.reserve(0, PAGE), Err(OsError::EINVAL));
-        assert_eq!(LinuxOs.reserve(PAGE + 1, PAGE), Err(OsError::EINVAL));
-        assert_eq!(LinuxOs.reserve(PAGE, 3 * PAGE), Err(OsError::EINVAL));
+        let page = page();
+        assert_eq!(LinuxOs.reserve(0, page), Err(OsError::EINVAL));
+        assert_eq!(LinuxOs.reserve(page + 1, page), Err(OsError::EINVAL));
+        assert_eq!(LinuxOs.reserve(page, 3 * page), Err(OsError::EINVAL));
         assert_eq!(
-            LinuxOs.reserve(usize::MAX & !(PAGE - 1), REGION),
+            LinuxOs.reserve(usize::MAX & !(page - 1), REGION),
             Err(OsError::ENOMEM)
         );
     }
@@ -831,7 +1030,7 @@ mod tests {
     #[test]
     fn the_design_reservation_is_available() {
         let space = Space::reserve(&LinuxOs).unwrap();
-        assert_eq!(space.plan().objects(), Geometry::DESIGN.max_objects());
+        assert_eq!(space.plan().objects(), LinuxOs::geometry().max_objects());
         // SAFETY: the space was never published and nothing uses it.
         unsafe { space.unmap().unwrap() };
     }
@@ -842,6 +1041,187 @@ mod tests {
         LinuxOs.fence(0).unwrap();
         // A CPU number no machine has: nothing can be in flight there.
         LinuxOs.fence(8191).unwrap();
+    }
+
+    /// The page size this finds is the one the kernel uses: its own answer, through the C library
+    /// that tests may use, and one the system calls take.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn the_page_size_found_is_the_kernels() {
+        unsafe extern "C" {
+            fn getauxval(kind: u64) -> u64;
+        }
+        const AT_PAGESZ: u64 = 6;
+        // SAFETY: a query of the process's auxiliary vector.
+        let kernel = unsafe { getauxval(AT_PAGESZ) } as usize;
+        assert_eq!(1usize << page_shift_by_probing(), kernel);
+        assert_eq!(page(), kernel);
+    }
+
+    /// A sandbox that refuses `madvise`: the probe takes the largest page, and the heap laid out
+    /// for it serves and frees blocks of every kind, keeps their contents and survives its purges
+    /// being refused.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn a_refused_probe_leaves_a_working_heap() {
+        use crate::Cralloc;
+        use core::alloc::{GlobalAlloc, Layout};
+        use core::ffi::c_int;
+        const NAME: &str = "os::linux::kernel::tests::a_refused_probe_leaves_a_working_heap";
+        if !crate::fresh::is_child(NAME) {
+            return crate::fresh::run(NAME);
+        }
+        unsafe extern "C" {
+            fn prctl(option: c_int, ...) -> c_int;
+        }
+        #[repr(C)]
+        struct Filter(u16, u8, u8, u32);
+        #[repr(C)]
+        struct Program(u16, *const Filter);
+        const LOAD_NR: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS, offset 0: the call's number
+        const JUMP_EQ: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+        const RET: u16 = 0x06; // BPF_RET | BPF_K
+        let filter = [
+            Filter(LOAD_NR, 0, 0, 0),
+            Filter(JUMP_EQ, 0, 1, nr::MADVISE as u32),
+            Filter(RET, 0, 0, 0x0005_0000 | 1), // SECCOMP_RET_ERRNO | EPERM
+            Filter(RET, 0, 0, 0x7fff_0000),     // SECCOMP_RET_ALLOW
+        ];
+        let program = Program(4, filter.as_ptr());
+        // SAFETY: PR_SET_NO_NEW_PRIVS, then PR_SET_SECCOMP with SECCOMP_MODE_FILTER and a live
+        // program; this process runs only this test.
+        unsafe {
+            assert_eq!(prctl(38, 1u64, 0u64, 0u64, 0u64), 0);
+            assert_eq!(prctl(22, 2u64, &raw const program, 0u64, 0u64), 0);
+        }
+        assert_eq!(page(), 1 << 16);
+        let sizes = [
+            8,
+            48,
+            4096,
+            32 << 10,
+            64 << 10,
+            1 << 20,
+            16 << 20,
+            256 << 20,
+        ];
+        for _ in 0..3 {
+            let blocks: std::vec::Vec<_> = sizes
+                .iter()
+                .map(|&size| {
+                    let layout = Layout::from_size_align(size, 8).unwrap();
+                    // SAFETY: a non-zero size; the block is freed below with its layout.
+                    let block = unsafe { Cralloc.alloc(layout) };
+                    assert!(!block.is_null(), "{size}");
+                    // SAFETY: the block holds `size` bytes.
+                    unsafe {
+                        block.write(size as u8 | 1);
+                        block.add(size - 1).write(size as u8 | 1);
+                    }
+                    (block, layout)
+                })
+                .collect();
+            for &(block, layout) in &blocks {
+                let size = layout.size();
+                // SAFETY: a live block of `layout` that this test wrote, freed once.
+                unsafe {
+                    assert_eq!(block.read(), size as u8 | 1);
+                    assert_eq!(block.add(size - 1).read(), size as u8 | 1);
+                    Cralloc.dealloc(block, layout);
+                }
+            }
+            Cralloc::collect();
+        }
+    }
+
+    /// A kernel whose pages are smaller than the geometry says, as after a refused probe: each
+    /// reservation is whole and aligned wherever the kernel's page-aligned mapping starts, asking
+    /// what is resident writes nothing past its vector, and the first answer stands.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn a_page_size_guessed_too_large_is_safe() {
+        const NAME: &str = "os::linux::kernel::tests::a_page_size_guessed_too_large_is_safe";
+        if !crate::fresh::is_child(NAME) {
+            return crate::fresh::run(NAME);
+        }
+        let kernel = 1usize << page_shift_by_probing();
+        PAGE_SHIFT.store(16, Relaxed);
+        assert_eq!(find_page_shift(), 16);
+        let os = LinuxOs;
+        let page = page();
+        let align = 2 * page;
+        // Mappings go down from the last, so a spacer of `k` kernel pages just below a reservation
+        // makes the next one's start `k` pages lower: over the rounds, every start there is.
+        let mut last = os.reserve(page, align).unwrap();
+        for k in (1..=align / kernel).cycle().take(2 * align / kernel) {
+            const MAP_FIXED_NOREPLACE: usize = 0x10_0000;
+            let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE;
+            let spacer = [
+                int(last.addr().get() - k * kernel),
+                int(k * kernel),
+                int(PROT_NONE),
+                int(flags),
+                int(usize::MAX),
+                int(0),
+            ];
+            // SAFETY: an anonymous mapping that replaces nothing, or none if the place is taken.
+            let _ = unsafe { syscall(nr::MMAP, spacer) };
+            let base = os.reserve(page, align).unwrap();
+            assert_eq!(base.addr().get() % align, 0);
+            // SAFETY: whole pages of the fresh reservation, which nothing else uses.
+            unsafe {
+                os.commit(base, page).unwrap();
+                base.as_ptr().add(page - 1).write(1);
+            }
+            last = base;
+        }
+        // A range whose vector would be many times the stack's, in the kernel's pages.
+        let pages = 512;
+        let base = os.reserve(pages * page, page).unwrap();
+        // SAFETY: whole pages of the fresh reservation, which nothing else uses or writes during
+        // the look.
+        let seen = unsafe {
+            os.commit(base, pages * page).unwrap();
+            let _ = os.advise_huge(base, pages * page, HugePages::Avoid);
+            base.as_ptr().write(1);
+            os.resident(base, pages * page).unwrap()
+        };
+        assert!(seen <= pages, "{seen}");
+    }
+
+    /// An interval, 2^32 ticks, stays within a factor of the square root of two of a second at
+    /// any rate. Only 24 MHz has run: the others are arithmetic.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn the_timer_is_scaled_so_that_an_interval_is_about_a_second() {
+        assert_eq!(timer_shift(24_000_000), 7);
+        assert_eq!(timer_shift(1_000_000_000), 2);
+        assert_eq!(timer_shift(1_100_000_000), 2);
+        let rates = [
+            1_000_000,
+            10_000_000,
+            19_200_000,
+            24_000_000,
+            25_000_000,
+            50_000_000,
+            100_000_000,
+            200_000_000,
+            250_000_000,
+            1_000_000_000,
+            1_100_000_000,
+            1 << 31,
+            (1 << 32) - 1,
+        ];
+        for rate in rates {
+            let interval = (1u64 << 32) as f64 / (rate << timer_shift(rate)) as f64;
+            assert!((0.70..=1.42).contains(&interval), "{rate}: {interval} s");
+        }
+        // Either side of where a rate rounds the other way: the square root of two times 2^30.
+        assert_eq!(timer_shift(1_518_500_249), 2);
+        assert_eq!(timer_shift(1_518_500_250), 1);
+        // A rate no machine has still gives a shift that does not overflow.
+        assert_eq!(timer_shift(0), 0);
+        assert_eq!(timer_shift(u64::MAX), 0);
     }
 
     #[test]
@@ -868,16 +1248,17 @@ mod tests {
             fn _exit(code: i32) -> !;
         }
         let os = LinuxOs;
-        let base = os.reserve(2 * PAGE, PAGE).unwrap();
-        let second = base.map_addr(|a| a.saturating_add(PAGE));
+        let page = page();
+        let base = os.reserve(2 * page, page).unwrap();
+        let second = base.map_addr(|a| a.saturating_add(page));
         // SAFETY: whole pages of a fresh reservation that nothing else uses. The child only
         // reads two bytes and exits, which is safe after fork in a threaded process.
         unsafe {
-            os.commit(base, PAGE).unwrap();
-            os.wipe_on_fork(base, PAGE).unwrap();
-            os.commit(base, PAGE).unwrap();
-            os.wipe_on_fork(second, PAGE).unwrap();
-            os.commit(second, PAGE).unwrap();
+            os.commit(base, page).unwrap();
+            os.wipe_on_fork(base, page).unwrap();
+            os.commit(base, page).unwrap();
+            os.wipe_on_fork(second, page).unwrap();
+            os.commit(second, page).unwrap();
             base.as_ptr().write(7);
             second.as_ptr().write(9);
             let pid = fork();
@@ -892,7 +1273,7 @@ mod tests {
                 "both pages read as zero in the child"
             );
             assert_eq!(base.as_ptr().read(), 7, "the parent keeps its contents");
-            os.unmap(base, 2 * PAGE).unwrap();
+            os.unmap(base, 2 * page).unwrap();
         }
     }
 

@@ -24,7 +24,12 @@ plan. The only accesses to the word are through this atomic view. A simulated fo
 page with plain writes (`SimOs::wipe_for_fork`), but only while every other simulated thread is
 stopped; a real fork wipes the child's copy, which no thread of the parent can touch.
 
+A fork child inherits `READY` and the mapping under it: the bit is set after the commit returned,
+and the page stays writable in the child. It reads the word as zero and installs its own when it
+first needs one, or, where the wipe failed, keeps its parent's and has drains off. Either is a word
+of this page, so nothing here depends on when a generation is drawn.
+
 `AtomicU64` here is `front::sync::AtomicU64`, which is `core`'s type, or in this crate's tests a
 transparent wrapper of it, so the layout is that of a `u64` either way.
 
-Reviewed: a09c36e
+Reviewed: 0bc95dc

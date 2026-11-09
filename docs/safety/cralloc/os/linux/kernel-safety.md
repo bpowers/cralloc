@@ -1,8 +1,8 @@
 # Safety ledger: `crates/cralloc/src/os/linux/kernel.rs`
 
 `LinuxOs`, the `Os` implementation over system calls. Every unsafe block here but one calls
-`syscall()` (SYSCALL-01) or a thin helper over it, so each entry's obligation is that the
-kernel's contract for the call is met and that the call changes only what the caller may change.
+`syscall()` (SYSCALL-01 and SYSCALL-02) or a thin helper over it, so each entry's obligation is that
+the kernel's contract for the call is met and that the call changes only what the caller may change.
 The exception is the timestamp-counter read in `ticks` (KERNEL-09).
 Neither Kani nor Miri can run this file; the unit tests in it run every call on the real kernel.
 
@@ -33,9 +33,20 @@ mprotect changes protection, madvise may zero contents, munmap removes the mappi
 running on CPU `cpu`, if there is one, so that any rseq critical section in flight there is
 aborted, and returns when that is done; a CPU that is offline or out of range has nothing to
 interrupt and the call returns 0 (`kernel/sched/membarrier.c`, `membarrier_private_expedited`).
-A thread of the process preempted inside a sequence on that CPU was preempted by an interrupt,
-so its abort is already pending. An abort is something every sequence must already tolerate,
-since preemption causes one at any instruction. No memory changes.
+Without the flag, for `fence_all`, it does this on every CPU. A thread of the process preempted
+inside a sequence on that CPU left user mode by an interrupt or an exception, so its abort is already
+pending. An abort is something every sequence must already tolerate, since preemption causes one at
+any instruction. No memory changes.
+
+**The barrier.** The trait also asks `fence` to order memory between that CPU and the caller, in
+both directions. The argument is in `docs/research/memory-ordering.md`, "What stands in for a
+release": a full barrier on the caller and on the target CPU, before and after, and the scheduler's
+where no thread of the process runs there. The manual promises only the restart, so this is a
+trusted fact (`docs/design.md`, "What is trusted"), and `depot::ordering::kernel_fence` watches it on
+the kernel it runs on. With one user of the address space or one CPU online the call returns having
+only read that count: what an exited thread stored came before its decrement of the count, a full
+barrier, and on one CPU a context switch stands in. The `fence(Acquire)` after the system call keeps
+the caller's next loads behind that read.
 
 ## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `advise_huge`, `split_huge`, `unmap`
 
@@ -45,11 +56,13 @@ offset 0. It reads no user memory. The result is a fresh range disjoint from eve
 mapping. A null result is treated as failure, since the kernel never places an anonymous
 mapping at address zero.
 
-**Trimming munmaps in `reserve`.** `mapped` is page-aligned, so `lead`, the distance to the next
-`align` boundary, is a multiple of the page size and at most `align - page`. Hence
-`start + len <= mapped + span` and `tail = span - lead - len` does not underflow. The head
-`mapped..start` and the tail `start + len..mapped + span` are parts of the fresh mapping that
-nothing has seen, so unmapping them affects no one. If either munmap fails, an inaccessible range
+**Trimming munmaps in `reserve`.** `span` is `len + align`, and `lead`, the distance from `mapped` to
+the next `align` boundary, is below `align` wherever the mapping starts. Hence
+`start + len < mapped + span`, and the tail is `align - lead`, more than zero. This does not rest on
+the geometry's page being the kernel's, which is `mapped`'s alignment, since a refused probe can make
+it larger (KERNEL-14). `align` is a multiple of the kernel's page, so both pieces are whole pages of
+it. The head `mapped..start` and the tail `start + len..mapped + span` are parts of the fresh mapping
+that nothing has seen, so unmapping them affects no one. If either munmap fails, an inaccessible range
 stays mapped; that wastes address space and nothing else.
 
 **`commit`: mprotect to `PROT_READ | PROT_WRITE`.** The caller guarantees whole pages of a live
@@ -105,6 +118,13 @@ memory-safety matter: a child that drew its parent's generation would treat the 
 abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
 slow path, and duplicates nothing.
 
+**Where it runs.** A process draws one when it readies the magazine area (`prepare_first`): at its
+first slow path of a small class, if `collect` or a look at the background thread's word has not come
+first. A fork child draws when something first needs one. So the call is made in nearly every
+process, in a signal handler if that is where the slow path falls. It opens nothing and
+`GRND_INSECURE` keeps it from waiting for the kernel's pool. A filter that refuses it gets `random`'s
+fallback, and one that kills on it ends the process at that slow path.
+
 ## KERNEL-06: `abort` and the calls it makes
 
 **Blocks.** getpid, gettid and tgkill in `raise_sigabrt`; rt_sigaction in `default_sigabrt`;
@@ -140,7 +160,8 @@ first thread to finish its handler ends the process under every other thread's
   disposition in force on this thread: the program's handler the first time, the default (end
   the process with a core dump) the second.
 - rt_sigaction(SIGABRT, `&default`, null, 8) reads one `KernelSigaction` from a live local.
-  The layout is the kernel's x86-64 `struct sigaction`: handler, flags, restorer, mask, which
+  The layout is the kernel's `struct sigaction` on x86-64 and aarch64, each of which defines
+  `SA_RESTORER`: handler, flags, restorer, mask, which
   differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action pointer
   is null, so nothing is written back. Resetting a handled signal to its default does not
   discard a pending one.
@@ -158,16 +179,18 @@ pointer.
 
 ## KERNEL-08: `mincore` in `resident`
 
-**Block.** `syscall(MINCORE, [at, pages * page, flags, 0, 0, 0])`.
+**Block.** `syscall(MINCORE, [at, bytes, flags, 0, 0, 0])`.
 
 **Proof.** mincore(2) takes a page-aligned address, a length and a vector, reads no user
-memory, and writes one byte for each page of the range into the vector. `at` is `start` plus a
-multiple of the page size, page-aligned since `start` is (the trait's range rules), and the
-length is `pages` whole pages with `pages <= BATCH`, so the kernel writes at most `BATCH`
-bytes into `flags`, a live local array of `BATCH` bytes. The range lies inside the caller's,
-which is inside a live reservation, so the call reads or changes nothing of it. A failed call
-reports `-errno` and writes nothing the code then reads: the `?` returns before `flags` is
-looked at.
+memory, and writes one byte for each of the kernel's pages in the range into the vector. `at` is
+`start` plus a multiple of 2 MiB, page-aligned since `start` is (the trait's range rules). `bytes` is
+at most `FLAGS * 4096`, and no kernel's page is under 4 KiB, so the kernel writes at most `FLAGS`
+bytes into `flags`, a live local array of that many, whatever the geometry says the page is
+(KERNEL-14). The count reads the first `bytes / page` of them, in the array since the geometry's page
+is at least 4 KiB as well. If that page is too large they are the wrong bytes, and the trait lets a
+count be wrong. The range lies inside the caller's, which is inside a live reservation, so the call
+reads or changes nothing of it. A failed call reports `-errno` and writes nothing the code then reads:
+the `?` returns before `flags` is looked at.
 
 ## KERNEL-09: `ticks`
 
@@ -197,13 +220,11 @@ sigreturn, which the allocator's slow paths make.
 - A hypervisor may intercept the instruction (RDTSC exiting), making each read a VM exit; KVM
   does not by default. In an AMD SEV-ES or SEV-SNP guest an intercepted read raises #VC, which
   the guest kernel serves through the hypervisor (`vc_handle_rdtsc` in
-  `arch/x86/coco/sev/vc-handle.c`), unless the guest uses Secure TSC.
+  `arch/x86/coco/sev/vc-shared.c`), unless the guest uses Secure TSC.
 
 Under either, every slow path pays a trap or two (see below). That is a cost, not a safety
-matter. Checked against the Linux source at 7.3-rc7 (`arch/x86/kernel/process.c`,
-`kernel/seccomp.c`, `arch/x86/coco/sev/vc-handle.c`), read 2026-10-17. That rr traps the
-counter this way comes from the kernel discussions of `PR_SET_TSC` and its arm64 port, not
-from a measurement here.
+matter. That rr traps the counter this way comes from the kernel discussions of `PR_SET_TSC` and
+its arm64 port, not from a measurement here.
 
 **What the value is for.** Pacing what happens once an interval: the idle check's drains
 (`depot::heartbeat`, when a heartbeat looks at a slab) and the back end's clocked purge
@@ -212,6 +233,30 @@ so no safety argument rests on it: a counter that runs at an unexpected rate, di
 CPUs, or goes back makes a drain or a purge pass come earlier or later, and both are safe at
 any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
 `back/region.rs`).
+
+On aarch64 `ticks` has no block of its own: `timer_count` and `timer_rate` are SYSCALL-03, and the
+scale is a shift of at most 32 bits (`timer_shift`).
+
+## KERNEL-14: `madvise` of an empty range in `page_shift_by_probing`, on aarch64
+
+**Block.** `syscall(MADVISE, [1 << shift, 0, MADV_DONTNEED, 0, 0, 0])`.
+
+**Proof.** With a length of zero the kernel checks the address's alignment and returns, 0 or `EINVAL`,
+without looking at any mapping (`mm/madvise.c`: `do_madvise` returns after `check_input_range` when
+`len_in` is zero), so no memory changes whatever is at the address.
+
+**A wrong answer.** The answer sets the geometry, which must be no smaller than the kernel's page size
+for the memory calls to work: a refused call, as under a seccomp filter, or anything else unexpected,
+gives 64 KiB, a multiple of every page size aarch64 has. So the geometry's page can be larger than the
+kernel's, and what must hold for the kernel's page does not take it from the geometry: `reserve`
+(KERNEL-03) and `resident` (KERNEL-08). `a_refused_probe_leaves_a_working_heap` runs a heap this way,
+and `a_page_size_guessed_too_large_is_safe` those two calls. A filter that has `madvise` report
+success without acting is another matter: it breaks what `docs/design.md` trusts of every purge
+("What is trusted").
+
+**One answer.** The trait says a geometry is the same at every call. The probe is the same on every
+thread but where a thread has a filter of its own, so `find_page_shift` publishes by compare-and-swap,
+and every thread takes the first answer. Relaxed is enough: only the one word carries anything.
 
 ## KERNEL-10: `ReadOnly`, the files `read_file` and `environment` read
 
@@ -254,20 +299,20 @@ accesses atomically; `timeout` is null or the address of a live `struct timespec
 
 **Proof.** `word` comes from `&AtomicU64`, so it is live for the call and aligned to 8, and
 Rust gives it no non-atomic access while the reference exists. The kernel takes its first four
-bytes as the futex word: on x86-64, which is little-endian, the 64-bit word's low half. Other
+bytes as the futex word: on x86-64 and aarch64, which are little-endian, the 64-bit word's low half. Other
 threads change the whole 64-bit word with atomic instructions; a 32-bit atomic read of half of
-it is atomic too on x86-64 (an aligned access within one 8-byte word), and sees either the old
+it is atomic too on x86-64 and aarch64 (an aligned access within one 8-byte word), and sees either the old
 or the new low half. `expected` is passed truncated to its low 32 bits, the half the kernel
 compares. futex(2) with `FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with
 `expected`, and sleeps or returns; it writes no user memory. A change of the high half only (the
 generation's key) does not stop a wait that is about to begin; the callers wait only for changes
 of the state or the level bit, which are in the low half (`thread_word`, asserted there). Its fourth argument is a relative timeout, read once:
-`Timespec` is `#[repr(C)]` `{ i64, i64 }`, x86-64's `struct timespec`, with nanoseconds under
+`Timespec` is `#[repr(C)]` `{ i64, i64 }`, the 64-bit `struct timespec`, with nanoseconds under
 10^9 by construction, and it lives on the caller's stack for the call. `FUTEX_WAKE_PRIVATE`
 uses the address only as a key and touches no memory; the arguments after the count are
 ignored. Errors (the word differed, a timeout, a signal, an invalid argument) are returned in
-`rax` and dropped: the callers look at the word again after every return. Neither call
-changes a mapping, a protection or a disposition.
+the result register and dropped: the callers look at the word again after every return. Neither
+call changes a mapping, a protection or a disposition.
 
 ## KERNEL-12: glibc's `__libc_single_threaded`
 
@@ -285,13 +330,16 @@ any value it holds is valid. The declaration is linked against the C library
 (`#[link(name = "c")]`), which a build with the feature links anyway for `pthread_create`. The
 variable is a static of the library, live for the whole process. glibc writes it with a plain
 one-byte store from the thread that creates a thread (and its own documentation allows it to
-store true again when it knows the process has one thread). On x86-64 a plain byte store and an
-atomic byte load are the same instructions as atomic ones, so the load sees the old or the new
-byte and nothing else; within Rust the access is an atomic load, which is defined. The value is
+store true again when it knows the process has one thread). On x86-64 and aarch64 a byte store and
+a byte load are single-copy atomic whatever the source language called them, so the load sees the
+old or the new byte and nothing else, though on aarch64 perhaps the old one for a while; within
+Rust the access is an atomic load, which is defined. The value is
 only a hint for when to create the background thread. A stale or reset `true` makes the start
 more conservative: it waits for the next look at the level, or, if glibc reset it while the
 program had threads, for a later one. A `false` means a thread was created; the allocator's own
-thread is never created on that evidence before the program's.
+thread is never created on that evidence before the program's. In a fork child that does not know
+it is one (the limits of `note_drawn`, `depot/generation.rs`), that thread may be its parent's, and
+the background thread then starts in a child with one thread, which is no safety matter.
 
 ## KERNEL-13: `prctl(PR_SET_NAME, name)` in `name_thread`
 
@@ -308,7 +356,7 @@ the C library reads to decide anything. It opens no file. The other arguments ar
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-13 cover the individual
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-08 to KERNEL-14 cover the individual
 calls. The promises not covered by a
 single call:
 
@@ -316,15 +364,21 @@ single call:
   `LinuxOs`, which is zero-sized, changes nothing.
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
-  and arithmetic on locals, all async-signal-safe.
+  and arithmetic on locals, all async-signal-safe, but for `more_than_one_thread`'s read of one byte
+  of glibc's (KERNEL-12), which is too. On aarch64 `found` adds a load, and a probe the first
+  time, and `ticks` a load, and a read of the timer's rate and a store the first time. Each of those
+  words holds zero or its one value, so any thread may read or set it.
 
 **Machine checks.** The tests in `kernel.rs`:
 
 - `reserve_commit_purge_and_unmap`: alignment, zero-fill, purge zeroes, unmap.
+- `resident_counts_written_pages`: over more than one call to the kernel.
 - `bad_arguments_are_errors_not_calls`.
 - `the_design_reservation_is_available`: a 16 TiB reservation.
 - `rseq_fences_aim_at_one_cpu_after_registering`, `ticks_rise`, `random_numbers_differ` and
   `marked_pages_read_as_zero_in_a_forked_child`.
+- On aarch64, `the_page_size_found_is_the_kernels`, `a_refused_probe_leaves_a_working_heap`,
+  `a_page_size_guessed_too_large_is_safe` and `the_timer_is_scaled_so_that_an_interval_is_about_a_second`.
 - `abort_ends_the_process_with_sigabrt`,
   `abort_runs_the_programs_handler_then_ends_the_process_anyway` and
   `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
@@ -334,4 +388,4 @@ single call:
   the buffer, an empty file, a path with no NUL, a failed open, a read that fails after the
   open, and more calls on every path than the descriptor limit.
 
-Reviewed: 6439180
+Reviewed: 212489a

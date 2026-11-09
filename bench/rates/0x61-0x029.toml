@@ -1,0 +1,33 @@
+# The M1 Max: for each server job, 70% of the slowest allocator's saturated rate, requests a second.
+# From `standings/rates.py` over sessions of `servers-sat` and `servers-large-sat`, each line under
+# the rates it came from.
+# glibc 155479, tcmalloc-percpu 172185, mimalloc 174288, jemalloc 174753, snmalloc 175207, cralloc 181448
+"connect log" = 109000
+# glibc 133603, jemalloc 160271, tcmalloc-percpu 163925, mimalloc 164593, snmalloc 165596, cralloc 166048
+"connect log grpc h2" = 93500
+# glibc 135035, jemalloc 165342, tcmalloc-percpu 168087, cralloc 169514, mimalloc 169756, snmalloc 171298
+"connect log h2" = 94500
+# glibc 38665, mimalloc 51423, snmalloc 57533, tcmalloc-percpu 60443, jemalloc 63197, cralloc 63302
+"connect store 1M" = 27100
+# glibc 1144, jemalloc 1388, mimalloc 1392, cralloc 1438, snmalloc 1450, tcmalloc-percpu 1467
+"meilisearch hn" = 801
+# glibc 483091, jemalloc 486526, snmalloc 488858, cralloc 491466, tcmalloc-percpu 497088, mimalloc 541554
+"miniredis" = 338000
+# glibc 310249, mimalloc 366964, snmalloc 381488, tcmalloc-percpu 387365, jemalloc 397337, cralloc 400882
+"orders actix" = 217000
+# glibc 254667, mimalloc 322545, snmalloc 328217, tcmalloc-percpu 339743, jemalloc 344830, cralloc 347020
+"orders axum" = 178000
+# glibc 248988, mimalloc 322804, snmalloc 325622, jemalloc 340226, tcmalloc-percpu 343328, cralloc 343970
+"orders axum cache 2G" = 174000
+# glibc 166722, mimalloc 191050, cralloc 191236, tcmalloc-percpu 191368, snmalloc 192145, jemalloc 192402
+"orders axum h2" = 117000
+# cralloc 893, mimalloc 910, snmalloc 911, tcmalloc-percpu 914, glibc 919, jemalloc 955
+"qdrant mixed" = 625
+# glibc 4367, mimalloc 7206, cralloc 7711, tcmalloc-percpu 7786, jemalloc 7844, snmalloc 8019
+"router graphql" = 3060
+# mimalloc 7120, cralloc 7717, tcmalloc-percpu 7781, jemalloc 7826, snmalloc 8039
+"router graphql fast" = 4980
+# cralloc 238895, mimalloc 241048, glibc 241524, tcmalloc-percpu 241566, snmalloc 241986, jemalloc 242366
+"sozu proxy" = 167000
+# glibc 5826, jemalloc 7204, mimalloc 7400, tcmalloc-percpu 7595, cralloc 7743, snmalloc 7815
+"surrealdb mem" = 4080

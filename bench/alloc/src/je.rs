@@ -67,7 +67,9 @@ fn stats() -> Vec<(&'static str, u64)> {
         let rc = unsafe { _rjem_mallctl(name.as_ptr(), (&raw mut v).cast(), &mut len, std::ptr::null_mut(), 0) };
         if rc == 0 { v as u64 } else { u64::MAX }
     };
-    let page = 4096;
+    // SAFETY: sysconf reads a constant. jemalloc's page is the kernel's when it is configured
+    // on the machine it runs on.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
     let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
     let rss = statm.split(' ').nth(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0) * page;
     vec![

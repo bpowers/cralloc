@@ -216,7 +216,7 @@ offsets.
   to 32 KiB whose entry overlaps its own class's word;
 - the sized free's table for sizes of 2 KiB and up, indexed by byte: about one size in twelve
   overlaps a hot word, and a loop of sized frees of such a size can serialize;
-- the region table's top half: frees of objects in regions numbered 2048 and up.
+- the region table's top half: frees of objects in regions numbered 2047 and up.
 
 **Held, not built:** a word of the crate's own for the rseq offset would put every load under the
 rule. Zero must then mean "not yet", which needs a guarded sequence in the trusted core, 4 to 5

@@ -27,9 +27,12 @@
 //! **Parking without losing a wake-up.** Having decided, the thread stores `PARKED`, fences
 //! every CPU ([`Os::fence_all`]), and looks again at the counters and the slabs before it waits.
 //! A slow path counts its activity and installs its magazines before it loads the word, with no
-//! fence of its own. The fence orders the two: a slow path whose load of the word came before
-//! the fence reached its CPU had made its stores before it too, and the thread's second look sees
-//! them and backs out; one whose load came after sees `PARKED` and wakes the thread. Of the
+//! fence of its own, and a store and a later load may pass each other on the way to memory. The
+//! fence orders the two, because the barrier it puts on the slow path's CPU falls somewhere in the
+//! slow path's instructions, and every load and store of it stays on its side of that barrier: a
+//! slow path whose store came before the barrier is seen by the thread's second look, which backs
+//! out; one whose store came after has its load after too, which sees `PARKED`, and it wakes the
+//! thread. A thread not running at the fence has the scheduler's barrier for it. Of the
 //! two looks, the one at the slabs is what the argument rests on: any thread that could run on
 //! without a slow path has a magazine in a slab. The activity counter is a hint kept with a
 //! load and a store, which a preempted slow path can rewind; a slow path that installs nothing

@@ -1,5 +1,7 @@
 //! Cache domains: which CPUs share a last-level cache, so that the depot can keep the magazines
-//! one domain frees for that domain's allocations.
+//! one domain frees for that domain's allocations. That cache is whatever the kernel lists last:
+//! an L3 on Zen 5, where each CCD has one, on Graviton and Grace, where one covers every core,
+//! and an L2 on Apple's chips, where each cluster has one.
 //!
 //! A magazine that one L3 filled and another pops costs the popping CPU a fill from the other
 //! L3 for each line of the magazine and, mostly, for each object it names: with one depot
@@ -11,11 +13,15 @@
 //! **Finding them.** Once, from the process's first slow path (`generation::prepare`), and
 //! never lazily: a slow path that first opens a file after the program has entered a seccomp
 //! sandbox could kill the process. The kernel's list of online CPUs gives the CPUs to cover;
-//! the lowest one not yet covered reads the list of CPUs sharing its L3 (`Os::topology`), and
-//! every CPU in it gets the next domain number. So there is one read per L3, not per CPU. Any
-//! failure (no file, no L3, a refused call, text that does not parse, a CPU missing from its
-//! own list) leaves one domain. Domain numbers fold modulo [`MAX_DOMAINS`] on machines with
-//! more L3s; folded domains share stacks and work as one.
+//! the lowest one not yet covered reads the list of CPUs sharing its last-level cache
+//! (`Os::topology`), and every CPU in it gets the next domain number. So there is one read per
+//! such cache, not per CPU. Any failure (no file, no cache listed, a refused call, text that does
+//! not parse, a CPU missing from its own list) leaves one domain. So does a machine where every
+//! CPU is alone in its last listed cache: a cache that no two CPUs share is not a domain to keep
+//! magazines in, and a stack per CPU would keep each CPU's magazines from all the others. One CPU
+//! alone beside larger domains, a cluster with the rest offline, is a domain. Domain numbers fold
+//! modulo [`MAX_DOMAINS`] on machines with more such caches; folded domains share stacks and work
+//! as one.
 //!
 //! **The table.** One byte per CPU number, the CPU's domain. All zero is valid: every CPU in
 //! domain 0. The table is read only after the count is published (`Topology`), and a CPU the
@@ -159,15 +165,20 @@ impl Domains {
         let online = online.get(..len)?;
         let mut covered = [0u64; SLAB_COUNT / 64];
         let mut next = 0usize;
+        let mut cpus = 0usize;
         let mut ok = true;
         let parsed = each_cpu(online, |cpu| {
-            if !ok || cpu >= SLAB_COUNT || covered[cpu / 64] & (1 << (cpu % 64)) != 0 {
+            if cpu >= SLAB_COUNT {
+                return;
+            }
+            cpus += 1;
+            if !ok || covered[cpu / 64] & (1 << (cpu % 64)) != 0 {
                 return;
             }
             let domain = Domain::folded(next);
             next += 1;
             let mut list = [0u8; LIST_BYTES];
-            let Some(len) = os.topology(Topology::SharedL3(cpu as u32), &mut list) else {
+            let Some(len) = os.topology(Topology::SharedLastLevel(cpu as u32), &mut list) else {
                 ok = false;
                 return;
             };
@@ -185,7 +196,12 @@ impl Domains {
             });
             ok &= shared && found_self;
         });
-        (parsed && ok && next > 0).then_some(next.min(MAX_DOMAINS))
+        let count = if next == cpus {
+            1
+        } else {
+            next.min(MAX_DOMAINS)
+        };
+        (parsed && ok && next > 0).then_some(count)
     }
 }
 
@@ -265,20 +281,39 @@ mod tests {
         let (count, of) = found(Stripes(2));
         assert_eq!(count, 2);
         assert!((0..cpus).all(|cpu| of[cpu] == cpu % 2));
-        // Every CPU its own L3: as many domains as the table keeps apart.
-        let (count, of) = found(Blocks(1));
-        assert_eq!(count, MAX_DOMAINS);
-        assert!((0..cpus).all(|cpu| of[cpu] == cpu % MAX_DOMAINS));
+        // More L3s than the table keeps apart, if there are CPUs enough.
+        let (count, of) = found(Blocks(2));
+        assert_eq!(count, (cpus / 2).min(MAX_DOMAINS));
+        assert!((0..cpus).all(|cpu| of[cpu] == cpu / 2 % MAX_DOMAINS));
         // One L3 for all.
         let (count, of) = found(Blocks(cpus as u32));
         assert_eq!(count, 1);
         assert!(of.iter().all(|&d| d == 0));
     }
 
+    /// Nothing is known to be shared, so there is nothing to keep apart.
+    #[test]
+    fn every_cpu_alone_in_its_cache_is_one_domain() {
+        let (count, of) = found(crate::os::sim::SimTopology::Blocks(1));
+        assert_eq!(count, 1);
+        assert!(of.iter().all(|&d| d == 0));
+    }
+
+    /// The rest of a lone CPU's cluster may be offline; it is still not the other clusters'.
+    #[test]
+    fn one_cpu_alone_beside_a_cluster_is_a_domain() {
+        // A block of every CPU but the last, and the last alone.
+        let last = crate::os::sim::SIM_THREADS - 1;
+        let (count, of) = found(crate::os::sim::SimTopology::Blocks(last as u32));
+        assert_eq!(count, 2);
+        assert!((0..last).all(|cpu| of[cpu] == 0));
+        assert_eq!(of[last], 1);
+    }
+
     #[test]
     fn any_failure_leaves_one_domain() {
         use crate::os::sim::SimTopology::*;
-        for topology in [Missing, NoL3, Garbage] {
+        for topology in [Missing, NoCaches, Garbage] {
             let (count, of) = found(topology);
             assert_eq!(count, 1, "{topology:?}");
             assert!(of.iter().all(|&d| d == 0), "{topology:?}");
@@ -362,23 +397,32 @@ mod tests {
         assert_eq!(Domain::folded(MAX_DOMAINS + 3).index(), 3);
     }
 
+    #[cfg(cralloc_os)]
     #[test]
     #[cfg_attr(miri, ignore)]
     fn this_machine_has_a_topology_the_discovery_reads() {
         use crate::os::linux::LinuxOs;
         let domains = Domains::new();
         domains.discover(&LinuxOs);
-        // The distinct L3 lists of the online CPUs, read with the standard library.
+        // The distinct lists of the online CPUs' highest cache index, read with the standard
+        // library.
         let mut lists = std::collections::BTreeSet::new();
+        let mut cpus = 0;
         let online = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap_or_default();
         each_cpu(online.as_bytes(), |cpu| {
-            let path =
-                std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list");
-            if let Ok(list) = std::fs::read_to_string(path) {
+            cpus += 1;
+            let highest = crate::os::linux::CACHE_INDEXES.rev().find_map(|index| {
+                let cache = std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index{index}");
+                std::fs::read_to_string(cache + "/shared_cpu_list").ok()
+            });
+            if let Some(list) = highest {
                 lists.insert(list);
             }
         });
-        let expected = lists.len().clamp(1, MAX_DOMAINS);
+        let expected = match lists.len() {
+            n if n == cpus => 1,
+            n => n.clamp(1, MAX_DOMAINS),
+        };
         assert_eq!(domains.count(), expected);
         // CPU 0 is always in domain 0.
         assert_eq!(domains.of(Some(0)), Domain::ZERO);

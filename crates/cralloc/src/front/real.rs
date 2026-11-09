@@ -12,12 +12,12 @@
 //! `docs/safety/cralloc/front/real-safety.md`.
 //!
 //! Object pointers cross the assembly as integers. A pushed pointer's provenance is exposed, and
-//! a popped address takes the exposed provenance back; the heap exposes its reservation's
-//! provenance when it starts, so every object address has some to take.
+//! a popped address takes the exposed provenance back; every slow path exposes the reservation's
+//! provenance (`heap::exposed`), so every object address has some to take.
 
 use super::SLABS;
-use super::generated::x86_64::slab as outline;
-use super::generated::x86_64_inline::slab as inline;
+use super::inlined::slab as inline;
+use super::outlined::slab as outline;
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
 use crate::classes::SmallClass;
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn the_selftest_routine_runs() {
         // SAFETY: the self-test has no safety requirements.
-        let sum = unsafe { super::super::generated::x86_64::selftest::vg_selftest_add(2, 3) };
+        let sum = unsafe { super::super::outlined::selftest::vg_selftest_add(2, 3) };
         assert_eq!(sum, 5);
     }
 

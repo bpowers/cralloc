@@ -22,8 +22,9 @@ call with the C calling convention; the function is sound to run when the loader
 
 **Proof.** The static is one `extern "C" fn()`, placed in `.init_array`, kept by `#[used]`,
 relocated by the loader before any initializer runs. glibc calls it with three arguments and
-musl with none; a function of none ignores them under System V. The loader runs it after the
-C library is initialized. It reads the environment (BACKGROUND-02) and, if asked, looks up
+musl with none; a function of none ignores them, since the caller owns the argument registers
+under both targets' ABIs. The loader runs it after the C library, which the library names as
+needed, is initialized. It reads the environment (BACKGROUND-02) and, if asked, looks up
 the next `pthread_create` (PRELOAD-05) and starts the thread (PRELOAD-06). The heap needs no
 initialization, so the allocations these make are ordinary. It does not unwind: the library
 is built with `panic = "abort"`.
@@ -35,10 +36,11 @@ with `pthread_create`'s C signature, which `CreateThread` is.
 
 **Proof.** `RTLD_NEXT` is `(void *)-1` in glibc and musl. The name is a `&'static CStr`.
 `dlsym` returns the address of the definition of `pthread_create` in the objects after this
-one in the lookup order, which is the C library's (the preload library comes first, so the
-next definition is the one the program would have bound without it); null if there is none,
+one in the lookup order, which is the C library's, or that of a library preloaded after this
+one, which keeps its contract (the next definition is the one the program would have bound
+without this library); null if there is none,
 which the code checks before the transmute and answers with `EAGAIN`. A function pointer and
-a data pointer are both 8 bytes on x86-64, and POSIX requires that `dlsym`'s result be
+a data pointer are both 8 bytes on both targets, and POSIX requires that `dlsym`'s result be
 convertible to a function pointer. `dlsym` may allocate (glibc's error buffer), which re-enters
 the library's allocator like any other call; it holds no allocator state. Racing first callers
 may both look it up and store the same value.
@@ -74,4 +76,4 @@ It replaces nothing else, and the C library's own definition stays reachable thr
 the allocator's thread first. Nothing in the library or the C library assumes the address of
 `pthread_create` is the C library's.
 
-Reviewed: 6439180
+Reviewed: 5a8ade1

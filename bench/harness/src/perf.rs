@@ -3,6 +3,7 @@
 //! Counters are opened with `inherit`, so threads created afterwards are counted too, and a
 //! read sums every thread, live or exited. Enabling or disabling a counter applies to its
 //! inherited copies as well. Open them before spawning any thread.
+use crate::cpus::Cpus;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -40,14 +41,18 @@ impl Event {
         }
     }
 
-    fn type_config(self) -> (u32, u64) {
+    /// `perf_event_attr`'s type and config. `pmu` is the dynamic type of the CPU's PMU, where it
+    /// has one of its own (`core_pmu`): a generic hardware event names it in the config's high
+    /// half, and a raw event's type is that PMU.
+    fn type_config(self, pmu: Option<u32>) -> (u32, u64) {
         const HARDWARE: u32 = 0;
         const SOFTWARE: u32 = 1;
         const RAW: u32 = 4;
+        let of_pmu = pmu.map_or(0, |t| u64::from(t) << 32);
         match self {
-            Event::Raw { config, .. } => (RAW, config),
-            Event::Cycles | Event::CyclesUser => (HARDWARE, 0),
-            Event::Instructions => (HARDWARE, 1),
+            Event::Raw { config, .. } => (pmu.unwrap_or(RAW), config),
+            Event::Cycles | Event::CyclesUser => (HARDWARE, of_pmu),
+            Event::Instructions => (HARDWARE, of_pmu | 1),
             Event::TaskClock => (SOFTWARE, 1),
             Event::PageFaults => (SOFTWARE, 2),
             Event::ContextSwitches => (SOFTWARE, 3),
@@ -55,12 +60,41 @@ impl Event {
     }
 
     fn is_hardware(self) -> bool {
-        matches!(self.type_config().0, 0 | 4)
+        matches!(self, Event::Raw { .. } | Event::Cycles | Event::CyclesUser | Event::Instructions)
     }
 }
 
-/// What a workload counts in-process. Three hardware counters: the runner's own two per
-/// process and the NMI watchdog's one leave this many of Zen 5's six free.
+/// The dynamic type of the PMU of the CPUs a process may run on: of the core PMUs that list
+/// their CPUs in sysfs, the one covering most of them. None on a machine whose one core PMU lists
+/// none (x86-64 without hybrid cores), where the generic events reach it anyway.
+///
+/// A machine with two kinds of core has a PMU for each, and a generic event opened for no CPU
+/// goes to whichever PMU the kernel tries first, which counts nothing on the other's cores. Even
+/// a machine of one kind may give its PMU a name of its own (`armv8_pmuv3_0`, with event names
+/// its own too), so this finds it by CPU and not by name. A job stays on one kind of core: an
+/// event of this PMU stops counting off them, and the run then reads as multiplexed.
+fn core_pmu(allowed: &[usize]) -> Option<u32> {
+    let mut best = None;
+    for dir in std::fs::read_dir("/sys/bus/event_source/devices").ok()?.flatten() {
+        // Uncore PMUs name one CPU to open them on in `cpumask`; only core PMUs have `cpus`.
+        let Some(cpus) = std::fs::read_to_string(dir.path().join("cpus")).ok().and_then(|s| Cpus::parse(s.trim()))
+        else {
+            continue;
+        };
+        let Some(ty) = std::fs::read_to_string(dir.path().join("type")).ok().and_then(|s| s.trim().parse().ok()) else {
+            continue;
+        };
+        let covered = allowed.iter().filter(|c| cpus.0.contains(c)).count();
+        if covered > 0 && best.is_none_or(|(n, _)| covered > n) {
+            best = Some((covered, ty));
+        }
+    }
+    best.map(|(_, ty)| ty)
+}
+
+/// What a workload counts in-process. Three hardware counters, with the runner's own two per
+/// process and the NMI watchdog's one where it has one: within Zen 5's six and Firestorm's ten,
+/// of which only two can count instructions.
 pub const REGION_EVENTS: &[Event] = &[
     Event::Cycles,
     Event::CyclesUser,
@@ -76,19 +110,32 @@ pub const REGION_EVENTS: &[Event] = &[
 /// `BENCH_EVENTS=dtlb_walk_4k=0x1045,dtlb_walk_2m=0x4045` counts page walks by page size.
 /// They count user mode only.
 ///
-/// The core has six counters and the NMI watchdog may hold one, so any extra event replaces
+/// Zen 5 has six counters and the NMI watchdog may hold one, so any extra event replaces
 /// the user-cycles counter to make room for three; a run whose counters were multiplexed
 /// says so in its result. For investigations: the runner never sets it.
 pub fn extra_events() -> Vec<Event> {
-    let Ok(list) = std::env::var("BENCH_EVENTS") else { return Vec::new() };
+    events_from("BENCH_EVENTS")
+}
+
+/// What the runner counts for a whole process: [`PROCESS_EVENTS`], and any raw events in
+/// `BENCH_PROCESS_EVENTS`, listed as for [`extra_events`]. For a program with no measured phase,
+/// or a server: they reach the run's `process` record and, for a server, `extra_per_req`.
+pub fn process_events() -> Vec<Event> {
+    let mut events = PROCESS_EVENTS.to_vec();
+    events.extend(events_from("BENCH_PROCESS_EVENTS"));
+    events
+}
+
+fn events_from(variable: &str) -> Vec<Event> {
+    let Ok(list) = std::env::var(variable) else { return Vec::new() };
     list.split(',')
         .filter(|s| !s.is_empty())
         .map(|item| {
             let (name, config) =
-                item.split_once('=').unwrap_or_else(|| panic!("BENCH_EVENTS item {item:?} is not name=config"));
+                item.split_once('=').unwrap_or_else(|| panic!("{variable} item {item:?} is not name=config"));
             let hex = config.trim_start_matches("0x");
             let config =
-                u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("BENCH_EVENTS config {config:?} is not hex"));
+                u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("{variable} config {config:?} is not hex"));
             Event::Raw { name: Box::leak(name.to_string().into_boxed_str()), config }
         })
         .collect()
@@ -112,8 +159,8 @@ struct Counter {
 }
 
 impl Counter {
-    fn open(event: Event, target: Target) -> io::Result<Counter> {
-        let (ty, config) = event.type_config();
+    fn open(event: Event, target: Target, pmu: Option<u32>) -> io::Result<Counter> {
+        let (ty, config) = event.type_config(pmu);
         // struct perf_event_attr, version 8 (128 bytes).
         let mut attr = [0u64; 16];
         attr[0] = ty as u64 | (128u64 << 32);
@@ -171,7 +218,19 @@ impl Counters {
     /// Opens `events` for `target`. Hardware events that cannot be opened (no PMU, or a
     /// restrictive `perf_event_paranoid`) are an error; so are software ones.
     pub fn open(events: &[Event], target: Target) -> io::Result<Counters> {
-        events.iter().map(|&e| Counter::open(e, target)).collect::<io::Result<Vec<_>>>().map(Counters)
+        let pid = match target {
+            Target::Me => 0,
+            Target::ChildBeforeExec(pid) => pid,
+        };
+        Counters::open_on(events, target, &Cpus::allowed_by(pid).0)
+    }
+
+    /// [`open`](Self::open) for a target that will run on `cpus`. A child just forked may not
+    /// have set its own affinity yet, and until then reads as its parent's, whose core may have
+    /// another PMU.
+    pub fn open_on(events: &[Event], target: Target, cpus: &[usize]) -> io::Result<Counters> {
+        let pmu = core_pmu(cpus);
+        events.iter().map(|&e| Counter::open(e, target, pmu)).collect::<io::Result<Vec<_>>>().map(Counters)
     }
 
     /// The in-process region counters, with any `BENCH_EVENTS` ([`extra_events`]). Panics
@@ -240,5 +299,47 @@ impl Sample {
         }
         m.insert("multiplexed".into(), self.multiplexed.into());
         serde_json::Value::Object(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpus::pin_to;
+
+    fn spin() {
+        let t = std::time::Instant::now();
+        while t.elapsed().as_millis() < 2 {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// On every CPU this test may use, whatever its kind: the counters count, with kernel and
+    /// user cycles apart, and threads started after the open are summed in.
+    #[test]
+    fn counts_on_every_cpu_and_inherits() {
+        for cpu in Cpus::allowed().0 {
+            std::thread::spawn(move || {
+                pin_to(&[cpu]);
+                let c = Counters::open(&[Event::Cycles, Event::CyclesUser, Event::Instructions], Target::Me).unwrap();
+                c.enable();
+                spin();
+                let alone = c.read();
+                std::thread::spawn(spin).join().unwrap();
+                c.disable();
+                let s = c.read();
+                assert!(!s.multiplexed, "CPU {cpu}: multiplexed");
+                for name in ["cycles", "cycles_user", "instructions"] {
+                    assert!(alone.get(name).unwrap() > 0, "CPU {cpu}: no {name}");
+                }
+                assert!(s.get("cycles").unwrap() >= s.get("cycles_user").unwrap(), "CPU {cpu}: {s:?}");
+                assert!(
+                    s.get("cycles_user").unwrap() > alone.get("cycles_user").unwrap(),
+                    "CPU {cpu}: the second thread was not counted: {alone:?} then {s:?}"
+                );
+            })
+            .join()
+            .unwrap();
+        }
     }
 }

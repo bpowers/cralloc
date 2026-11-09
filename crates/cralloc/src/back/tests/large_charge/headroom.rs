@@ -24,6 +24,13 @@ impl Shape for Roomy {
     const GEOMETRY: Geometry = Geometry::new(12, 16, 25, 17, 128, 1, MagazineSize::MAX);
 }
 
+/// [`Roomy`] as [`Staggered`] is `Native`.
+enum StaggeredRoomy {}
+
+impl Shape for StaggeredRoomy {
+    const GEOMETRY: Geometry = Roomy::GEOMETRY.with_page_stagger();
+}
+
 /// The most a block of the runs asks for. Four times it is a class a region holds twelve of,
 /// as sixteen times the largest block that gets that much is.
 const TOP: usize = 600 << 10;
@@ -155,9 +162,10 @@ fn room_is_clean<S: Shape>(back: &Back<'_, Sim<S>>, live: &[Owned], reach: &mut 
         let location = back.space().locate(owned.ptr.as_ptr()).unwrap();
         let (slot, _) = layout.block_at(location.offset as usize).unwrap();
         let usable = back.usable_size(owned.ptr.as_ptr()).unwrap();
-        // A page more, because the back end reckons a block that is not staggered from its
-        // slot's stagger; and to a huge page, because advice faults whole ones.
-        let end = (location.offset as usize + usable).div_ceil(layout.page_size()) as u32 + 1;
+        // From the slot's stagger, because the back end reckons a block that is not staggered from
+        // there; and to a huge page, because advice faults whole ones.
+        let from = layout.slot_bytes(slot) + layout.stagger(slot);
+        let end = (from + usable).div_ceil(layout.page_size()) as u32;
         let most = reach.entry((location.region.index(), slot)).or_insert(0);
         *most = (*most).max(layout.huge_ceil(end));
     }
@@ -208,11 +216,11 @@ fn room_is_clean<S: Shape>(back: &Back<'_, Sim<S>>, live: &[Owned], reach: &mut 
 /// no zero bit stands over data, the count is the free slots' pages that are not clean, and
 /// memory promised zero is zero, and the room past what a slot's tenants were given is clean;
 /// at the end nothing is resident and the count is zero.
-fn fill_roomy(seed: u64, steps: usize, faults: bool) -> Seen {
-    let sim = SimHeap::<Roomy>::new();
+fn fill_roomy<S: Shape>(seed: u64, steps: usize, faults: bool) -> Seen {
+    let sim = SimHeap::<S>::new();
     let os = sim.os();
     let heap = sim.heap();
-    let page = Roomy::GEOMETRY.page_size();
+    let page = S::GEOMETRY.page_size();
     let mut rng = Rng(seed | 1);
     let mut live: Vec<Owned> = Vec::new();
     let (mut fill, mut seen) = (0u8, Seen::default());
@@ -526,8 +534,12 @@ fn small_or(size: usize, usable: usize) -> bool {
 
 fn roomy_runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     let mut seen = Seen::default();
-    for seed in 0..seeds {
-        let one = fill_roomy(salt ^ seed, steps, faults);
+    for at in 0..seeds {
+        let one = if at.is_multiple_of(2) {
+            fill_roomy::<StaggeredRoomy>(salt ^ at, steps, faults)
+        } else {
+            fill_roomy::<Roomy>(salt ^ at, steps, faults)
+        };
         seen.met.join(one.met);
         seen.full += one.full;
         seen.less += one.less;

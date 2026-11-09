@@ -25,6 +25,7 @@ mi = ["bench-alloc/mi"]
 mi-sized = ["bench-alloc/mi-sized"]
 mi-crate = ["bench-alloc/mi-crate"]
 cralloc = ["bench-alloc/cralloc"]
+cralloc-outline = ["bench-alloc/cralloc-outline"]
 je = ["bench-alloc/je"]
 tc = ["bench-alloc/tc"]
 sn = ["bench-alloc/sn"]
@@ -59,3 +60,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("logs-debu
 lto = true
 codegen-units = 1
 debug = true
+
+# See the same section in ../../Cargo.toml.
+[profile.release.package.snmalloc-sys]
+debug = false

@@ -4,7 +4,8 @@ This directory says what we know about allocator performance, and why. `docs/des
 the allocator does. Each section here is a summary of the note it links, which holds the evidence.
 
 Everything was measured on one machine unless stated: Ryzen 9 9950X (Zen 5, two L3s of 32 MiB),
-Linux 7.2.9, glibc 2.43. The rules should carry to other machines. The numbers will not.
+Linux 7.2.9, glibc 2.43. An Apple M1 Max answered the same questions, and some of the rules did not
+carry to it: "On an Apple core" says which, and its notes have the rest.
 
 ## What gates the fast path
 
@@ -56,6 +57,29 @@ splits it.
 The limits we actually hit are dispatch width and memory renaming, a 12-way L1, the L2 TLB's set
 index repeating at 256 pages, the prefetcher's stream and the L3 boundary.
 [hardware.md](hardware.md) says which rules should carry to another CPU.
+
+## On an Apple core
+
+An allocate and free costs 13.0 cycles on a Firestorm core, inlined or through two calls, against a
+floor of 12.8 for a per-CPU magazine under rseq, and 22.0 through C's `free`. What sets it is
+forwarding the hot word, 6 cycles a hop and two hops a pair, and sixteen variations of the
+instructions all land between 12.8 and 13.1. There is no front-end cliff and no hold at a store's
+page offset, and a call costs nothing a pair. The core renames memory, but only through a base
+register nothing writes between the store and the load, and each call computes a per-CPU word's base
+afresh. Keeping the slab's address in a register takes the pair to 8.0. It needs an unstable compiler
+feature, and of eight real jobs only a binary tree feels it, so it is not built.
+[firestorm.md](firestorm.md)
+
+Around the core, three findings changed what the allocator does. Coherence has two units, 64 bytes
+within a cluster and 128 across. Blocks at a power-of-two spacing share TLB sets as well as cache
+sets, so a large block now moves by whole pages as well as lines. A huge page's worth depends on the
+page it replaces, so the rules hold at 2 and 32 MiB and are off at 512 MiB.
+[machine-aarch64.md](machine-aarch64.md)
+
+No route a block takes from a free to the next allocation leaned on x86-64's total store order, but
+what x86-64 hid included that our own tests could not have shown a mistake. This CPU misses most
+missing orders on atomics as well, and Miri catches them.
+[memory-ordering.md](memory-ordering.md)
 
 ## What the allocator does to the program
 
@@ -148,7 +172,9 @@ decides where it lands. [program-effects.md](program-effects.md)
   lowest, and nothing else moved. With it off, jemalloc and tcmalloc are 2 to 4% over cralloc at
   p50, p99 and p99.9 as a geometric mean over ten jobs, and up to 16% on the log store.
 - **The tails we caused were maintenance on a request's path.** The magazine-end lock is gone, and
-  so is purge work on a request's path while the background thread runs. On the log store the first
+  so is the clocked purge while the background thread runs, though growth that outruns the thread
+  still pays on a request. A step finishes a wholly free huge page: at 32 MiB, about 100 us for 64-byte
+  slots and 700 us for 8-byte, where there is no thread ([memory.md](memory.md)). On the log store the first
   5 ms after a silence still reach 581 us against jemalloc's 279, from idle drains. Large-block
   trims still run on the request's own path, about 40,500 a run on the order service, the slowest 2
   to 5.6 ms, which its percentiles do not show. [servers.md](servers.md)
@@ -188,7 +214,9 @@ job named here.
   three allocators and the size of two known structures, nothing across all five, and nothing has
   varied lines per object across a heap. [program-effects.md](program-effects.md), "Not yet
   measured", has how to measure it.
-- **Anything beyond one CPU model.** A second machine would show which rules are Zen 5's.
+- **Anything beyond two CPU models.** What we say of Neoverse V2 (Graviton 4, Grace) is reasoned from
+  public data, and a kernel with 64 KiB pages has only been simulated.
+  [docs/todo/for_graviton-4.md](../todo/for_graviton-4.md) has what to run first.
 - **Anything beyond four CPUs.** Every server run pinned the server to four, so we have not seen
   what magazines park on 32 CPUs, or how false sharing grows.
 - **Real traffic.** Our servers are real programs under synthetic load.
@@ -200,7 +228,9 @@ Each note ends with its own open questions.
 | Note | The question it answers |
 |---|---|
 | [roofline.md](roofline.md) | What gates the fast path? |
+| [firestorm.md](firestorm.md) | What gates the fast path on Apple Firestorm, does a real job feel it, how do the incumbents compare there, and which of it should carry to other aarch64 cores? |
 | [hardware.md](hardware.md) | What does the hardware and kernel charge, and which of it is Zen 5's? |
+| [machine-aarch64.md](machine-aarch64.md) | What do an aarch64 machine's topology, caches and kernel charge, and which of the allocator's constants follow from them? |
 | [program-effects.md](program-effects.md) | How does the allocator change the program's performance? |
 | [memory.md](memory.md) | Where does memory go? |
 | [large-blocks.md](large-blocks.md) | What governs blocks past the slab classes? |
@@ -211,6 +241,7 @@ Each note ends with its own open questions.
 | [workloads.md](workloads.md) | What is in the suite and why? |
 | [prior-art.md](prior-art.md) | What do other allocators do, and what did we take or reject? |
 | [verification.md](verification.md) | How do we know it is correct? |
+| [memory-ordering.md](memory-ordering.md) | What does the allocator need of the memory order, and why does it hold on a weak one? |
 | [linux-rseq-contract.md](linux-rseq-contract.md) | What does the kernel promise about rseq? |
 | [portability.md](portability.md) | What changes under musl, static linking, thread stacks and Miri? |
 

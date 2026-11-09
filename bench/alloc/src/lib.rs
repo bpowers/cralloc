@@ -14,7 +14,7 @@
 //! | `cralloc` | `cralloc::Cralloc`, `executable` feature | itself | its `dealloc` |
 //! | `je` | `tikv-jemallocator` 0.6 itself, default features | itself | `sdallocx` |
 //! | `tc` | google/tcmalloc, static | as `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
-//! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc) | itself | `sn_rust_dealloc` |
+//! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc, Release) | itself | `sn_rust_dealloc` |
 //!
 //! `je` is exactly what a service that depends on `tikv-jemallocator` gets: jemalloc built by
 //! `tikv-jemalloc-sys`, static and with the `_rjem_` prefix, so C code in the process keeps
@@ -54,9 +54,19 @@ mod pad;
 mod asm;
 #[cfg(feature = "cralloc")]
 use asm as chosen;
-#[cfg(all(feature = "cralloc", not(feature = "cralloc-memstat"), not(feature = "live-bytes")))]
+#[cfg(all(
+    feature = "cralloc",
+    not(feature = "cralloc-memstat"),
+    not(feature = "live-bytes"),
+    not(feature = "cralloc-outline")
+))]
 #[global_allocator]
 static GLOBAL: cralloc::Cralloc = cralloc::Cralloc;
+#[cfg(feature = "cralloc-outline")]
+mod outline;
+#[cfg(feature = "cralloc-outline")]
+#[global_allocator]
+static GLOBAL: outline::Outline = outline::Outline;
 #[cfg(feature = "live-bytes")]
 mod live;
 #[cfg(feature = "live-bytes")]

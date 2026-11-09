@@ -19,14 +19,23 @@ musl copies the initialized TLS image into every thread's block and sets the thr
 that a TLS symbol is at the thread pointer plus its `@tpoff` (`__copy_tls`), so
 `thread pointer + __rseq_offset` is the calling thread's area.
 
+On aarch64 the generated data is the area alone (`VG.AArch64.ownRseqArea`,
+`front/generated/aarch64/area.rs`), laid out alike, since no assembler for it can write the offset
+as data. The static thread-local data starts above the thread pointer there, at the 16 bytes the
+ABI keeps rounded up to the data's alignment, and the offset is in two `add`s the linker writes
+(`:tprel_hi12:`, `:tprel_lo12_nc:`; they do not link unless the offset is below 2^24), valid in an
+executable, the only kind of musl program the crate supports. The routines' contracts still name
+the offset as the word `__rseq_offset`: there it is a word of the model alone
+(`lean/Cralloc/TCB/AArch64/Isa.lean`), which no instruction loads.
+
 ## AREA-01: the declarations of `pthread_key_create`, `pthread_key_delete`, `pthread_setspecific`
 
 **Obligations.** The signatures are the C library's.
 
 **Proof.** POSIX declares `int pthread_key_create(pthread_key_t *, void (*)(void *))`,
 `int pthread_key_delete(pthread_key_t)` and `int pthread_setspecific(pthread_key_t, const void
-*)`. musl's `pthread_key_t` is `unsigned` (`alltypes.h`), `u32` on x86-64; a function pointer
-that may be null is `Option<unsafe extern "C" fn(*mut c_void)>`; `int` is `c_int`. They are
+*)`. musl's `pthread_key_t` is `unsigned` (`alltypes.h`), `u32` on x86-64 and aarch64; a function
+pointer that may be null is `Option<unsafe extern "C" fn(*mut c_void)>`; `int` is `c_int`. They are
 declared only on musl, which defines all three in `libc.a`.
 
 ## AREA-02: `cpu_id(area)`, and the stores of `RETIRED` through it
@@ -34,8 +43,8 @@ declared only on musl, which defines all three in `libc.a`.
 **Obligations.** `area + 4` is valid for 4-byte atomic access for as long as the reference is
 used, 4-aligned, and every other access to it is atomic or the kernel's.
 
-**Proof.** `area` is the calling thread's area: from `area()` (the thread pointer, RSEQ-01,
-plus the offset word, as above) or the key's value for the exiting thread, which `register`
+**Proof.** `area` is the calling thread's area: from `area()` (the thread pointer, RSEQ-01 or
+SYSCALL-03, plus the offset, as above) or the key's value for the exiting thread, which `register`
 set to the same address. The area is in the thread's TLS block, which musl frees only after the
 thread's destructors have run, and the reference never leaves the function that made it.
 The area is 32-aligned, so `cpu_id` at 4 is 4-aligned. The routines read it with a plain
@@ -43,8 +52,13 @@ The area is 32-aligned, so `cpu_id` at 4 is 4-aligned. The routines read it with
 Rust access. The stores of `RETIRED` are made only while the area is not registered (`retire`'s
 contract): after a failed registration, when no key could be made (before registering), and in
 the destructor after a successful unregistration. So the kernel never writes it concurrently,
-and a write by user space to `cpu_id` of a registered area (which a V2 registration would punish
-with SIGSEGV) never happens.
+and a write by user space to `cpu_id` of a registered area, which the kernel punishes with SIGSEGV
+in a registration longer than 32 bytes or under `rseq_debug` (`include/linux/rseq_entry.h`), does not
+happen, with one exception. If `pthread_key_create` fails because the table is full, and between the
+thread's read of -1 and that failure a signal handler's allocation found room, because another thread
+just deleted a key, and registered the thread, then `register` retires a registered area. Without
+`rseq_debug` the kernel writes over it at the thread's next context switch, and until then the thread
+takes the slow path, so nothing rests on it.
 
 ## AREA-03: the pthread key calls
 
@@ -55,10 +69,11 @@ any exiting thread with a value; `pthread_key_delete` gets a key no thread uses;
 **Proof.** The out pointer is a live local. The destructor is `unregister_at_exit`, whose
 contract (AREA-05) is exactly how musl calls it. A key is deleted only when this thread made
 it, lost the race to publish it, and gave it no value, so no thread has one. `setspecific` is
-called with the published key, which is never deleted. None of the three allocates in musl;
-`pthread_key_create` and `pthread_key_delete` take musl's key lock, which only those two and the
-exit path's destructor loop take, and they are called once per process; `setspecific` only
-stores into the thread's own table.
+called with the published key, which is never deleted. None of the three allocates in musl.
+`pthread_key_create` and `pthread_key_delete` take musl's key lock, which only those two, the exit
+path's destructor loop and `fork` take, and `pthread_key_delete` the thread-list lock too, with
+application signals blocked. A thread that loses the race makes one of each, and no thread makes
+more; `setspecific` only stores into the thread's own table.
 
 ## AREA-04: `rseq::register(area, …)` in `register`
 
@@ -101,6 +116,13 @@ a detached such thread could die registered. In musl that needs an allocation fr
 after the destructors (`__dl_thread_cleanup` frees a `dlerror` buffer only if the thread made
 one, which needs an allocation first and so a registration and a value earlier).
 
+## AREA-06: `area_offset` on aarch64, in `area`
+
+**Obligations.** None: the generated routine has no safety requirements, as its contract
+(`VG.Spec.Slab.areaOffsetContract`) says: it writes one register and touches no memory.
+
+**Proof.** Lean's. That the value it returns locates the calling thread's area is above.
+
 ## AREA-05: `unregister_at_exit`
 
 **Obligations** (its `# Safety`). Called by the C library as the key's destructor, on the
@@ -109,8 +131,8 @@ thread whose area `value` is.
 **Proof.** musl calls a key's destructor on the exiting thread itself, with that thread's value,
 and only if it is non-null (`__pthread_tsd_run_dtors`). The value is the area's address, set by
 that thread in `register`. Signals are blocked (RSEQ-04) around the unregistration and the
-store of `RETIRED`, so no handler can find `cpu_id` -1 in between and register again; if
-unregistering fails (it does not, as the arguments are the registration's), the area is left as
-it is.
+store of `RETIRED`, so no handler can find `cpu_id` -1 in between and register again. Unregistering
+fails only for a thread whose registration was refused, which keeps its value: the kernel finds
+nothing of this area's to forget, and the area stays at -2, as it was retired.
 
-Reviewed: a09c36e
+Reviewed: 0bc95dc

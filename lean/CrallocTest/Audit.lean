@@ -25,13 +25,13 @@ its proof uses is not what compiled code runs. -/
 theorem swapped_eq : swapped = 2 := rfl
 
 -- `swapped`'s override is found through `usesSwapped`.
-/-- error: the compiled code of [VG.Test.Audit.usesSwapped] is not what the kernel checked:
+/-- error: overrides remain on what [VG.Test.Audit.usesSwapped] run:
 @[implemented_by] on VG.Test.Audit.swapped -/
 #guard_msgs in
 #assert_no_compiler_overrides usesSwapped
 
 -- Neither `two` nor `swapped_eq` runs `swapped`.
-/-- info: the compiled code of [VG.Test.Audit.two, VG.Test.Audit.swapped_eq] is what the kernel checked -/
+/-- info: no override remains on what [VG.Test.Audit.two, VG.Test.Audit.swapped_eq] run -/
 #guard_msgs in
 #assert_no_compiler_overrides two swapped_eq
 

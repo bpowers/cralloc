@@ -20,7 +20,67 @@
 
 static int fd_cyc = -1, fd_ins = -1;
 
+#ifdef __aarch64__
+#include <dirent.h>
+
+/* Reads a small file under the PMU's sysfs directory into buf; returns 0 if it cannot. */
+static int pmu_read(const char *pmu, const char *file, char *buf, size_t n) {
+    char path[256];
+    snprintf(path, sizeof path, "/sys/bus/event_source/devices/%s/%s", pmu, file);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t got = fread(buf, 1, n - 1, f);
+    buf[got] = 0;
+    fclose(f);
+    return got > 0;
+}
+
+/* Whether a kernel CPU list such as "2-5,8" holds cpu. */
+static int in_list(const char *list, int cpu) {
+    while (*list) {
+        char *end;
+        long a = strtol(list, &end, 10), b = a;
+        if (*end == '-') b = strtol(end + 1, &end, 10);
+        if (a <= cpu && cpu <= b) return 1;
+        list = *end == ',' ? end + 1 : "";
+    }
+    return 0;
+}
+
+/* The PMU of the CPU this runs on: on a machine with two kinds of core the generic hardware type
+ * lands on whichever the kernel picks. Cycles and instructions by that PMU's own codes. */
+static int counter_on(int cpu, uint64_t which) {
+    DIR *d = opendir("/sys/bus/event_source/devices");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char buf[64];
+        if (!pmu_read(e->d_name, "cpus", buf, sizeof buf) || !in_list(buf, cpu)) continue;
+        const char *names[2][2] = {{"events/cycles", "events/cpu_cycles"}, {"events/instructions", "events/inst_retired"}};
+        int w = which == PERF_COUNT_HW_INSTRUCTIONS;
+        unsigned long code;
+        char ev[64];
+        if (!pmu_read(e->d_name, names[w][0], ev, sizeof ev) && !pmu_read(e->d_name, names[w][1], ev, sizeof ev)) continue;
+        if (sscanf(ev, "event=%lx", &code) != 1 || !pmu_read(e->d_name, "type", buf, sizeof buf)) continue;
+        closedir(d);
+        struct perf_event_attr a;
+        memset(&a, 0, sizeof a);
+        a.size = sizeof a;
+        a.type = (uint32_t)strtoul(buf, NULL, 10);
+        a.config = code;
+        a.disabled = 1;
+        a.exclude_kernel = 1;
+        a.exclude_hv = 1;
+        return (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
+    }
+    if (d) closedir(d);
+    return -1;
+}
+#endif
+
 static int counter(uint64_t config) {
+#ifdef __aarch64__
+    return counter_on(sched_getcpu(), config);
+#endif
     struct perf_event_attr a;
     memset(&a, 0, sizeof a);
     a.size = sizeof a;
@@ -100,6 +160,27 @@ static __attribute__((noinline)) void reallocs(uint64_t n, size_t size) {
     }
 }
 
+/* As rust-alloc's churn: free a random one of 10,000 live blocks, allocate one of another size. */
+static __attribute__((noinline)) void churn(uint64_t n) {
+    enum { LIVE = 10000 };
+    static void *live[LIVE];
+    uint64_t x = 0x9E3779B97F4A7C15ull;
+#define NEXT() (x ^= x << 13, x ^= x >> 7, x ^= x << 17, x)
+#define SIZE(r) (16 + (size_t)(((r) >> 20) % 63) * 8)
+    for (int i = 0; i < LIVE; i++) live[i] = malloc(SIZE(NEXT()));
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t r = NEXT();
+        uint64_t at = r % LIVE;
+        free(live[at]);
+        void *p = malloc(SIZE(r));
+        *(uint64_t *)p = r;
+        live[at] = p;
+    }
+    for (int i = 0; i < LIVE; i++) free(live[i]);
+#undef NEXT
+#undef SIZE
+}
+
 int main(int argc, char **argv) {
     int cpu = (int)env_u("RF_CPU", 13);
     cpu_set_t set;
@@ -133,6 +214,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(form, "mixed")) mixed(iters);
             else if (!strcmp(form, "calloc")) callocs(iters, x);
             else if (!strcmp(form, "realloc")) reallocs(iters, x);
+            else if (!strcmp(form, "churn")) churn(iters);
             else {
                 fprintf(stderr, "unknown form %s\n", argv[a]);
                 return 2;

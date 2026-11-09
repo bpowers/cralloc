@@ -1,17 +1,22 @@
 //! The simulated OS's memory: one zeroed range that reservations are carved from.
 //!
-//! Natively, on Linux, the memory a `SimOs` asks for is *guarded*: a real reservation from
-//! [`LinuxOs`], inaccessible until the simulator commits it, so a read or write of memory the
+//! Natively, on Linux, the memory a `SimOs` asks for is a real reservation from [`LinuxOs`], which
+//! the host commits only as it is touched. A shape whose pages are whole host pages gets it
+//! *guarded*: inaccessible until the simulator commits it, so a read or write of memory the
 //! allocator never committed faults, as it would in a real process. A write that the program later
 //! undoes (a bitmap bit set and cleared again) leaves no trace in the contents, so only a fault
-//! catches it. Under Miri and Kani, which cannot change page protections, the memory is an
-//! ordinary zeroed allocation, and the simulator checks contents instead.
+//! catches it. A shape with smaller pages than the host's cannot change the protection of one of
+//! them, so its memory is all accessible, and the simulator checks contents instead, as it does
+//! under Miri and Kani, which cannot change page protections and get an ordinary zeroed
+//! allocation.
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 use crate::os::Os;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[cfg(cralloc_real)]
 use crate::os::linux::{LinuxOs, protect_none};
-use alloc::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use alloc::alloc::Layout;
+#[cfg(not(cralloc_real))]
+use alloc::alloc::{alloc_zeroed, dealloc, handle_alloc_error};
 use core::ptr::NonNull;
 
 /// A zeroed range of memory, released on drop.
@@ -32,24 +37,61 @@ unsafe impl Send for Memory {}
 // SAFETY: as above.
 unsafe impl Sync for Memory {}
 
+/// The host's page size.
+#[cfg(cralloc_real)]
+fn host_page() -> usize {
+    LinuxOs::geometry().page_size()
+}
+
+/// Whether `len` bytes of address space aligned to `align` can be had now.
+#[cfg(cralloc_real)]
+pub(super) fn room_for(len: usize, align: usize) -> bool {
+    let host = host_page();
+    let whole = len.next_multiple_of(host);
+    let Ok(base) = LinuxOs.reserve(whole, align.max(host)) else {
+        return false;
+    };
+    // SAFETY: the reservation just made, whole, that nothing else knows of.
+    unsafe { LinuxOs.unmap(base, whole) }.is_ok()
+}
+
+/// Where the memory is an ordinary allocation, a shape's address space is its memory.
+#[cfg(not(cralloc_real))]
+pub(super) fn room_for(_len: usize, _align: usize) -> bool {
+    false
+}
+
 impl Memory {
-    /// `len` zero bytes aligned to `align`, guarded if `guard` is set and the platform allows it.
-    /// Panics if `len` is zero, the layout is invalid, or the memory cannot be had.
-    pub(super) fn new(len: usize, align: usize, guard: bool) -> Memory {
+    /// `len` zero bytes aligned to `align`, for a shape whose pages are `page` bytes: guarded if
+    /// those are whole host pages and the platform allows it. Panics if `len` is zero, the layout
+    /// is invalid, or the memory cannot be had.
+    #[cfg(cralloc_real)]
+    pub(super) fn new(len: usize, align: usize, page: usize) -> Memory {
         assert!(len > 0, "simulated memory must not be empty");
         let layout = Layout::from_size_align(len, align).expect("simulated memory layout");
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-        if guard {
-            let base = LinuxOs
-                .reserve(len.next_multiple_of(4096), align.max(4096))
-                .expect("guarded simulated memory");
-            return Memory {
-                base,
-                layout,
-                guarded: true,
-            };
+        let host = host_page();
+        let whole = len.next_multiple_of(host);
+        let base = LinuxOs
+            .reserve(whole, align.max(host))
+            .expect("simulated memory");
+        let guarded = page.is_multiple_of(host);
+        if !guarded {
+            // SAFETY: the whole of a reservation just made, that nothing else knows of.
+            let opened = unsafe { LinuxOs.commit(base, whole) };
+            opened.expect("simulated memory: mprotect");
         }
-        let _ = guard;
+        Memory {
+            base,
+            layout,
+            guarded,
+        }
+    }
+
+    /// `len` zero bytes aligned to `align`. Panics if `len` is zero or the layout is invalid.
+    #[cfg(not(cralloc_real))]
+    pub(super) fn new(len: usize, align: usize, _page: usize) -> Memory {
+        assert!(len > 0, "simulated memory must not be empty");
+        let layout = Layout::from_size_align(len, align).expect("simulated memory layout");
         // SAFETY: the layout's size is not zero.
         let ptr = unsafe { alloc_zeroed(layout) };
         let Some(base) = NonNull::new(ptr) else {
@@ -83,16 +125,17 @@ impl Memory {
     }
 
     /// Makes `len` bytes at `offset` readable and writable, if the memory is guarded. The range
-    /// is whole 4 KiB host pages: the simulator's pages are whole host pages when guarded.
+    /// is whole host pages: the simulator's pages are whole host pages when guarded.
     ///
     /// # Safety
     ///
     /// `offset + len <= self.len()`.
     pub(super) unsafe fn open(&self, offset: usize, len: usize) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded && len != 0 {
             // SAFETY: the range is inside this value's own `LinuxOs` reservation (caller), and
-            // whole host pages (the simulator's page size is a multiple of 4 KiB when guarded).
+            // whole host pages (the simulator's page size is a multiple of the host's when
+            // guarded).
             let opened = unsafe { LinuxOs.commit(self.at(offset), len) };
             opened.expect("guarded simulated memory: mprotect");
         }
@@ -106,7 +149,7 @@ impl Memory {
     /// `offset + len <= self.len()`, and nothing reads or writes the range until it is opened
     /// again.
     pub(super) unsafe fn close(&self, offset: usize, len: usize) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[cfg(cralloc_real)]
         if self.guarded && len != 0 {
             // SAFETY: as in `open`; the caller promises nothing touches the range meanwhile.
             let closed = unsafe { protect_none(self.at(offset), len) };
@@ -123,21 +166,40 @@ impl Memory {
     /// call.
     pub(super) unsafe fn zero(&self, offset: usize, len: usize) {
         debug_assert!(offset <= self.len() && len <= self.len() - offset);
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-        if self.guarded {
-            if len != 0 {
+        #[cfg(cralloc_real)]
+        if len != 0 {
+            // The host pages wholly inside the range go back, which costs no memory where
+            // writing zeros would commit them, and MADV_DONTNEED zero-fills whether or not they
+            // are accessible. What is left at either end shares a host page with a simulated page
+            // outside the range, so only unguarded memory has any: it is accessible.
+            let host = host_page();
+            let end = offset + len;
+            let (first, last) = (offset.next_multiple_of(host), end & !(host - 1));
+            if first < last {
                 // SAFETY: the range is inside this value's own reservation and whole host pages;
                 // the caller promises nothing touches it, so discarding its contents is safe.
-                // MADV_DONTNEED zero-fills whether or not the pages are accessible.
-                let zeroed = unsafe { LinuxOs.purge(self.at(offset), len) };
-                zeroed.expect("guarded simulated memory: madvise");
+                let zeroed = unsafe { LinuxOs.purge(self.at(first), last - first) };
+                zeroed.expect("simulated memory: madvise");
+                // SAFETY: as below, for the two ends of the range.
+                unsafe {
+                    self.base
+                        .as_ptr()
+                        .add(offset)
+                        .write_bytes(0, first - offset);
+                    self.base.as_ptr().add(last).write_bytes(0, end - last);
+                }
+            } else {
+                // SAFETY: as below.
+                unsafe { self.base.as_ptr().add(offset).write_bytes(0, len) };
             }
-            return;
         }
         // SAFETY: the range is inside the allocation (caller), `base` has provenance for all of
         // it, `u8` has no alignment requirement and no invalid values, and the caller promises
         // that nothing else accesses the bytes meanwhile.
-        unsafe { self.base.as_ptr().add(offset).write_bytes(0, len) }
+        #[cfg(not(cralloc_real))]
+        unsafe {
+            self.base.as_ptr().add(offset).write_bytes(0, len)
+        }
     }
 
     /// Whether the `len` bytes at `offset` are all zero.
@@ -164,15 +226,16 @@ impl Memory {
 }
 
 impl Drop for Memory {
+    #[cfg(cralloc_real)]
     fn drop(&mut self) {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-        if self.guarded {
-            let len = self.layout.size().next_multiple_of(4096);
-            // SAFETY: the whole reservation `new` made, released only here; nothing uses it
-            // after the simulator is dropped.
-            let _ = unsafe { LinuxOs.unmap(self.base, len) };
-            return;
-        }
+        let len = self.layout.size().next_multiple_of(host_page());
+        // SAFETY: the whole reservation `new` made, released only here; nothing uses it after
+        // the simulator is dropped.
+        let _ = unsafe { LinuxOs.unmap(self.base, len) };
+    }
+
+    #[cfg(not(cralloc_real))]
+    fn drop(&mut self) {
         // SAFETY: `base` came from `alloc_zeroed` with this exact layout and is freed only here.
         unsafe { dealloc(self.base.as_ptr(), self.layout) }
     }
