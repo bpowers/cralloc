@@ -3,6 +3,7 @@
 //! Divisions by symbolic values are slow to verify, so where a property is about division it is
 //! stated with multiplications and masks instead.
 
+use super::magazine::LEAST_LOG2;
 use super::*;
 
 fn any_class() -> Class {
@@ -238,8 +239,8 @@ fn every_marker_round_trips_and_fails_every_routine_mask() {
     assert!(marker.word().wrapping_add(SLOT_BYTES) & mask == 0);
 }
 
-/// Small classes are exactly those up to `MAX_SMALL_SIZE`, and each one's magazine keeps within
-/// the budget unless it is the smallest magazine.
+/// Small classes are exactly those up to `MAX_SMALL_SIZE`, and each one's magazine is the largest
+/// that keeps within the budget, unless it is at the floor of slots.
 #[kani::proof]
 fn small_classes_have_magazines_within_budget() {
     let class = any_class();
@@ -249,7 +250,11 @@ fn small_classes_have_magazines_within_budget() {
             assert!(class.size() <= MAX_SMALL_SIZE);
             assert!(SmallClass::from_ordinal(small.ordinal()) == Some(small));
             let magazine = small.magazine();
-            assert!(magazine.capacity() * small.size() <= MAGAZINE_BUDGET);
+            assert!(
+                magazine.slots() == 1 << LEAST_LOG2
+                    || magazine.capacity() * small.size() <= MAGAZINE_BUDGET
+            );
+            assert!(magazine.slots() >= 1 << LEAST_LOG2);
             if magazine < MagazineSize::MAX {
                 let twice = MagazineSize::from_slots(2 * magazine.slots()).unwrap();
                 assert!(twice.capacity() * small.size() > MAGAZINE_BUDGET);

@@ -613,8 +613,10 @@ its caches depends on how many CPUs it runs on and how many classes it uses, and
 has live. The fast path pays nothing for any of it. `docs/research/magazines.md`, "Sizing on
 evidence", examines sizes that follow the program.
 
-- **A magazine** holds at most 64 KiB of objects, in 4 to 1,024 entries. That one size is both how
-  far a thread can swing without leaving the fast path, and how much moves in one exchange.
+- **A magazine** holds at most 64 KiB of objects, in 8 to 1,024 entries, so the largest classes go
+  over that to hold six objects: a magazine of two sends every second object through an exchange,
+  which costs more than no cache at all. That one size is both how far a thread can swing without
+  leaving the fast path, and how much moves in one exchange.
 - **A CPU's spares.** A megabyte of objects for each CPU is split evenly among the small classes,
   and a class keeps as many full spares as fit in its share, four at most. A full magazine of most
   classes is bigger than a share, so only the smallest classes keep a full spare this way. An empty

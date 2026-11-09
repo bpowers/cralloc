@@ -467,15 +467,15 @@ there and 276 here, 41.7 and 45.7 ns, at 1.6 instructions a cycle. L1 load and s
 sets the pace: it spends 45% of its cycles on the large path, 25% on the job's own first write and random
 sizes, 19% on exchanges and 11% on chores, and the freeing thread spins 36% of its own.
 
-Half the job's objects are large, a quarter fall in classes of 12 to 32 KiB, whose magazines hold two
-objects, and the rest in deeper ones. Exact instructions an object, both threads, at `8e5acdf`: the job's
-own 173 (in mimalloc's 440 too), the large path 858, exchanges 471, chores 255. A magazine of two is
-worse than no cache by this count: 24 KiB alone takes 88 ns and 1,960 instructions, every second object
+Half the job's objects are large, a quarter fall in classes of 12 to 32 KiB, and the rest in deeper ones.
+Exact instructions an object, both threads, at `8e5acdf`, when those classes' magazines held two objects:
+the job's own 173 (in mimalloc's 440 too), the large path 858, exchanges 471, chores 255. A magazine of two
+is worse than no cache by this count: 24 KiB alone takes 88 ns and 1,960 instructions, every second object
 paying an exchange and a beat on each thread, where 64 KiB takes 100 ns and 1,413. A magazine of six takes
-31 ns and 723.
+31 ns and 723, so no class's has fewer.
 
-Each cause, one scratch build at a time. Single builds, five interleaved rounds, medians, ranges under 1%,
-so a difference under about 2% says nothing:
+Each cause, one scratch build at a time, from when magazines could hold two. Single builds, five
+interleaved rounds, medians, ranges under 1%, so a difference under about 2% says nothing:
 
 | Against `e926817` | Pipeline, ns | `largepair`, ns | Instructions, pipeline | Job's peak, MiB |
 |---|---:|---:|---:|---:|
@@ -514,21 +514,22 @@ That passes the gap by 6 ns, since the cached build beats mimalloc.
   could start: 0.7 of the 0.9 lines an allocation saved. A heartbeat now reads the clock first and
   the tallies only when a pass is due.
 
-**What caching would cost, and why it is not built.** Magazines of at least 8 slots hold six objects where
-the classes of 12 to 32 KiB hold two: up to 584 KiB more a CPU, and up to twice that in a domain's stacks.
-Caching to 256 KiB is up to 8.7 MiB a CPU in loaded magazines and 17 MiB a domain in stacks, if every
-class is warm and every block written, against 2.8 and 5.6 for all the classes today. The design stands
+**What more caching would cost, and why it is not built.** Caching to 256 KiB is up to 8.7 MiB a CPU in
+loaded magazines and 17 MiB a domain in stacks, if every class is warm and every block written, against
+3.4 and 6.8 for all the classes today. The design stands
 against the second: a large block's class comes from its address, because it may sit in a slot with room
 to grow, and a magazine's comes from the layout; a block in a magazine has no stagger, which keeps buffers
 written in turn apart; and the C routines' limit of 32 KiB and the slab's layout are in the Lean proofs. The
 scratch builds took those limits off for the Rust path alone, so they give what it would buy and show
 nothing about those costs. No profiled server makes such a flow.
 
-**The floor of 8 slots needs one constant, and on the M1 Max it gains the large pipelines 16 to 17% and
-costs the rest nothing measurable.** It passes a budget that was halved for memory ([memory.md](memory.md),
-"Magazine budget"), so it was compared whole against main at `92eeb7b`, 2026-11-09: three rounds of two
-builds whose functions all sit at one address, since only a table's contents differ, so no placement sweep
-is needed. On the Ryzen it took this job from 656 cycles to 530, and the rest has not run there.
+**A floor of 8 slots gains the large pipelines 16 to 17% on the M1 Max and costs the rest nothing
+measurable, so magazines have it.** It holds six objects where the classes of 12 to 32 KiB held two: up to
+584 KiB more a CPU, and up to twice that in a domain's stacks. It passes a budget that was halved for
+memory ([memory.md](memory.md), "Magazine budget"), so it was compared whole against two objects at
+`92eeb7b`, 2026-11-09: three rounds of two builds whose functions all sit at one address, since only a
+table's contents differ, so no placement sweep is needed. On the Ryzen it took this job from 656 cycles
+to 530, and the rest has not run there.
 
 | Jobs | Time, 8 slots over main | Peak, 8 slots over main |
 |---|---:|---:|
@@ -577,7 +578,5 @@ glibc remaps large chunks and unmaps them at free.
   as the order service's 1.25 MiB table shards.
 - **The median of a doubling**, 2 to 4% over jemalloc, inside the run-to-run spread.
 - **Meilisearch while indexing** peaks over jemalloc ([memory.md](memory.md)), not attributed.
-- **Magazines of at least 8 slots on real programs.** Measured on the pipelines alone: neither the
-  servers nor the memory jobs have run them.
 - **The Ryzen at today's code.** Its instruction count and its gap to a Release snmalloc are not known;
   nothing here could run it.

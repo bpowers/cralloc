@@ -14,8 +14,12 @@ use core::cell::Cell;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering::Relaxed};
 
-#[repr(C, align(32))]
-pub(super) struct Magazine(pub(super) [AtomicPtr<u8>; 4]);
+/// The slots of [`class`]'s magazine.
+pub(super) const SLOTS: usize = 8;
+
+/// A magazine as [`class`] has it, aligned to its size.
+#[repr(C, align(64))]
+pub(super) struct Magazine(pub(super) [AtomicPtr<u8>; SLOTS]);
 
 pub(super) fn class() -> SmallClass {
     Class::LARGEST_SMALL.small().unwrap()
