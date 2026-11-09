@@ -113,4 +113,4 @@ from `Back::room` (the bytes from the block's start to its slot's or run's end, 
 stagger is already off it, and `Back::resize_in_place` finds the new size within the slot), the
 block stays after a shrink (`stays_after_shrink`), and `ptr` is aligned as `new` asks.
 
-Reviewed: 0a92f0b
+Reviewed: 0bc95dc

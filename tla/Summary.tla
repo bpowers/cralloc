@@ -35,7 +35,10 @@
      A purge's claims (tree::ExactRun) are these same steps. Each word is a
      search that starts there and takes the bits it wants, or gives up having
      written nothing, as a thread leaving this search does. It holds its clears
-     within a group and makes them before it returns any page. What it then
+     within a group and makes them before it returns any page. The claim that
+     empties a word of a new group comes just before the clear of the last
+     group, where a thread here clears first, so for that moment it is two
+     threads here, each holding one group. What it then
      holds is live here, for as long as a program could hold it: madvise
      changes no bit. Giving back, after the madvise or after meeting a word not
      wholly free, is a free of each word, and the batch that shares their walk

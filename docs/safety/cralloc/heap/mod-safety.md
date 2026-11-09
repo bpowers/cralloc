@@ -106,8 +106,10 @@ which the caller owns and gives up.
 out, which the caller owns and gives up, described by `layout`: the layout it was allocated
 with, or one with the same alignment and a size between that one's and the length the heap
 returned. The class passed is the small class of `layout`: `SmallClass::of_nonzero_layout`
-in `dealloc`, `small(layout)` in `dealloc_other` (the same class function for a layout the
-inlined lookup turns away; `small` is `Class::of_layout` restricted to small classes). A
+in `dealloc`, `small_of_other(layout)` in `dealloc_other` (the same class function for a layout the
+inlined lookup turns away; `small` is `Class::of_layout` restricted to small classes, and
+`small_of_other` is `small` with a first look at the size, since rounding a size up to its alignment
+never takes one past the largest small class back under it). A
 block allocated with a layout of a small class is a slot of that layout's class, since the
 allocation took its class from the same function of the layout (`Bound::alloc`, `alloc_other`,
 `alloc_grant`). And every layout that describes the block has that same class: the fit rule,
@@ -117,4 +119,4 @@ and any size from the request's up to the class size has the class of the reques
 length the heap returns for a small block is its class size. So `object` is a block of
 `class`.
 
-Reviewed: 0a92f0b
+Reviewed: 0bc95dc

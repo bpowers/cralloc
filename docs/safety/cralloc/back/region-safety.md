@@ -223,4 +223,4 @@ BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes
 copied aside and copied back after) and BACK-CLASS-08 (`trim_slack`: the pages of a slot just
 claimed that lie past both its new block and its last tenant) in `class-safety.md`.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

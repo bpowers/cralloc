@@ -135,4 +135,4 @@ store of `RETIRED`, so no handler can find `cpu_id` -1 in between and register a
 fails only for a thread whose registration was refused, which keeps its value: the kernel finds
 nothing of this area's to forget, and the area stays at -2, as it was retired.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

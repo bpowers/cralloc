@@ -43,9 +43,10 @@ deallocation with any fitting size finds the class; for a large block the length
 `usable_size`, which ends inside the slot or run (L3 in `heap/large-safety.md`), and the class
 comes from the address. That last needs `dealloc` to treat every fitting layout of a large block
 as large, or a large slot would be pushed into a magazine. It does: a block is large because its
-layout's class is not small (`small(layout)` is `None`: `Bound::alloc_other`, `grant_other`,
-`Bound::resize`), a fitting layout has the same alignment and a size at least the one requested,
-and the class of a layout is monotone in its size (the size is rounded up to a multiple of the
+layout's class is not small (`small(layout)` is `None`: `Bound::resize`, and `small_of_other`, which
+says the same, in `Bound::alloc_other` and `grant_other`), a fitting layout has the same alignment
+and a size at least the one requested, and the class of a layout is monotone in its size (the size
+is rounded up to a multiple of the
 alignment and the class is the smallest at least that, both non-decreasing; `classes::verify`).
 So a fitting layout's class is at least the requested one's, above every small class or none at
 all, and `dealloc` takes the large path, `self.heap.free_large(object)` in `dealloc_other`, whose
@@ -96,4 +97,4 @@ whose `new_size` is not zero and does not overflow `isize` when rounded up to th
 for a block this allocator returned. Every `Cralloc` reaches `HEAP` through `process()`, so a
 block any handle returned is a block of the heap `process()` names.
 
-Reviewed: 0a92f0b
+Reviewed: 0bc95dc

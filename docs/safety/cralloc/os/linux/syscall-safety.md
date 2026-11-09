@@ -128,4 +128,4 @@ comes back typed as a pointer, as an `mmap` result does (SYSCALL-01, item 6): th
 library set, of memory Rust never allocated. `front::area` offsets it to the area and makes the
 4-byte atomic access AREA-02 argues for.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc
