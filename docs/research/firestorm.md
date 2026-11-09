@@ -26,6 +26,11 @@ a placement can move. The exception is a binary tree of `Box`es, whose build gai
 gains 6.7%, since about half its allocations arrive closer together than the hop takes ("Whether
 real jobs feel the hop").
 
+**In a large program built with fat LTO, inlining costs more than it gives, even with this core's
+192 KiB instruction cache.** Calling the same fast path out of line takes 0.5 to 1.7% off the cycles
+of six jobs on four programs, with 13 to 29% fewer instruction-cache misses, and adds 4% to a tree of
+`Box`es, where inlining should win ("What inlining costs a program").
+
 **A routine forms every address before it arms.** A sequence holds no `adrp`: rustc's links work
 around Cortex-A53 erratum 843419 by replacing a load after an `adrp` near a page's end with a branch
 to a stub, and a preemption in the stub does not abort the sequence ("The recommended shape").
@@ -167,9 +172,8 @@ mimalloc sized on the first row (+0.92):
   read-only data against jemalloc's build: DataFusion 83.5 MiB against 62.7, SurrealDB 79.3 against
   58.5, ruff 28.2 against 20.2, Sozu 13.6 against 10.5, orders 4.9 against 4.2, boa 24.1 against 22.5.
   DataFusion holds 200,000 restartable sequences (`__rseq_cs`) and 13 MiB more `.text`. The Router
-  and Meilisearch, built without LTO, do not grow. What this costs a program in the front end is not
-  measured; a call costs the same as inlining in the table below, so an out-of-line build would tell
-  (`66dfb90`, 2026-11-08).
+  and Meilisearch, built without LTO, do not grow (`66dfb90`, 2026-11-08). "What inlining costs a
+  program" has what that does.
 - **The gaps from 13 are not placement.** Eight placements of each loop (`RA_PAD`, 16 to 128) move
   every row by at most 0.04. `Box` adds 0.36 and a run-time size 0.29: the program's store and the
   table's load, beside the hops.
@@ -628,6 +632,46 @@ costs about 2 cycles more than inlining, and inlining's other gains here are und
 | Through a PLT-shaped stub | 4.00, then 3.00: the stub's `br` |
 | `blr` through a GOT-shaped slot | 3.00, then 2.00: the same as a direct call |
 
+## What inlining costs a program
+
+**On every program measured, the out-of-line build took fewer cycles for more instructions and fewer
+front-end misses. On the job built to favour inlining it took 4% more.** The out-of-line build is
+`cralloc-outline` of `bench/alloc`: the same allocator behind `#[inline(never)]` calls, so a call
+carries the size at run time and loses the constant-size path, which is part of what this measures.
+Out of line against inlined, main at `92eeb7b`, 2026-11-09. Each figure is the mean over five pads (0
+to 128 bytes) of the median at each: four rounds, two for orders, and for SurrealDB three at one pad
+because its builds are slow. "Apart" means the two builds' ranges do not overlap.
+
+| Job | Cycles | Over pads | Instructions | L1I misses | L1 iTLB misses | Text and read-only data |
+|---|---:|---|---:|---:|---:|---:|
+| ruff | -1.28% | apart | +0.31% | -22.5% | -31.0% | 28.1 to 20.3 MiB |
+| DataFusion | -0.53% | apart | +0.06% | -21.1% | -27.5% | 83.5 to 63.1 MiB |
+| Orders, axum, HTTP/2 | -1.17% | apart | +1.51% | -18.8% | -5.5% | 4.9 to 4.1 MiB |
+| Orders, actix | -0.78% | p = 0.12 | +1.08% | -28.6% | -5.1% | The same |
+| Orders, axum | -0.49% | p = 0.47 | +1.53% | -12.7% | -2.5% | The same |
+| SurrealDB | -1.72% | One pad, runs apart | +1.18% | -18.9% | -2.8% | 79.2 to 58.3 MiB |
+| **`tree depth=18`, the control** | **+3.97%** | apart | **+24.0%** | level, about none | -48.9% | |
+
+- **The calls did go out of line.** `__rseq_cs` falls from 200,979 descriptors to 43 on DataFusion and
+  74,365 to 43 on ruff, and the tree's instructions rise by a quarter.
+- **The front end moves everywhere, but the counted misses explain only ruff.** An L1I miss costs about
+  14 cycles and an L1 iTLB miss 18 ("Raw events"). At those prices the misses saved cover all of ruff's
+  gap, counting the cycles its extra instructions take at its own rate, and 16 to 37% of the others'
+  (DataFusion 28%, SurrealDB 16%, orders 20 to 37%). So the rest of the gap is not shown to be the text.
+  Dispatch bubbles (`0xd6`, not validated) point the same way, -11.4% on ruff and -6.5% on DataFusion,
+  and the predictors' reach ("The front end") is a candidate no counter here measures.
+- **Other effects are small.** Mispredictions move -0.3 to -0.9% on the programs and +1.1 to +4.0% on
+  orders. A smaller binary also holds less: ruff's peak is 4% lower, and the others are level.
+- **On a small job inlining still wins:** the tree's 28.8 cycles a node become 29.9, with 24% more
+  instructions.
+
+**How far this reaches.** Firestorm's L1I is the largest we will test, so a cost here is strong evidence
+that inlining costs large programs front-end work on smaller ones too: Neoverse V2 has 64 KiB and Zen 5
+32. It does not say which side wins there, because a call costs them differently: on Zen 5 the call is
+the floor, and `docs/design.md` says inlining matters most there. That needs this comparison on those
+machines (`docs/todo/`). A form between the two, such as out of line only for sizes known at run time,
+is not measured.
+
 ## Reaching the routine's own code
 
 Every combination built under fat link-time optimization (`bench/roofline/aarch64/reach`):
@@ -787,6 +831,14 @@ safe.
 | `0xcb` | Mispredictions, all | 0.48 a pass on a random bit from a table |
 | `0x75`, `0x84` | Map rewinds, flushes | 0.26 on 7% mispredicts; a failing `cas` 1 flush |
 | `0x76`, `0xd6` | Rename stalled, dispatch bubbles | Not validated: read only as more or less |
+| `0xdb` | L1I misses on demand | 0.97 a call over 1 MiB of leaves, 1.00 over 256 pages, about none over 4 KiB |
+| `0xd4` | L1 iTLB misses on demand | 1.00 a call over 256 pages, about none over 64 |
+| `0x07`, `0x0a` | Instruction table walks, L2 TLB misses for instructions: they agree | 0.96 a call over 8,192 pages, about none over 256 |
+
+From the same leaves, 8 cycles a call with no misses, 40 with an L1I and an L1 iTLB miss, and 39 with
+an L1I miss and a misprediction, so an L1I miss costs about 14 and an L1 iTLB miss about 18. Beside the
+runner's cycles and instructions, four of these fit a job with no counters of its own. A program or
+workload with its own leaves room for two; more read as multiplexed.
 
 ## Open questions
 
