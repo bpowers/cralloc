@@ -83,8 +83,10 @@ tests() {
   if [ -n "$all" ]; then
     # Optimized, with every debug check on (the `gate` profile in Cargo.toml): the explorations
     # are mostly work the optimizer removes. Not the doctests: an ignored doctest is an example
-    # that is not meant to run.
-    cargo test --workspace --quiet --profile gate --lib --bins --tests -- --include-ignored &&
+    # that is not meant to run. The limit on a test binary allows for a busy machine: the
+    # allocator's takes about ten minutes alone, and an hour with others' work on these cores.
+    CRALLOC_TEST_TIMEOUT="${CRALLOC_TEST_TIMEOUT:-2h}" \
+      cargo test --workspace --quiet --profile gate --lib --bins --tests -- --include-ignored &&
       cargo test --workspace --quiet --doc
   else
     cargo test --workspace --quiet

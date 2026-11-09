@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # Run every Kani harness in the workspace, several at once, each in its own memory-capped scope
-# (scripts/kani: KANI_MEM, KANI_TIMEOUT), and print one line per harness with its result and time
-# as it finishes. Exits non-zero if any failed.
+# (scripts/kani: KANI_MEM), and print one line per harness with its result and time as it finishes.
+# Exits non-zero if any failed.
 #
 # Usage: scripts/kani-all [-j JOBS] [PATTERN]
 #   PATTERN  only harnesses whose full path contains it, e.g. `verify_slow` or `space::`.
 #   -j       harnesses at once (KANI_JOBS, default 3)
 #   KANI_ALL_MEM  the cap that the scopes share, default 12G
+#   KANI_CPU      the limit of CPU seconds per process of a harness, default 1800
+#   KANI_TIMEOUT  the wall-clock limit on a harness, default 4h
+#
+# Why a limit of CPU time, as in scripts/miri: on a busy machine, with other work at the same
+# priority, the slowest harness takes an hour for its 15 minutes of CPU, and a measurement can pause
+# it besides, so a wall-clock limit that catches a harness that runs away would fail one that does not.
 #
 # Why one scope per harness: a single `cargo kani` runs its harnesses in one cgroup, and CBMC's
 # memory use accumulates across them, so a set whose members each fit under the cap can still
@@ -81,8 +87,9 @@ mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
 one() {
   local pkg="$1" harness="$2" start out status=ok line why
   start=$(date +%s)
-  out=$(MEMLIMIT_QUIET=1 "$here/kani" -p "$pkg" --harness "$harness" --exact \
-          --output-format terse 2>&1) || status=FAILED
+  out=$(ulimit -t "${KANI_CPU:-1800}"
+        MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-4h}" "$here/kani" -p "$pkg" \
+          --harness "$harness" --exact --output-format terse 2>&1) || status=FAILED
   line=$(printf '%-72s %-6s %5ds' "$harness" "$status" "$(( $(date +%s) - start ))")
   if [ "$status" = FAILED ]; then
     why=$(printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5)
