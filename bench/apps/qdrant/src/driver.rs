@@ -244,6 +244,23 @@ impl Qdrant {
         }
     }
 
+    /// The collection's state, once it has stayed green for half a minute. Optimizers take a moment
+    /// to start after a change, and to remove what they replaced after they finish, and a stop in
+    /// that time leaves segments behind for the next start to find.
+    fn stays_green(&self, wait: Duration) -> Value {
+        let mut since = Instant::now();
+        loop {
+            let info = self.collection();
+            if info["result"]["status"] != "green" {
+                self.green(wait);
+                since = Instant::now();
+            } else if since.elapsed() >= Duration::from_secs(30) {
+                return info;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     /// Stops Qdrant with SIGTERM, as a service manager does, and waits for it; kills it after a
     /// minute. Returns whether it stopped by itself.
     fn stop(mut self) -> bool {
@@ -356,7 +373,7 @@ fn build(d: &mut Driver) {
         id = end;
     }
     let uploaded = t0.elapsed();
-    let info = q.green(Duration::from_secs(4 * 3600));
+    let info = q.stays_green(Duration::from_secs(4 * 3600));
     let count = info["result"]["points_count"].as_u64().unwrap_or(0);
     if count != m.points {
         fail(&format!("the collection has {count} points, not {}", m.points));
@@ -382,8 +399,8 @@ fn build(d: &mut Driver) {
 /// Leaves the collection in `out` so that a fresh start finds it green, as `serve` requires. What
 /// Qdrant saved can hold more than it reported: on the M1 Max a build that was green with 4 segments
 /// came back with 6 and more vectors than points. A collection with work left is grey after a
-/// restart, and stays so until an update or a change of configuration starts its optimizers; an
-/// empty change is Qdrant's documented way.
+/// restart, and stays so until an update or a change of configuration starts its optimizers. An
+/// empty change starts nothing, so this changes a setting that does not matter and puts it back.
 fn settle(out: &Path) {
     let (storage, config) = (out.join("storage"), out.join("qdrant.yaml"));
     if !storage.is_dir() {
@@ -397,8 +414,11 @@ fn settle(out: &Path) {
             settled = true;
         } else {
             eprintln!("qdrant settle: at the start {}", info["result"]);
-            q.json("PATCH", &format!("/collections/{COLLECTION}"), br#"{"optimizers_config":{}}"#);
-            q.green(Duration::from_secs(4 * 3600));
+            let path = format!("/collections/{COLLECTION}");
+            q.json("PATCH", &path, br#"{"optimizers_config":{"flush_interval_sec":6}}"#);
+            q.stays_green(Duration::from_secs(4 * 3600));
+            q.json("PATCH", &path, br#"{"optimizers_config":{"flush_interval_sec":5}}"#);
+            q.stays_green(Duration::from_secs(4 * 3600));
         }
         if !q.stop() {
             fail("Qdrant did not stop as the collection settled");
