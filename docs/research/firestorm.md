@@ -163,6 +163,13 @@ mimalloc sized on the first row (+0.92):
 
 - **The fast path inlines.** `bench/roofline/fastpath/check.py` finds both sequences inside the loop
   and no call: 54 instructions and 212 bytes at a constant size, 69 and 272 at a run-time size.
+- **In a program built with fat LTO, that makes the loaded image about a third larger.** Text and
+  read-only data against jemalloc's build: DataFusion 83.5 MiB against 62.7, SurrealDB 79.3 against
+  58.5, ruff 28.2 against 20.2, Sozu 13.6 against 10.5, orders 4.9 against 4.2, boa 24.1 against 22.5.
+  DataFusion holds 200,000 restartable sequences (`__rseq_cs`) and 13 MiB more `.text`. The Router
+  and Meilisearch, built without LTO, do not grow. What this costs a program in the front end is not
+  measured; a call costs the same as inlining in the table below, so an out-of-line build would tell
+  (`66dfb90`, 2026-11-08).
 - **The gaps from 13 are not placement.** Eight placements of each loop (`RA_PAD`, 16 to 128) move
   every row by at most 0.04. `Box` adds 0.36 and a run-time size 0.29: the program's store and the
   table's load, beside the hops.
