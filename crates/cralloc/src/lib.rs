@@ -161,6 +161,8 @@ pub mod stats;
 #[cfg(test)]
 mod stress;
 pub(crate) mod thread_word;
+#[cfg(test)]
+mod turns;
 
 #[cfg(cralloc_real)]
 pub use heap::Cralloc;
