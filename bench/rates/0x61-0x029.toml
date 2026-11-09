@@ -21,6 +21,8 @@
 "orders axum cache 2G" = 174000
 # glibc 166722, mimalloc 191050, cralloc 191236, tcmalloc-percpu 191368, snmalloc 192145, jemalloc 192402
 "orders axum h2" = 117000
+# cralloc 893, mimalloc 910, snmalloc 911, tcmalloc-percpu 914, glibc 919, jemalloc 955
+"qdrant mixed" = 625
 # glibc 4367, mimalloc 7206, cralloc 7711, tcmalloc-percpu 7786, jemalloc 7844, snmalloc 8019
 "router graphql" = 3060
 # mimalloc 7120, cralloc 7717, tcmalloc-percpu 7781, jemalloc 7826, snmalloc 8039

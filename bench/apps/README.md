@@ -261,6 +261,11 @@ same directory; cargo locks it.
 connect-rust's server is `rpc-server` of the bench workspace, which `benchrun build` builds
 with the workloads; `connect/` holds only its input.
 
+On aarch64 every program here builds and links unchanged, with `rust-lld` as the one linker across
+allocators (`bench/.cargo/config.toml`) and the C of the allocator crates given `-mcpu=native` and,
+for snmalloc, the kernel's page size (`bench/runner/src/apps.rs`). That includes the routines'
+conditional branches: Meilisearch has 318 MiB of text, DataFusion 84 and SurrealDB 79 with cralloc.
+
 ## Inputs
 
 `bench/apps/fetch [program...]` runs `<program>/fetch.sh DEST` for each program, into
