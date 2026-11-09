@@ -85,4 +85,4 @@ dereferences an object pointer, a wrong link is caught by `admits` the next time
 address, which makes the code abort rather than reach outside the area, and a wrong level is capped
 at the capacity.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

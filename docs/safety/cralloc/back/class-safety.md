@@ -29,7 +29,7 @@ contents; if the OS refuses that, the flag stays and the next allocation of the 
 A slot released resident is charged its pages whose clean bit is clear (`region::charge`); the
 free itself writes no clean bit. Before it releases the slot it writes the slot's size word, as
 its holder, with the fine count in `Recorded::freed` (`Back::stamp_slot`), which changes no
-contents and which the hold's walk reads only as a hint (BACK-REGION-01, "A second caller").
+contents and which the hold's walk reads only as a hint (BACK-REGION-01, "The other caller").
 
 A clean bit says the page has not been written since it was carved or last purged. Only three
 things set one, each by the slot's holder (only the holder of every slot a bit describes writes
@@ -472,8 +472,8 @@ none of which touches the slot's memory.
 2. *The range lies inside the slot, past everything the new block may write.* `settle_slot`
    finds `slack` among the pages of `Layout::slot_unit(slot)`, the pages wholly inside the
    slot (a large slot is whole pages: BACK-CLASS-01, step 3), at or past
-   `keep_from(layout, slot, unit, size, last)`, which is at least
-   `extent_of(layout, slot, unit, size, huge)`: the page past the slot's start plus its stagger
+   `keep_from(layout, slot, stagger, unit, size, last)`, with the slot's own stagger, which is at
+   least `extent_of(layout, slot, unit, size, huge)`: the page past the slot's start plus its stagger
    plus `size`, rounded up to a page (to a huge page if the slot is still advised, which only
    rounds up), clamped to the unit. The block `alloc_at` hands out starts at the slot's start
    or at its stagger, and the caller may write its usable size, `size` from that start rounded
@@ -540,4 +540,4 @@ with purges and advice failing) and the exploration `an_age_walk_races_large_ten
 tenants trim (`TestHost::purge` fails a schedule in which a purger does not hold every slot it
 returns).
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

@@ -12,11 +12,10 @@ when the `Space` was made, and rebuilds the plan as `Plan::new(O::geometry_of(fo
 (`Space::plan`); every plan it is built from is `O::geometry().plan(shift)`, which is that same
 value, since `Os::geometry` is `geometry_of(found())` and the same at every call in a process, so
 "the plan" below is one plan whichever way it is read. `LinuxOs` keeps that promise with a constant
-on x86-64, where nothing is found, and on aarch64 with the page shift it finds once and stores
-(KERNEL-14): a stale read of the store finds the shift again and gets the same answer. Two threads
-could get different answers only by making the process's very first allocator calls at once, each
-under its own seccomp filter, one of which refuses `madvise`; the stores would then disagree and
-the last would stand. That is not a case this entry covers.
+on x86-64, where nothing is found, and on aarch64 with the page shift it publishes once by
+compare-and-swap (KERNEL-14). A thread that reads the word stale finds a shift of its own, loses the
+compare-and-swap and takes the first, so every `Space` of a process holds one answer, even where
+threads sit under different seccomp filters.
 
 Three places construct a `Space`:
 
@@ -129,4 +128,4 @@ That the offset stays in the block is its caller's to show (BACK-HOST-01, point 
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

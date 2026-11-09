@@ -32,4 +32,4 @@ of this page, so nothing here depends on when a generation is drawn.
 `AtomicU64` here is `front::sync::AtomicU64`, which is `core`'s type, or in this crate's tests a
 transparent wrapper of it, so the layout is that of a `u64` either way.
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

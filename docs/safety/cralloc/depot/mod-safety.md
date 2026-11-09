@@ -7,4 +7,4 @@ promise on unchanged. The contract itself is what MAGAZINE-01 (the committed mar
 space) and the slab invariant (S) in `front/real-safety.md` (slab words and spare links
 name this area's magazines) rely on. The one call that ships, in `Bound::cache`, meets it (HEAP-02).
 
-Reviewed: 5a8ade1
+Reviewed: 0bc95dc

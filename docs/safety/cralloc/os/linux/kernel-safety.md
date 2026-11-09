@@ -118,8 +118,9 @@ memory-safety matter: a child that drew its parent's generation would treat the 
 abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
 slow path, and duplicates nothing.
 
-**Where it runs.** Every process draws one at its first slow path of a small class
-(`prepare_first`), and a fork child when something first needs one, so the call is made in every
+**Where it runs.** A process draws one when it readies the magazine area (`prepare_first`): at its
+first slow path of a small class, if `collect` or a look at the background thread's word has not come
+first. A fork child draws when something first needs one. So the call is made in nearly every
 process, in a signal handler if that is where the slow path falls. It opens nothing and
 `GRND_INSECURE` keeps it from waiting for the kernel's pool. A filter that refuses it gets `random`'s
 fallback, and one that kills on it ends the process at that slow path.
@@ -365,7 +366,8 @@ single call:
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
   and arithmetic on locals, all async-signal-safe, but for `more_than_one_thread`'s read of one byte
   of glibc's (KERNEL-12), which is too. On aarch64 `found` adds a load, and a probe the first
-  time.
+  time, and `ticks` a load, and a read of the timer's rate and a store the first time. Each of those
+  words holds zero or its one value, so any thread may read or set it.
 
 **Machine checks.** The tests in `kernel.rs`:
 
@@ -386,4 +388,4 @@ single call:
   the buffer, an empty file, a path with no NUL, a failed open, a read that fails after the
   open, and more calls on every path than the descriptor limit.
 
-Reviewed: 5a8ade1
+Reviewed: 212489a
