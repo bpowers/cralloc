@@ -7,12 +7,18 @@
 "connect log grpc h2" = 93500
 # glibc 135035, jemalloc 165342, tcmalloc-percpu 168087, cralloc 169514, mimalloc 169756, snmalloc 171298
 "connect log h2" = 94500
+# glibc 38665, mimalloc 51423, snmalloc 57533, tcmalloc-percpu 60443, jemalloc 63197, cralloc 63302
+"connect store 1M" = 27100
+# glibc 1144, jemalloc 1388, mimalloc 1392, cralloc 1438, snmalloc 1450, tcmalloc-percpu 1467
+"meilisearch hn" = 801
 # glibc 483091, jemalloc 486526, snmalloc 488858, cralloc 491466, tcmalloc-percpu 497088, mimalloc 541554
 "miniredis" = 338000
 # glibc 310249, mimalloc 366964, snmalloc 381488, tcmalloc-percpu 387365, jemalloc 397337, cralloc 400882
 "orders actix" = 217000
 # glibc 254667, mimalloc 322545, snmalloc 328217, tcmalloc-percpu 339743, jemalloc 344830, cralloc 347020
 "orders axum" = 178000
+# glibc 248988, mimalloc 322804, snmalloc 325622, jemalloc 340226, tcmalloc-percpu 343328, cralloc 343970
+"orders axum cache 2G" = 174000
 # glibc 166722, mimalloc 191050, cralloc 191236, tcmalloc-percpu 191368, snmalloc 192145, jemalloc 192402
 "orders axum h2" = 117000
 # glibc 4367, mimalloc 7206, cralloc 7711, tcmalloc-percpu 7786, jemalloc 7844, snmalloc 8019
