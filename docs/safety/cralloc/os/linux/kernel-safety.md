@@ -388,4 +388,4 @@ single call:
   the buffer, an empty file, a path with no NUL, a failed open, a read that fails after the
   open, and more calls on every path than the descriptor limit.
 
-Reviewed: 0bc95dc
+Reviewed: 212489a
