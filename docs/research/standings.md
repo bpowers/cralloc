@@ -261,7 +261,9 @@ sessions; the allocator's did not.
 
 - **jemalloc and tcmalloc run 3.5% more instructions for 0.5 to 1.3% more cycles,** so their
   instructions per cycle are better, as on the Ryzen.
-- **`orders axum` against tcmalloc is the one to sweep:** 2.7% fewer cycles on 4.3% more instructions.
+- **tcmalloc's 2.7% on `orders axum` is placement.** Over five pads at `92eeb7b`, two rounds, it is
+  0.4% ahead there (p = 0.58), and 1.3% and 0.6% behind on actix and HTTP/2 (p = 0.07 each), on 3.8 to
+  5.6% more instructions and about 20% fewer L1I misses.
 - **Tails do not rank here.** With the browser and the agents running, a run's p99.9 follows what else
   ran ([measuring.md](measuring.md), "On the M1 Max"). On `connect log` each allocator's quietest run
   reads 57 to 64 us; on the other jobs some allocators had no quiet run in three. `orders axum`,
