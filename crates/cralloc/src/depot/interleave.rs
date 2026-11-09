@@ -1093,14 +1093,10 @@ fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
 }
 
 /// The scenarios within bounds small enough for the merge gate, and within the larger bounds
-/// they were checked with, which run on demand in an optimized build:
-/// `cargo test --release -p cralloc --lib -- --ignored depot::interleave` (several minutes;
-/// `scripts/gate --all` runs it). A debug build takes ten times as long, over ten minutes for
-/// the drain and a mutator, so the full runs exist only in optimized builds; the debug build
-/// runs the quick bounds. Only the larger bounds reach the schedules in which a sequence commits
-/// over a drainer's marker (two preemptions) or a fork takes a drainer mid-drain (one
-/// preemption and a fork); deliberately broken drains, back-outs and claim checks pass the
-/// quick runs and fail the full ones.
+/// they were checked with, which `scripts/gate --all` runs. Only the larger bounds reach the
+/// schedules in which a sequence commits over a drainer's marker (two preemptions) or a fork takes
+/// a drainer mid-drain (one preemption and a fork); deliberately broken drains, back-outs and
+/// claim checks pass the quick runs and fail the full ones.
 /// CPU 0 about to leave a magazine half full: its next swap of the tiny class goes `way` and is
 /// evidence of a lock. For an allocation, its loaded magazine is empty and a full spare waits;
 /// for a free, its loaded magazine is full and an empty spare waits.
@@ -1516,8 +1512,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn sleeping_loses_no_wake_up_under_every_schedule_fully() {
         super::sleeping_loses_no_wake_up_under_every_schedule(
             "sleeping, a grower",
@@ -1544,8 +1539,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn parking_loses_no_wake_up_under_every_schedule_fully() {
         super::parking_loses_no_wake_up_under_every_schedule(
             Bounds::preemptions(2),
@@ -1576,8 +1570,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_leaves_no_stock_uncounted_fully() {
         super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(2));
     }
@@ -1589,8 +1582,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn stock_keeps_one_owner_under_every_schedule_fully() {
         // Two preemptions, or one with a move to the other CPU: both together pass the
         // explorer's bound on executions.
@@ -1605,8 +1597,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn exchanges_keep_one_owner_under_every_schedule_fully() {
         super::exchanges_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -1622,8 +1613,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         // The mutator may also move to the other CPU once, mid-drain.
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
@@ -1640,8 +1630,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn two_drains_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::two_drains_and_a_mutator_keep_one_owner_under_every_schedule(Bounds::preemptions(1));
     }
@@ -1656,8 +1645,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule_fully() {
         super::a_drain_that_backs_out_keeps_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -1672,8 +1660,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_fork_at_any_step_duplicates_nothing_fully() {
         super::a_fork_at_any_step_duplicates_nothing(Bounds::preemptions(1).with_fork(), MUTATE);
     }
@@ -1688,8 +1675,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn maintain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::maintain_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -1706,8 +1692,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_fork_at_any_step_of_maintain_duplicates_nothing_fully() {
         super::a_fork_at_any_step_of_maintain_duplicates_nothing(
             Bounds::preemptions(1).with_fork(),
@@ -1724,8 +1709,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -1740,8 +1724,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_drain_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -1753,8 +1736,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
         super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
     }
@@ -1766,8 +1748,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn held_hints_stay_set_under_every_schedule_fully() {
         super::held_hints_stay_set_under_every_schedule(Bounds::preemptions(3));
     }
@@ -1781,8 +1762,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints_fully() {
         super::a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints(
             Bounds::preemptions(3),
@@ -1796,8 +1776,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_push_that_retries_onto_an_emptied_stack_sets_its_hint_fully() {
         super::a_push_that_retries_onto_an_emptied_stack_sets_its_hint(Bounds::preemptions(2));
     }
@@ -1809,8 +1788,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn two_looks_and_a_push_leave_the_domain_marked_fully() {
         super::two_looks_and_a_push_leave_the_domain_marked(Bounds::preemptions(3));
     }
@@ -1822,8 +1800,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_domains_hint_survives_a_look_that_empties_another_class_fully() {
         super::a_domains_hint_survives_a_look_that_empties_another_class(Bounds::preemptions(3));
     }
@@ -1835,8 +1812,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_settle_and_a_new_debt_leave_the_debt_marked_fully() {
         super::a_settle_and_a_new_debt_leave_the_debt_marked(Bounds::preemptions(2));
     }
@@ -1853,8 +1829,7 @@ mod run {
     }
 
     #[test]
-    #[cfg(not(debug_assertions))]
-    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn centring_keeps_one_owner_fully() {
         use super::super::stock::Swap;
         for way in [Swap::Alloc, Swap::Free] {

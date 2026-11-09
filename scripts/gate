@@ -80,12 +80,11 @@ summarize() {
 
 tests() {
   if [ -n "$all" ]; then
-    # Not the doctests: an ignored doctest is an example that is not meant to run.
-    cargo test --workspace --quiet --lib --bins --tests -- --include-ignored &&
-      cargo test --workspace --quiet --doc &&
-      # The depot's full interleaving explorations exist only in optimized builds: a debug build
-      # takes ten times as long, over ten minutes for one of them (depot/interleave.rs).
-      cargo test --release -p cralloc --lib --quiet -- --ignored depot::interleave::run::
+    # Optimized, with every debug check on (the `gate` profile in Cargo.toml): the explorations
+    # are mostly work the optimizer removes. Not the doctests: an ignored doctest is an example
+    # that is not meant to run.
+    cargo test --workspace --quiet --profile gate --lib --bins --tests -- --include-ignored &&
+      cargo test --workspace --quiet --doc
   else
     cargo test --workspace --quiet
   fi
