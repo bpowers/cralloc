@@ -111,9 +111,9 @@ lints() {
     cargo clippy -p cralloc --all-targets --no-default-features --quiet -- -D warnings
 }
 
-# The musl build: the allocator brings and registers its own rseq area there (front/area.rs).
-# Its tests build in a few seconds alongside the others. Skipped, saying so, where the target is
-# not installed.
+# The musl build: the allocator brings and registers its own rseq area there (front/area.rs), and
+# the explorers' tasks are OS threads, as they are nowhere else in the gate (turns.rs). Its tests
+# build in a few seconds alongside the others. Skipped, saying so, where the target is not installed.
 musl() {
   local target
   target="$(uname -m)-unknown-linux-musl"
@@ -122,7 +122,7 @@ musl() {
     return 0
   fi
   cargo clippy -p cralloc --all-targets --target "$target" --quiet -- -D warnings &&
-    cargo test -p cralloc --lib --target "$target" --quiet front::
+    cargo test -p cralloc --lib --target "$target" --quiet -- front:: turns:: back::explore::
 }
 
 step format cargo fmt --all --check

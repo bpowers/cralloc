@@ -165,7 +165,8 @@ not even for tests, so we wrote two small checkers in the style of CHESS (`back/
   one. Only one runs at a time either way.
 - Each exploration keeps a fingerprint of every decision of every schedule (`fingerprint.rs`). With
   `CRALLOC_EXPLORE_LOG` naming a file, it logs that and its count of schedules there, per test. A
-  change to an explorer's mechanism must leave both as they were.
+  change to an explorer's mechanism must leave both as they were, and each explorer's own tests pin
+  them for one small search.
 - They explore sequentially consistent interleavings only, whatever order an atomic names, so they
   cannot tell a right ordering from a wrong one. The words with store-then-load patterns are
   sequentially consistent, which makes those interleavings real for them. The rest is argued in
@@ -222,7 +223,7 @@ among the causes, and one file, `cells`, has had no review. That list is cleared
 
 `scripts/gate` runs in well under a minute: formatting, the generated-file checksums, the ledger
 check, lints in three feature sets and on musl, the workspace's tests, the quick Kani harnesses, and
-the musl front-end tests. `scripts/gate --all` adds every ignored test and the slow Kani harnesses,
+on musl the front end's tests and the explorers' own. `scripts/gate --all` adds every ignored test and the slow Kani harnesses,
 before a change to shared types or protocols. Its tests build in the `gate` profile (`Cargo.toml`),
 optimized with debug assertions and overflow checks on, since much of a debug build's time goes on
 code the optimizer removes.
