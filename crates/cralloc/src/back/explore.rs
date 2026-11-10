@@ -47,6 +47,8 @@ pub(crate) struct Config {
     pub(crate) crash: bool,
     /// Give up after this many schedules: a guard against a scenario that is too large.
     pub(crate) limit: usize,
+    /// Decisions in one schedule before it is reported as not terminating.
+    pub(crate) max_steps: usize,
 }
 
 impl Config {
@@ -55,6 +57,7 @@ impl Config {
         preemptions: None,
         crash: false,
         limit: 2_000_000,
+        max_steps: 20_000,
     };
 }
 
@@ -170,6 +173,14 @@ impl Sched<'_> {
                     self.unwind(me, t);
                 }
                 return if own { me } else { self.team.driver() };
+            }
+            if inner.trace.len() >= inner.config.max_steps {
+                let message = format!(
+                    "a schedule took more than {} steps: a thread may be waiting or livelocked",
+                    inner.config.max_steps
+                );
+                inner.failure = Some(message);
+                continue;
             }
             // The options, in order: run each waiting thread, the bound allowing, then kill each
             // waiting thread but thread 0, if a crash is allowed and has not happened. None means
@@ -535,6 +546,49 @@ mod tests {
         assert_eq!(every.schedules, 20);
     }
 
+    /// One small search, pinned, so that a change to the explorer's decisions fails a test: 3
+    /// threads on one plain word, nothing that varies with the machine or the build, one preemption
+    /// and a crash, and a load whose value decides what the thread does next. A deliberate change
+    /// to the order of the choices may update the hash. The count needs a reason: it says how many
+    /// schedules the search covers.
+    #[test]
+    fn a_small_search_makes_the_same_decisions() {
+        let stats = explore(
+            Config {
+                preemptions: Some(1),
+                crash: true,
+                ..Config::ALL
+            },
+            3,
+            || TWord::new(None),
+            |word, me| {
+                if word.load() == 0 {
+                    word.fetch_or(1 << me);
+                }
+                word.fetch_and(!8);
+            },
+            |_, _| {},
+        );
+        assert_eq!(stats.schedules, 498);
+        assert_eq!(stats.fingerprint, Fingerprint(0x7d0d63a387b6d31b));
+    }
+
+    /// A thread that never stops ends in a failure that names its schedule, not at the memory cap.
+    #[test]
+    #[should_panic(expected = "a schedule took more than 100 steps")]
+    fn a_thread_that_never_stops_is_reported() {
+        explore(
+            Config {
+                max_steps: 100,
+                ..Config::ALL
+            },
+            1,
+            || TWord::new(None),
+            |word, _| while word.load() == 0 {},
+            |_, _| {},
+        );
+    }
+
     #[test]
     fn the_same_search_has_the_same_fingerprint() {
         assert_eq!(
@@ -548,7 +602,8 @@ mod tests {
     }
 
     /// A thread that vanishes is unwound before the check, whichever thread was running the
-    /// scheduler when it was chosen, and thread 0 never vanishes.
+    /// scheduler when it was chosen, and does not do the operation it stopped before. Thread 0
+    /// never vanishes.
     #[test]
     fn a_thread_that_vanishes_is_unwound_before_the_check() {
         struct Leaving<'a>(&'a AtomicUsize);
@@ -558,6 +613,7 @@ mod tests {
             }
         }
         let vanished = AtomicUsize::new(0);
+        let cut_short = AtomicBool::new(false);
         let stats = explore(
             Config {
                 crash: true,
@@ -565,20 +621,28 @@ mod tests {
             },
             2,
             || (TWord::new(None), AtomicUsize::new(0), AtomicUsize::new(0)),
-            |(word, started, left), _| {
+            |(word, started, left), me| {
                 started.fetch_add(1, SeqCst);
                 let _leaving = Leaving(left);
-                word.fetch_or(1);
-                word.fetch_or(2);
+                word.fetch_or(1 << (2 * me));
+                word.fetch_or(2 << (2 * me));
             },
-            |(_, started, left), outcome| {
+            |(word, started, left), outcome| {
                 assert_eq!(started.load(SeqCst), left.load(SeqCst));
                 assert!(!outcome.killed.contains(&0));
                 assert!(outcome.killed.len() <= 1, "one crash a schedule");
                 vanished.fetch_add(outcome.killed.len(), SeqCst);
+                // Thread 1 got as far as its first operation, and vanished before it.
+                if !outcome.killed.is_empty() && started.load(SeqCst) == 2 && word.load() & 4 == 0 {
+                    cut_short.store(true, SeqCst);
+                }
             },
         );
         assert!(vanished.load(SeqCst) > 0 && vanished.load(SeqCst) < stats.schedules);
+        assert!(
+            cut_short.load(SeqCst),
+            "a thread did the operation it vanished before"
+        );
     }
 
     #[test]

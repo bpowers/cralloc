@@ -585,8 +585,37 @@ mod tests {
         assert_ne!(search(1), search(0));
     }
 
+    /// One small search, pinned, so that a change to the explorer's decisions fails a test: 3
+    /// threads on one plain word, nothing that varies with the machine or the build, one preemption
+    /// and a fork, a choice, a wait, and a load whose value decides what the thread does next. A
+    /// deliberate change to the order of the choices may update the hash. The count needs a reason:
+    /// it says how many schedules the search covers.
+    #[test]
+    fn a_small_search_makes_the_same_decisions() {
+        let report = explore(
+            Bounds::preemptions(1).with_fork(),
+            3,
+            || AtomicUsize::new(0),
+            |word, me| {
+                if word.load(Ordering::SeqCst) == 0 {
+                    word.fetch_add(1 + choose(2), Ordering::SeqCst);
+                }
+                if me == 1 {
+                    wait_point();
+                }
+                word.fetch_or(8, Ordering::SeqCst);
+            },
+            |_| {},
+            |_, _| {},
+        );
+        assert_eq!(report.executions, 896);
+        assert_eq!(report.fingerprint, Fingerprint(0x65c26ffe0b8cc0db));
+    }
+
     #[test]
     fn choices_are_explored_and_a_fork_kills_the_others() {
+        let lost = AtomicBool::new(false);
+        let wiped = std::sync::atomic::AtomicUsize::new(0);
         let seen = Mutex::new(Vec::new());
         let report = explore(
             Bounds::preemptions(0).with_fork(),
@@ -597,16 +626,29 @@ mod tests {
                 a.fetch_add(pick, Ordering::SeqCst);
                 b.fetch_add(1 << (8 * me), Ordering::SeqCst);
             },
-            |_| {},
+            |_| {
+                wiped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
             |(a, b), forked| {
                 let b = b.load(Ordering::SeqCst);
-                if !forked {
+                if forked {
+                    lost.fetch_or(b != 0x101, std::sync::atomic::Ordering::SeqCst);
+                } else {
                     assert_eq!(b, 0x101);
                 }
                 seen.lock().unwrap().push(a.load(Ordering::SeqCst));
             },
         );
         assert!(report.complete && report.forks > 0);
+        assert!(
+            lost.load(std::sync::atomic::Ordering::SeqCst),
+            "a fork killed nobody"
+        );
+        assert_eq!(
+            wiped.load(std::sync::atomic::Ordering::SeqCst),
+            report.forks,
+            "a fork wiped nothing"
+        );
         let seen = seen.into_inner().unwrap();
         assert!((0..=4).all(|sum| seen.contains(&sum)));
     }

@@ -3,7 +3,9 @@
 //!
 //! The interleaving explorers (`back::explore`, `front::check`) mix every decision of every
 //! schedule into a fingerprint and return it with their count of schedules. Two explorers that
-//! report the same numbers for a scenario ran the same schedules in the same order. With
+//! report the same numbers for a scenario made the same decisions in the same order: who ran at
+//! each step, with how many options. What a thread read shows only where it changed what the thread
+//! did next. Each explorer pins the numbers of one small search on plain words. With
 //! `CRALLOC_EXPLORE_LOG` naming a file, each exploration also appends a line to it: the test's
 //! name, the number of schedules, the fingerprint and the seconds it took.
 
