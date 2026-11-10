@@ -331,11 +331,13 @@ out, the same 5 s showed both loads missing in 22,865 rounds and a later store f
 this kernel, 20 s at `335f834`: 525,132 calls and no late commit, and 120,393 late commits with the
 call left out. Both are evidence for one kernel on one CPU. The argument is above.
 
-**Arm's model, for the claims that rest on it**: `python3 tla/armcheck.py`, a small enumerator
-transcribed from Arm's `aarch64hwreqs.cat`, because herd7 could not be installed here. It lists every
-candidate execution. 14 published litmus tests get the catalogue's answers, which is the check on the
-transcription, and each "allowed" row shows it can see the outcome, as do controls in the tool that
-leave out each barrier the fence's and parking's rows rest on. A transcription is not herd.
+**Arm's model, for the claims that rest on it**: `python3 tla/armcheck.py` writes each test out for
+herd7, which runs it under Arm's own `aarch64.cat`. 14 published litmus tests get the catalogue's
+answers, which is the check on the writing out, and each "allowed" row shows the outcome can happen, as
+do controls in the tool that leave out each barrier the fence's and parking's rows rest on. All 49
+tests give the same answers on herdtools7 7.58 and on upstream's `cfc4f56`, whose model is newer. A hand
+transcription of the model, since removed, allowed exactly the same final states on all 49. The tests
+are summaries of the code's instructions, written by hand: nothing checks them against the code.
 
 | Test | Bad outcome |
 |---|---|
