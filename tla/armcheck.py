@@ -1,39 +1,25 @@
 #!/usr/bin/env python3
-"""Litmus tests of what the allocator relies on, under Arm's axiomatic memory model.
+"""Litmus tests of what the allocator relies on, run by herd7 under Arm's axiomatic memory model.
 
-The relations are transcribed by hand from herd's aarch64hwreqs.cat and aarch64.cat, for the
-explicit accesses and barriers these tests use: no tags, translation, cache maintenance or
-exclusives.
-
-    obs = rfe | coe | fre
-    dob = addr | data | ctrl;[W] | addr;po;[W] | (addr|data);lmrs;[R]
-    aob = rmw | rmw;lmrs;[A|Q]
-    bob = po;[dmb.full];po | [R];po;[dmb.ld];po | [W];po;[dmb.st];po;[W]
-        | [range(A;amo;L)];po | [L];po;[A] | [A|Q];po | po;[L]
-    ob  = (obs | dob | aob | bob)+,  irreflexive
-    internal: coherence per location (po-loc | rf | co | fr acyclic), and an RMW's atomicity.
-
-The model's IFB-ob, for ISB and an exception's return, is left out: no test here uses it.
-
-A test lists threads of instructions and asks whether a bad outcome is allowed, by listing every
-candidate execution. The first group are litmus tests whose answers are published, there to catch a
-mistake in the transcription; the rest are this allocator's (docs/research/memory-ordering.md). Run
+A test lists threads of instructions and asks whether a bad outcome is among the final states herd7
+allows. The first group are litmus tests whose answers are published, there to catch a mistake in
+writing a test out for herd7; the rest are this allocator's (docs/research/memory-ordering.md). Run
 with `python3 tla/armcheck.py`: it prints each answer and fails if one is not what the test expects.
-herd7 itself is the check to prefer, where it can be installed.
+
+herd7 is on the PATH or named by HERD7. It comes with herdtools7 (`opam install herdtools7`, or its
+source with `make build install PREFIX=...`), and Arm's model comes with it.
 """
 import itertools
+import os
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 
 ALLOWED, FORBIDDEN = True, False
 FAILED = []
-
-
-class E:
-    def __init__(s, tid, idx, kind, loc=None, val=None, ord="", reg=None):
-        s.tid, s.idx, s.kind, s.loc, s.val, s.ord, s.reg = tid, idx, kind, loc, val, ord, reg
-
-    def __repr__(s):
-        return f"T{s.tid}.{s.idx}:{s.kind}{s.ord}({s.loc}={s.val})"
+HERD = os.environ.get("HERD7") or shutil.which("herd7")
 
 
 def R(loc, reg, ord="", addr=None, ctrl=None):
@@ -53,152 +39,95 @@ def F(kind):
     return ("F", kind)
 
 
-def closure(rel):
-    nxt = {}
-    for a, b in rel:
-        nxt.setdefault(a, set()).add(b)
-    changed = True
-    while changed:
-        changed = False
-        for a in nxt:
-            new = set()
-            for b in nxt[a]:
-                new |= nxt.get(b, set())
-            if not new <= nxt[a]:
-                nxt[a] |= new
-                changed = True
-    return nxt
+def litmus(name, threads):
+    """The test in herd's AArch64 format, and what its registers are called in this file: the plain
+    forms of each access, with a dependency as a register that is always zero or a branch to the
+    next line. An RMW is a swap, since the model orders every atomic that writes alike."""
+    init, columns, names = [], [], {}
+    for t, code in enumerate(threads):
+        regs, bases, lines, used = {}, {}, [], itertools.count()
+
+        def base(loc):
+            if loc not in bases:
+                bases[loc] = next(used)
+                init.append(f"{t}:X{bases[loc]}=m_{loc};")
+            return f"X{bases[loc]}"
+
+        def branch(deps):
+            for d in deps:
+                label = f"LC{t}{len(lines)}"
+                lines.extend([f"CBNZ W{regs[d]},{label}", f"{label}:"])
+
+        def address(loc, deps):
+            at = base(loc)
+            for d in deps:
+                zero, moved = next(used), next(used)
+                lines.extend([f"EOR X{zero},X{regs[d]},X{regs[d]}", f"ADD X{moved},{at},X{zero}"])
+                at = f"X{moved}"
+            return at
+
+        def named(reg):
+            regs[reg] = next(used)
+            names[f"{t}:X{regs[reg]}"] = f"{t}:{reg}"
+            return regs[reg]
+
+        for inst in code:
+            if inst[0] == "R":
+                _, loc, reg, ord, adeps, cdeps = inst
+                branch(cdeps)
+                at = address(loc, adeps)
+                lines.append(f"{dict(A='LDAR', Q='LDAPR').get(ord, 'LDR')} W{named(reg)},[{at}]")
+            elif inst[0] == "W":
+                _, loc, val, ord, ddeps, adeps, cdeps = inst
+                branch(cdeps)
+                at = address(loc, adeps)
+                value = next(used)
+                if ddeps:
+                    lines.append(f"EOR W{value},W{regs[ddeps[0]]},W{regs[ddeps[0]]}")
+                    lines.append(f"ADD W{value},W{value},#{val}")
+                else:
+                    lines.append(f"MOV W{value},#{val}")
+                lines.append(f"{'STLR' if ord == 'L' else 'STR'} W{value},[{at}]")
+            elif inst[0] == "RMW":
+                _, loc, val, reg, ord = inst
+                value = next(used)
+                lines.append(f"MOV W{value},#{val}")
+                lines.append(f"SWP{ord} W{value},W{named(reg)},[{base(loc)}]")
+            else:
+                lines.append(dict(dmb="DMB SY", **{"dmb.ld": "DMB LD", "dmb.st": "DMB ST"})[inst[1]])
+        columns.append(lines)
+    locs = sorted({i[1] for code in threads for i in code if i[0] != "F"})
+    rows = itertools.zip_longest(*columns, fillvalue="")
+    table = [" | ".join(f"P{t}" for t in range(len(threads))) + " ;"]
+    table += [" | ".join(row) + " ;" for row in rows]
+    # The prefix, since herd reserves some names, `tag` among them.
+    seen = " ".join(f"{n};" for n in [*names, *(f"m_{loc}" for loc in locs)])
+    title = re.sub(r"[^A-Za-z0-9+_.-]+", "_", name)
+    text = f"AArch64 {title}\n{{ {' '.join(init)} }}\n" + "\n".join(table)
+    return f"{text}\nlocations [{seen}]\nforall (true)\n", names
 
 
-def acyclic(rel):
-    c = closure(rel)
-    return all(a not in c.get(a, ()) for a in c)
-
-
-def is_w(e):
-    return e.kind == "W"
-
-
-def is_r(e):
-    return e.kind == "R"
-
-
-def is_m(e):
-    return e.kind in ("R", "W")
-
-
-def external(rel):
-    return {(a, b) for a, b in rel if a.tid != b.tid}
+def herd(name, threads):
+    """Every final state Arm's model allows for the test: registers as "thread:name", and locations."""
+    text, names = litmus(name, threads)
+    with tempfile.NamedTemporaryFile("w", suffix=".litmus") as f:
+        f.write(text)
+        f.flush()
+        out = subprocess.run([HERD, "-model", "aarch64.cat", f.name], capture_output=True, text=True)
+    lines = out.stdout.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("States ")]
+    if out.returncode != 0 or not starts:
+        sys.exit(f"herd7 failed on {name}:\n{out.stdout}{out.stderr}\n{text}")
+    states = []
+    for line in lines[starts[0] + 1 : starts[0] + 1 + int(lines[starts[0]].split()[1])]:
+        pairs = (pair.strip().split("=") for pair in line.split(";") if pair.strip())
+        states.append({names.get(k, k.strip("[]")[2:]): int(v) for k, v in pairs})
+    return states
 
 
 def run(name, threads, ask, expect):
     """Prints whether an outcome that `ask` picks is allowed, and records it if that is not `expect`."""
-    events, po = [], set()
-    regs = {}
-    rmw, addr, data, ctrl = set(), set(), set(), set()
-    for t, code in enumerate(threads):
-        mine = []
-        for inst in code:
-            if inst[0] == "R":
-                _, loc, reg, ord, adeps, cdeps = inst
-                e = E(t, len(mine), "R", loc, None, ord, reg)
-                mine.append(e)
-                regs[(t, reg)] = e
-                addr |= {(regs[(t, d)], e) for d in adeps}
-                ctrl |= {(regs[(t, d)], e) for d in cdeps}
-            elif inst[0] == "W":
-                _, loc, val, ord, ddeps, adeps, cdeps = inst
-                e = E(t, len(mine), "W", loc, val, ord)
-                mine.append(e)
-                data |= {(regs[(t, d)], e) for d in ddeps}
-                addr |= {(regs[(t, d)], e) for d in adeps}
-                ctrl |= {(regs[(t, d)], e) for d in cdeps}
-            elif inst[0] == "RMW":
-                _, loc, val, reg, ord = inst
-                acquire = "A" if "A" in ord else ("Q" if "Q" in ord else "")
-                r = E(t, len(mine), "R", loc, None, acquire, reg)
-                w = E(t, len(mine) + 1, "W", loc, val, "L" if "L" in ord else "")
-                mine += [r, w]
-                regs[(t, reg)] = r
-                rmw.add((r, w))
-            else:
-                mine.append(E(t, len(mine), inst[1]))
-        events += mine
-        po |= set(itertools.combinations(mine, 2))
-    reads = [e for e in events if is_r(e)]
-    writes = [e for e in events if is_w(e)]
-    locs = sorted({e.loc for e in events if e.loc})
-    initial = {l: E(-1, 0, "W", l, 0) for l in locs}
-    by_loc = {l: [w for w in writes if w.loc == l] for l in locs}
-    fences = [e for e in events if e.kind in ("dmb", "dmb.ld", "dmb.st")]
-    allowed = set()
-
-    for orders in itertools.product(*[list(itertools.permutations(by_loc[l])) for l in locs]):
-        co = {l: [initial[l]] + list(order) for l, order in zip(locs, orders)}
-        coset = set()
-        for seq in co.values():
-            coset |= set(itertools.combinations(seq, 2))
-        for sources in itertools.product(*[[initial[r.loc]] + by_loc[r.loc] for r in reads]):
-            rf = dict(zip(reads, sources))
-            fr = set()
-            for r, w in rf.items():
-                seq = co[r.loc]
-                fr |= {(r, later) for later in seq[seq.index(w) + 1 :]}
-            rfs = {(w, r) for r, w in rf.items()}
-            # Internal: coherence per location.
-            poloc = {(a, b) for a, b in po if a.loc and a.loc == b.loc}
-            if not acyclic(poloc | rfs | coset | fr):
-                continue
-            # Atomicity: no write between the source of an RMW's read and its write.
-            if any(co[r.loc].index(w) != co[r.loc].index(rf[r]) + 1 for r, w in rmw):
-                continue
-            obs = external(rfs) | external(coset) | external(fr)
-            dob = set(addr) | set(data) | {(a, b) for a, b in ctrl if is_w(b)}
-            for a, b in addr:
-                dob |= {(a, c) for c in events if (b, c) in po and is_w(c)}
-            # lmrs: a read's most recent local store to its location, which it reads from.
-            lmrs = {(w, r) for r, w in rf.items() if w.tid == r.tid and (w, r) in po}
-            for a, b in addr | data:
-                dob |= {(a, r) for w, r in lmrs if b is w}
-            aob = set(rmw)
-            for _, w in rmw:
-                aob |= {(w, r) for w2, r in lmrs if w2 is w and r.ord in ("A", "Q")}
-            bob = set()
-            for f in fences:
-                for a in events:
-                    for b in events:
-                        if (a, f) in po and (f, b) in po and is_m(a) and is_m(b):
-                            if f.kind == "dmb":
-                                bob.add((a, b))
-                            elif f.kind == "dmb.ld" and is_r(a):
-                                bob.add((a, b))
-                            elif f.kind == "dmb.st" and is_w(a) and is_w(b):
-                                bob.add((a, b))
-            for a, b in po:
-                if not (is_m(a) and is_m(b)):
-                    continue
-                if is_w(a) and a.ord == "L" and any(w is a and r.ord == "A" for r, w in rmw):
-                    bob.add((a, b))
-                if is_w(a) and a.ord == "L" and is_r(b) and b.ord == "A":
-                    bob.add((a, b))
-                if is_r(a) and a.ord in ("A", "Q"):
-                    bob.add((a, b))
-                if is_w(b) and b.ord == "L":
-                    bob.add((a, b))
-            if not acyclic(obs | dob | aob | bob):
-                continue
-
-            def value(w):
-                # A write's value, or for an RMW's write a function of what it read.
-                if callable(w.val):
-                    read = next(r for r, w2 in rmw if w2 is w)
-                    return w.val(value(rf[read]))
-                return w.val
-
-            outcome = {f"{t}:{reg}": value(rf[e]) for (t, reg), e in regs.items()}
-            outcome |= {l: value(co[l][-1]) for l in locs}
-            allowed.add(tuple(sorted(outcome.items())))
-    hit = any(ask(dict(o)) for o in allowed)
+    hit = any(ask(state) for state in herd(name, threads))
     print(f"{name}: {'ALLOWED' if hit else 'forbidden'}")
     if hit != expect:
         FAILED.append(name)
@@ -250,7 +179,7 @@ def published():
 
 def ours():
     """What the allocator rests on: each outcome the model must rule out, and beside it the weaker
-    form that shows the enumerator can see that outcome."""
+    form that shows the outcome can happen."""
     # Store buffering with SeqCst on both sides, as rustc maps it: atomics with both semantics and
     # ldar. The summary bits' protocol.
     run("SB: ldsetal;ldar (SeqCst RMW and SeqCst load, the summary bits)",
@@ -316,7 +245,7 @@ def ours():
          [R("head", "h", "Q"), RMW("head", 2, "b", "AL")],
          [R("head", "c", "Q"), R("slot", "s")]],
         lambda o: o["1:h"] == 1 and o["1:b"] == 1 and o["2:c"] == 2 and o["2:s"] == 0, FORBIDDEN)
-    run("stack: as above, the pop between relaxed: Arm's aob still orders it",
+    run("stack: as above, the pop between relaxed: the head's coherence order carries it",
         [[W("slot", 1), RMW("head", 1, "a", "AL")],
          [RMW("head", 2, "b", "")],
          [R("head", "c", "Q"), R("slot", "s")]],
@@ -416,6 +345,8 @@ def ours():
 
 
 if __name__ == "__main__":
+    if not HERD:
+        sys.exit("no herd7: see the top of this file")
     published()
     ours()
     if FAILED:
