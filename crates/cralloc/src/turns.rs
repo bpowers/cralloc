@@ -19,7 +19,8 @@
 use std::cell::Cell;
 
 /// A running task's job for one round: returns who goes next once this task is done, a task or
-/// [`Team::driver`]. It must not unwind.
+/// [`Team::driver`]. If it unwinds the process ends, since the other tasks stand partway through
+/// theirs and nothing would give them the turn.
 pub(crate) type Job<'a> = &'a (dyn Fn(usize) -> usize + Sync);
 
 /// Erases a job's lifetime, for [`Team::round`] to store it where the tasks can find it.
@@ -301,7 +302,8 @@ mod threads {
                     shared.working += 1;
                     shared.job.expect("a task runs only in a round")
                 };
-                let next = job(me);
+                let next = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(me)))
+                    .unwrap_or_else(|_| std::process::abort());
                 self.lock().working -= 1;
                 self.give(next);
             }

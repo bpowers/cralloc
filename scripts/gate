@@ -14,8 +14,9 @@
 # `verify_slow.rs` otherwise. Miri and benchmarks run on demand.
 #
 # The tests and the proofs run at once. Each test binary runs under the workspace's 4 GiB cap
-# (scripts/run-capped) and Kani under its 6 GiB one (scripts/kani), so together they stay well
-# under the machine's 16 GiB limit for one job.
+# (scripts/run-capped), the quick proofs under Kani's 6 GiB one (scripts/kani) and then the slow
+# proofs under that one each and 12 GiB between them (scripts/kani-all), so together they stay
+# within the machine's 16 GiB limit for one job.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/.."
@@ -82,8 +83,10 @@ tests() {
   if [ -n "$all" ]; then
     # Optimized, with every debug check on (the `gate` profile in Cargo.toml): the explorations
     # are mostly work the optimizer removes. Not the doctests: an ignored doctest is an example
-    # that is not meant to run.
-    cargo test --workspace --quiet --profile gate --lib --bins --tests -- --include-ignored &&
+    # that is not meant to run. The limit on a test binary allows for a busy machine: the
+    # allocator's takes about ten minutes alone, and an hour with others' work on these cores.
+    CRALLOC_TEST_TIMEOUT="${CRALLOC_TEST_TIMEOUT:-2h}" \
+      cargo test --workspace --quiet --profile gate --lib --bins --tests -- --include-ignored &&
       cargo test --workspace --quiet --doc
   else
     cargo test --workspace --quiet

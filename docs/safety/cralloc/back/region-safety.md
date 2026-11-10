@@ -64,9 +64,8 @@ this under interleaving.
 
 1. *Every slot that touches the range is held by this thread.* `touching(unit)` gives slots
    `first..=last`, defined as `(start / size, (end - 1) / size)` for any range of pages, a run
-   as much as a unit; `Divisor::divide` is proved
-   exact for every input (`classes::verify`, `classes::verify_slow`), so these are exactly the
-   slots that overlap the pages. Kani proves it outright on the tiny heap's regions
+   as much as a unit; `Divisor::divide` is exact for every input (`classes::verify`, and a test
+   of every input in `classes::divisor`), so these are exactly the slots that overlap the pages. Kani proves it outright on the tiny heap's regions
    (`units_touch_exactly_their_slots_on_the_tiny_heap`, every class, watermark, cursor and
    huge-page part), and the unit test `purge_passes_tile_the_carved_pages` checks it against
    direct arithmetic in the standard and native geometries, huge-page parts included.

@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
-# Run every Kani harness in the workspace, each in its own memory-capped scope, and print one
-# line per harness with its result and time. Exits non-zero if any failed.
+# Run every Kani harness in the workspace, several at once, each in its own memory-capped scope
+# (scripts/kani: KANI_MEM), and print one line per harness with its result and time as it finishes.
+# Exits non-zero if any failed.
 #
-# Usage: scripts/kani-all [PATTERN]
+# Usage: scripts/kani-all [-j JOBS] [PATTERN]
 #   PATTERN  only harnesses whose full path contains it, e.g. `verify_slow` or `space::`.
+#   -j       harnesses at once (KANI_JOBS, default 3)
+#   KANI_ALL_MEM  the cap that the scopes share, default 12G
+#   KANI_CPU      the limit of CPU seconds per process of a harness, default 1800
+#   KANI_TIMEOUT  the wall-clock limit on a harness, default 4h
+#
+# Why a limit of CPU time, as in scripts/miri: on a busy machine, with other work at the same
+# priority, the slowest harness takes an hour for its 15 minutes of CPU, and a measurement can pause
+# it besides, so a wall-clock limit that catches a harness that runs away would fail one that does not.
 #
 # Why one scope per harness: a single `cargo kani` runs its harnesses in one cgroup, and CBMC's
 # memory use accumulates across them, so a set whose members each fit under the cap can still
-# be killed as a whole.
+# be killed as a whole, and a harness that runs away fails alone. Why a cap they share: the machine
+# has a limit for one job (CLAUDE.md), and only a few gigabytes' worth of harnesses run at once
+# (docs/research/verification.md). Without it, as where systemd cannot set it, one runs at a time.
 #
 # Harnesses are found from their `#[kani::proof]` attributes, so the list never goes stale. The
 # convention this relies on: harnesses live in `verify.rs` (quick: the merge gate runs them all
@@ -17,7 +28,28 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 cd "$root"
+
+jobs="${KANI_JOBS:-3}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -j) jobs="$2"; shift 2 ;;
+    -*) echo "usage: scripts/kani-all [-j JOBS] [PATTERN]" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -le 1 ] || { echo "usage: scripts/kani-all [-j JOBS] [PATTERN]" >&2; exit 2; }
 pattern="${1:-}"
+
+# A slice of the slice this runs in, or of one of its own, that the harnesses' scopes go in.
+parent="${CRALLOC_HEAVY_SLICE:-cralloc.slice}"
+shared="${parent%.slice}-kani$$.slice"
+if systemctl --user set-property --runtime "$shared" \
+     MemoryMax="${KANI_ALL_MEM:-12G}" MemorySwapMax=0 2>/dev/null; then
+  export CRALLOC_HEAVY_SLICE="$shared"
+  trap 'systemctl --user stop "$shared" 2>/dev/null; systemctl --user revert "$shared" 2>/dev/null || true' EXIT
+else
+  jobs=1
+fi
 
 # Prints "package<TAB>module::path::harness" for every harness. Fails if a proof attribute has no
 # function after it, or a harness lives outside a verify.rs or verify_slow.rs file, rather than
@@ -51,20 +83,35 @@ list() {
 all=$(list) || exit 2
 mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
 [ "${#harnesses[@]}" -gt 0 ] || { echo "kani-all: no harnesses match '$pattern'" >&2; exit 2; }
-failed=0
-for entry in "${harnesses[@]}"; do
-  pkg="${entry%%$'\t'*}"; harness="${entry#*$'\t'}"
+# one PACKAGE HARNESS: runs a harness, prints its line, and returns whether it passed.
+one() {
+  local pkg="$1" harness="$2" start out status=ok line why
   start=$(date +%s)
-  if out=$(MEMLIMIT_QUIET=1 "$here/kani" -p "$pkg" --harness "$harness" --exact \
-             --output-format terse 2>&1); then
-    status=ok
-  else
-    status=FAILED; failed=$((failed + 1))
-  fi
-  printf '%-72s %-6s %5ds\n' "$harness" "$status" "$(( $(date +%s) - start ))"
+  out=$(ulimit -t "${KANI_CPU:-1800}"
+        MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-4h}" "$here/kani" -p "$pkg" \
+          --harness "$harness" --exact --output-format terse 2>&1) || status=FAILED
+  line=$(printf '%-72s %-6s %5ds' "$harness" "$status" "$(( $(date +%s) - start ))")
   if [ "$status" = FAILED ]; then
-    printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5
+    why=$(printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5)
+    line+="${why:+$'\n'$why}"
   fi
+  printf '%s\n' "$line"
+  [ "$status" = ok ]
+}
+
+failed=0
+running=0
+for entry in "${harnesses[@]}"; do
+  one "${entry%%$'\t'*}" "${entry#*$'\t'}" &
+  running=$((running + 1))
+  if [ "$running" -ge "$jobs" ]; then
+    wait -n || failed=$((failed + 1))
+    running=$((running - 1))
+  fi
+done
+while [ "$running" -gt 0 ]; do
+  wait -n || failed=$((failed + 1))
+  running=$((running - 1))
 done
 echo "kani-all: ${#harnesses[@]} harnesses, $failed failed"
 [ "$failed" -eq 0 ]

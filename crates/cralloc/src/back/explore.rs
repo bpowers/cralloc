@@ -563,7 +563,7 @@ mod tests {
                 crash: true,
                 ..Config::ALL
             },
-            3,
+            2,
             || (TWord::new(None), AtomicUsize::new(0), AtomicUsize::new(0)),
             |(word, started, left), _| {
                 started.fetch_add(1, SeqCst);

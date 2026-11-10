@@ -41,20 +41,56 @@ static uint64_t next(uint64_t *s) {
     return *s;
 }
 
+// A block's contents: one number of the seed's sequence for every eight bytes, and the low bytes
+// of the next for what is left, so that its first n bytes depend only on the seed and n. A word at
+// a time, since with blocks of up to a megabyte this is most of what the program does: another
+// block's fill over any of these bytes shows in the word that holds them.
 static void fill(struct block *b) {
     uint64_t s = b->seed | 1;
-    for (size_t i = 0; i < b->size; i++) b->p[i] = (unsigned char)next(&s);
+    size_t i = 0;
+    for (; i + 8 <= b->size; i += 8) {
+        uint64_t word = next(&s);
+        memcpy(b->p + i, &word, 8);
+    }
+    if (i < b->size) {
+        uint64_t word = next(&s);
+        memcpy(b->p + i, &word, b->size - i);
+    }
+}
+
+// Whether the first n bytes at p are what `fill` writes for this seed.
+static int filled(const unsigned char *p, size_t n, uint64_t seed) {
+    uint64_t s = seed | 1;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t word = next(&s), found;
+        memcpy(&found, p + i, 8);
+        if (found != word) return 0;
+    }
+    if (i < n) {
+        uint64_t word = next(&s);
+        if (memcmp(p + i, &word, n - i) != 0) return 0;
+    }
+    return 1;
+}
+
+static int zeroed(const unsigned char *p, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t found;
+        memcpy(&found, p + i, 8);
+        if (found != 0) return 0;
+    }
+    for (; i < n; i++)
+        if (p[i] != 0) return 0;
+    return 1;
 }
 
 static void check_and_free(struct block *b) {
-    uint64_t s = b->seed | 1;
-    for (size_t i = 0; i < b->size; i++) {
-        if (b->p[i] != (unsigned char)next(&s)) {
-            pthread_mutex_lock(&bad_lock);
-            bad_blocks++;
-            pthread_mutex_unlock(&bad_lock);
-            break;
-        }
+    if (!filled(b->p, b->size, b->seed)) {
+        pthread_mutex_lock(&bad_lock);
+        bad_blocks++;
+        pthread_mutex_unlock(&bad_lock);
     }
     free(b->p);
 }
@@ -88,10 +124,7 @@ static void *worker(void *arg) {
             default: b.p = malloc(b.size); break;
             }
             if (!b.p && b.size) abort();
-            if (r % 5 == 0) {
-                for (size_t i = 0; i < b.size; i++)
-                    if (b.p[i]) abort();
-            }
+            if (r % 5 == 0 && !zeroed(b.p, b.size)) abort();
             fill(&b);
             local[held++] = b;
         } else if (held > 0) {
@@ -101,10 +134,7 @@ static void *worker(void *arg) {
                 size_t to = pick_size(&s) + 1;
                 unsigned char *q = realloc(b.p, to);
                 if (!q) abort();
-                uint64_t t = b.seed | 1;
-                size_t keep = b.size < to ? b.size : to;
-                for (size_t i = 0; i < keep; i++)
-                    if (q[i] != (unsigned char)next(&t)) abort();
+                if (!filled(q, b.size < to ? b.size : to, b.seed)) abort();
                 b.p = q;
                 b.size = to;
                 fill(&b);

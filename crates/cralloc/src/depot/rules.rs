@@ -2205,8 +2205,7 @@ fn the_swing_rule_pays_for_itself_in_one_class() {
 }
 
 #[test]
-#[cfg(not(debug_assertions))]
-#[ignore = "slow: run with scripts/gate --all, optimized"]
+#[ignore = "slow: run with scripts/gate --all"]
 fn the_swing_rule_pays_for_itself_in_the_small_classes() {
     the_swing_rule_pays_for_itself(&[8, 64, 1024]);
 }
@@ -2265,7 +2264,6 @@ fn a_drain_between_beats_launders_within_the_budget() {
 
 /// Slow paths in the last quarter of 400 repetitions of `pattern`, phases of (allocate `a`,
 /// free the newest `f`), on one CPU loaded at level `start`, with the swing rule on or off.
-#[cfg(not(debug_assertions))]
 fn compound_swing(
     class: SmallClass,
     start: usize,
@@ -2315,7 +2313,6 @@ fn compound_swing(
 /// pattern's swaps fall depends on its level's phase against the magazines' ends, which plain
 /// swaps keep and a half-full swap moves by half a magazine; so one starting level measures
 /// the luck of its phase, and the sum over all of them what the rule costs.
-#[cfg(not(debug_assertions))]
 fn compound_over_phases(class: SmallClass, pattern: &[(usize, usize)], centre: bool) -> usize {
     (0..class.magazine().capacity())
         .map(|start| compound_swing(class, start, pattern, centre))
@@ -2323,7 +2320,6 @@ fn compound_over_phases(class: SmallClass, pattern: &[(usize, usize)], centre: b
 }
 
 /// The rule on takes at most `percent` more slow paths than off for `pattern`, over phases.
-#[cfg(not(debug_assertions))]
 fn compound_within(class: SmallClass, pattern: &[(usize, usize)], percent: usize) {
     let on = compound_over_phases(class, pattern, true);
     let off = compound_over_phases(class, pattern, false);
@@ -2339,8 +2335,7 @@ fn compound_within(class: SmallClass, pattern: &[(usize, usize)], percent: usize
 /// them every repetition. From a single starting level they would also measure the luck of its
 /// phase (`compound_over_phases`).
 #[test]
-#[cfg(not(debug_assertions))]
-#[ignore = "slow: run with scripts/gate --all, optimized"]
+#[ignore = "slow: run with scripts/gate --all"]
 fn the_swing_rule_pays_for_itself_on_two_sizes() {
     let class = crate::classes::Class::of_size(1024)
         .unwrap()
@@ -2366,8 +2361,7 @@ fn the_swing_rule_pays_for_itself_on_two_sizes() {
 /// size (62/20 to 73/24), are 2.1 to 3.4% over, the cost of the rule's retries moving the phase.
 /// They are held here at 4%.
 #[test]
-#[cfg(not(debug_assertions))]
-#[ignore = "slow: run with scripts/gate --all, optimized"]
+#[ignore = "slow: run with scripts/gate --all"]
 fn the_swing_rule_pays_for_itself_on_two_sizes_widely() {
     let class = crate::classes::Class::of_size(1024)
         .unwrap()

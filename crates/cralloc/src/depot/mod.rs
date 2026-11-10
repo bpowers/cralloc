@@ -218,6 +218,10 @@ pub struct Depot {
     /// magazines rather than the back end's direct path.
     #[cfg(test)]
     refused: std::sync::atomic::AtomicUsize,
+    /// One bit per pool that anything has reached ([`Depot::pool`]). A census takes tens of
+    /// thousands of loads over the rest, which can hold nothing, and takes them every execution.
+    #[cfg(test)]
+    reached: [std::sync::atomic::AtomicU64; POOLS.div_ceil(64)],
 }
 
 /// The pools of stacks: one per cache domain and the shared one.
@@ -334,7 +338,7 @@ const _: () = assert!(
                     + lines(
                         size_of::<domain::Domains>()
                             + if cfg!(test) {
-                                2 * size_of::<usize>()
+                                2 * size_of::<usize>() + POOLS.div_ceil(64) * size_of::<u64>()
                             } else {
                                 0
                             }
@@ -364,11 +368,29 @@ impl Depot {
             created: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             refused: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            reached: [const { std::sync::atomic::AtomicU64::new(0) }; POOLS.div_ceil(64)],
         }
     }
 
     fn pool(&self, pool: Pool) -> &Stacks {
-        &self.pools[pool.index() % POOLS]
+        let index = pool.index() % POOLS;
+        // Looked at first, so that tests on real threads share the word only until each pool has
+        // been reached.
+        #[cfg(test)]
+        if !self.reached(pool) {
+            self.reached[index / 64]
+                .fetch_or(1 << (index % 64), std::sync::atomic::Ordering::Relaxed);
+        }
+        &self.pools[index]
+    }
+
+    /// Whether anything has reached `pool`. If not, its words are as [`Depot::new`] left them,
+    /// since the only way to them is [`Depot::pool`].
+    #[cfg(test)]
+    pub(crate) fn reached(&self, pool: Pool) -> bool {
+        let index = pool.index() % POOLS;
+        self.reached[index / 64].load(std::sync::atomic::Ordering::Relaxed) & 1 << (index % 64) != 0
     }
 
     /// The stack of magazines with objects of `class` in `pool`.
