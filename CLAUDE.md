@@ -34,7 +34,8 @@ process light.
   TLA+, Miri, fuzzing and the preload checks run on demand. The slow steps have time limits
   that count the time heavy work spends paused for a measurement, so on a busy machine one
   can time out (exit 124, or a proof marked FAILED with no failing check): rerun that step
-  alone with `CRALLOC_TEST_TIMEOUT` or `KANI_TIMEOUT` raised before reading it as a failure.
+  alone with `CRALLOC_TEST_TIMEOUT`, `KANI_TIMEOUT` or, under `scripts/kani-all`, `KANI_CPU`
+  raised before reading it as a failure.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
 - Timed measurements do not share cores, or a cache, with anything else. Run every build,
