@@ -109,9 +109,10 @@ the difference is that aborts add obligations at every step.
 
 ## Kani: arithmetic for every input
 
-The class function, division by a class size, the slot tests, the address space's parts, bitmap word
-operations, every packed word and marker, and the decisions of the clocked rules (`docs/design.md`,
-"What is proved, and how"). The twins too, on a slab of one magazine with an abort before any one step.
+The class function, division by a class size (but for its multiply, whose inputs are few enough for a
+test to run them all), the slot tests, the address space's parts, bitmap word operations, every
+packed word and marker, and the decisions of the clocked rules (`docs/design.md`, "What is proved, and
+how"). The twins too, on a slab of one magazine with an abort before any one step.
 
 - Kani 0.67.0 pins `nightly-2025-11-21`, so the crate keeps `rust-version = "1.92"` and the
   `Allocator` trait stays behind a feature in a thin outer layer.
@@ -119,7 +120,8 @@ operations, every packed word and marker, and the decisions of the clocked rules
 - Bounded model checking does not get through the back end's nested retry loops, so no harness
   covers a run of operations on a heap. The explorers and model tests hold that ground.
 - CBMC's memory accumulates across harnesses in one invocation, and it has taken a machine down.
-  `scripts/kani` caps it at 6 GiB, and `scripts/kani-all` runs one harness per capped scope.
+  `scripts/kani` caps it at 6 GiB, and `scripts/kani-all` runs one harness per capped scope, three
+  at a time, in a slice capped at 12 GiB. No slow harness has reached 2 GiB.
 
 ## TLA+: the protocols as designed
 
@@ -156,6 +158,13 @@ not even for tests, so we wrote two small checkers in the style of CHESS (`back/
   preemption lower than `--all` does.
 - Scenarios follow the TLA+ models and check the same invariants, with a census of every magazine
   and object after each execution (`depot/interleave.rs`, `back/models.rs`).
+- A thread is a coroutine on the test's own OS thread (`turns.rs`) where glibc has `swapcontext`, and
+  an OS thread under Miri and on musl. Only the time differs: a hand-over that sleeps and wakes costs
+  tens of microseconds on a busy machine, more than the rest of a schedule, and a `swapcontext` about
+  one. Only one runs at a time either way.
+- Each exploration keeps a fingerprint of every decision of every schedule (`fingerprint.rs`). With
+  `CRALLOC_EXPLORE_LOG` naming a file, it logs that and its count of schedules there, per test. A
+  change to an explorer's mechanism must leave both as they were.
 - They explore sequentially consistent interleavings only, whatever order an atomic names, so they
   cannot tell a right ordering from a wrong one. The words with store-then-load patterns are
   sequentially consistent, which makes those interleavings real for them. The rest is argued in
@@ -212,8 +221,20 @@ among the causes, and one file, `cells`, has had no review. That list is cleared
 
 `scripts/gate` runs in well under a minute: formatting, the generated-file checksums, the ledger
 check, lints in three feature sets and on musl, the workspace's tests, the quick Kani harnesses, and
-the musl front-end tests. `scripts/gate --all` adds every ignored test, the slow Kani harnesses and
-the release-only explorations, in many minutes, before a change to shared types or protocols.
+the musl front-end tests. `scripts/gate --all` adds every ignored test and the slow Kani harnesses,
+before a change to shared types or protocols. Its tests build in the `gate` profile (`Cargo.toml`),
+optimized with debug assertions and overflow checks on, since much of a debug build's time goes on
+code the optimizer removes.
+
+At `4cb3dda` on the M1 Max, with other work holding the load average near 73 on its ten cores,
+`scripts/gate --all` took 124 minutes, the tests 34 of them. In CPU the tests take about ten minutes
+and the proofs under 40, so a quiet machine should take about as long as the slowest harness,
+`the_fast_check_passes_exactly_the_slot_starts_below_the_limit`, whose solver needs about 14; no
+other harness needs more than about four. An exploration costs 10 to 25 µs of CPU a schedule in the
+back end and 40 to 100 in the depot, which builds its world for each, and the depot's three largest
+scenarios, 3.5 million schedules between them, are the largest part of the tests' CPU. The ordering
+tests run for 20 s each by choice. From the gate's own step times, with the load sampled every 30 s
+and each process's CPU time.
 
 On demand: `lean/scripts/check.sh` (minutes), `tla/check` (a little over an hour on three cores), `scripts/preload-check`, `scripts/preload-soak` (about 25 minutes, an hour more with
 suites), the fuzzers, and `scripts/miri` (about twelve CPU hours). Everything that runs the
