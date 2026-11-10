@@ -2043,20 +2043,20 @@ fn slot_of<O: Os, P: SlotPointer>(
 /// compare and a watermark compare. Anything else, a staggered large block included, goes to
 /// the full check.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Fast {
-    pub(super) base: usize,
-    pub(super) inverse: u64,
-    pub(super) shift: u32,
-    pub(super) limit: u64,
+struct Fast {
+    base: usize,
+    inverse: u64,
+    shift: u32,
+    limit: u64,
     /// The distance between slots, which [`stretch`] walks.
-    pub(super) stride: usize,
+    stride: usize,
 }
 
 impl Fast {
     /// The slot `object` starts if the fast check passes for it (`< limit`); otherwise some
     /// number at or above `limit`.
     #[inline(always)]
-    pub(super) fn slot(&self, object: *const u8) -> u64 {
+    fn slot(&self, object: *const u8) -> u64 {
         let n = object.addr().wrapping_sub(self.base) as u64;
         n.wrapping_mul(self.inverse).rotate_right(self.shift)
     }
@@ -2078,7 +2078,7 @@ impl Fast {
 
 /// The inverse of odd `q` modulo 2^64, by Newton's iteration: each step doubles the number of
 /// correct low bits, and `q` itself is correct to three (`q * q ≡ 1 mod 8`).
-pub(super) const fn odd_inverse(q: u64) -> u64 {
+const fn odd_inverse(q: u64) -> u64 {
     let mut x = q;
     let mut i = 0;
     while i < 5 {
@@ -2165,6 +2165,40 @@ mod tests {
     fn odd_inverses_invert() {
         for q in (1..200u64).step_by(2) {
             assert_eq!(q.wrapping_mul(odd_inverse(q)), 1, "{q}");
+        }
+    }
+
+    /// The whole of what the fast check promises, for every class and every limit a region of at
+    /// most 4 GiB can have, with bases where the addition does and does not wrap. Every slot start
+    /// gives its own slot. And nothing else passes: `Fast::slot` is one to one, since subtracting
+    /// the base, multiplying by an odd number and rotating can each be undone (Hacker's Delight,
+    /// 10-17, on [`Fast`]), so an offset that gives `k` below the limit is the one that this loop
+    /// found to give it, `k * size`. The rest of the test below holds the code to that shape: a
+    /// shift for the rotation still gives every slot start its slot here, and fails there.
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn every_slot_start_gives_its_slot_and_nothing_else_passes() {
+        for base in [0x7000_0000_0000usize, usize::MAX - (1 << 31)] {
+            for class in Class::all() {
+                let size = class.size() as u64;
+                let shift = size.trailing_zeros();
+                let q = size >> shift;
+                let inverse = odd_inverse(q);
+                assert_eq!(q.wrapping_mul(inverse), 1, "{class:?}");
+                let limit = (1u64 << 32) / size;
+                let fast = Fast {
+                    base,
+                    inverse,
+                    shift,
+                    limit,
+                    stride: class.size(),
+                };
+                for k in 0..limit {
+                    let address = base.wrapping_add((k * size) as usize);
+                    let object = core::ptr::without_provenance::<u8>(address);
+                    assert_eq!(fast.slot(object), k, "{class:?}");
+                }
+            }
         }
     }
 
