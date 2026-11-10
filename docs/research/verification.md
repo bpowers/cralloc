@@ -228,10 +228,10 @@ before a change to shared types or protocols. Its tests build in the `gate` prof
 optimized with debug assertions and overflow checks on, since much of a debug build's time goes on
 code the optimizer removes.
 
-At `4cb3dda`, with other work holding the load average near 73 on the M1 Max's ten cores, the tests of
-`scripts/gate --all` took 34 minutes, and the proofs, but for one that a test has since replaced, 75.
-In CPU the tests take about ten minutes and the proofs about 25, none more than about three, so a
-quiet machine should take about ten. An exploration costs 10 to 25 µs of CPU a schedule in the back
+At `bef7e6b`, with other work holding the load average near 19 on the M1 Max's ten cores,
+`scripts/gate --all` took 17 minutes, not counting half an hour that measurements paused it. At a load
+near 73 the tests took 34 minutes and the proofs 75. In CPU the tests take about ten minutes and the
+proofs about 25, none more than about three, so a quiet machine should take about ten. An exploration costs 10 to 25 µs of CPU a schedule in the back
 end and 40 to 100 in the depot, which builds its world for each, and the depot's three largest
 scenarios, 3.5 million schedules between them, are the largest part of the tests' CPU. The ordering
 tests run for 20 s each by choice. From the gate's own step times, with the load sampled every 30 s
