@@ -110,9 +110,10 @@ the difference is that aborts add obligations at every step.
 ## Kani: arithmetic for every input
 
 The class function, division by a class size (but for its multiply, whose inputs are few enough for a
-test to run them all), the slot tests, the address space's parts, bitmap word operations, every
-packed word and marker, and the decisions of the clocked rules (`docs/design.md`, "What is proved, and
-how"). The twins too, on a slab of one magazine with an abort before any one step.
+test to run them all, as for a launder's fast check), the slot tests, the address space's parts, bitmap
+word operations, every packed word and marker, and the decisions of the clocked rules
+(`docs/design.md`, "What is proved, and how"). The twins too, on a slab of one magazine with an abort
+before any one step.
 
 - Kani 0.67.0 pins `nightly-2025-11-21`, so the crate keeps `rust-version = "1.92"` and the
   `Allocator` trait stays behind a feature in a thin outer layer.
@@ -226,12 +227,11 @@ before a change to shared types or protocols. Its tests build in the `gate` prof
 optimized with debug assertions and overflow checks on, since much of a debug build's time goes on
 code the optimizer removes.
 
-At `4cb3dda` on the M1 Max, with other work holding the load average near 73 on its ten cores,
-`scripts/gate --all` took 124 minutes, the tests 34 of them. In CPU the tests take about ten minutes
-and the proofs under 40, so a quiet machine should take about as long as the slowest harness,
-`the_fast_check_passes_exactly_the_slot_starts_below_the_limit`, whose solver needs about 14; no
-other harness needs more than about four. An exploration costs 10 to 25 µs of CPU a schedule in the
-back end and 40 to 100 in the depot, which builds its world for each, and the depot's three largest
+At `4cb3dda`, with other work holding the load average near 73 on the M1 Max's ten cores, the tests of
+`scripts/gate --all` took 34 minutes, and the proofs, but for one that a test has since replaced, 75.
+In CPU the tests take about ten minutes and the proofs about 25, none more than about three, so a
+quiet machine should take about ten. An exploration costs 10 to 25 µs of CPU a schedule in the back
+end and 40 to 100 in the depot, which builds its world for each, and the depot's three largest
 scenarios, 3.5 million schedules between them, are the largest part of the tests' CPU. The ordering
 tests run for 20 s each by choice. From the gate's own step times, with the load sampled every 30 s
 and each process's CPU time.
